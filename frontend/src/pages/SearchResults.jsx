@@ -139,6 +139,20 @@ export default function SearchResults() {
               })}
             </div>
           )}
+
+          {/* Bottom back-to-search link */}
+          <div className="mt-10 pt-6 border-t border-dashed border-black/15 flex items-center justify-between flex-wrap gap-3">
+            <div className="te-overline text-[10px]">
+              End of {data.schedules.length} result{data.schedules.length === 1 ? "" : "s"}
+            </div>
+            <Link
+              to={`/?from=${from || ""}&to=${to || ""}&date=${date || ""}&adults=${adults}&children=${children}`}
+              className="te-btn-outline flex items-center gap-2"
+              data-testid="back-to-search-bottom"
+            >
+              <span className="font-mono text-xs">←</span> Back to Search
+            </Link>
+          </div>
         </div>
       )}
     </div>
