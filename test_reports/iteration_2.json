@@ -1,0 +1,78 @@
+{
+  "summary": "Iteration 2 testing complete. All 17 backend API tests passed (100%). All frontend features tested successfully: promo code validation/application/removal, admin promo CRUD, QR codes on PaymentCallback and BookingDetail, return-trip upsell with reversed from/to navigation.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration2_features.py",
+    "/app/test_reports/pytest/iteration2_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Promo code validation correctly normalizes codes to uppercase server-side",
+    "Discount calculation is server-side enforced in _calc_pricing function",
+    "Boarding validation is idempotent - second call returns already_boarded:true",
+    "QR codes use qrcode.react QRCodeSVG component with booking reference as value",
+    "Return-trip upsell correctly reverses from/to terminal IDs"
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration2_features.py"
+  ],
+  "success_rate": {
+    "backend": "100% (17/17 tests passed)",
+    "frontend": "100% (all UI flows working)"
+  },
+  "test_credentials": {
+    "admin": "admin@transit.my / Admin@123",
+    "seeded_promo_codes": ["WELCOME10 (10% percent)", "RAYA5 (flat RM5)"]
+  },
+  "seed_data_creation": "Backend auto-seeds promo codes on startup: WELCOME10 (10% off), RAYA5 (RM5 flat)",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration 2 features all working: (1) Promo codes - validate endpoint returns discount, admin CRUD works, booking with promo applies discount server-side, inactive codes rejected with 400; (2) QR codes - displayed on PaymentCallback (data-testid='booking-qr') and BookingDetail (data-testid='detail-qr') for confirmed bookings; (3) Boarding validation - returns passenger/seat info for confirmed bookings, marks boarded_at, idempotent; (4) Return-trip upsell - section on PaymentCallback with find-return-btn and book-return-btn, clicking book-return navigates to /search with reversed from/to.",
+  "features_tested": {
+    "backend": [
+      "POST /api/promo/validate with WELCOME10 returns 10% discount",
+      "POST /api/promo/validate with RAYA5 returns flat RM5 discount",
+      "POST /api/promo/validate with non-existent code returns 404",
+      "POST /api/promo/validate normalizes code to uppercase",
+      "GET /api/admin/promo-codes returns seeded codes (WELCOME10, RAYA5)",
+      "POST /api/admin/promo-codes creates new code",
+      "POST /api/admin/promo-codes with duplicate code returns 400",
+      "PATCH /api/admin/promo-codes/{id}?active=false toggles off",
+      "DELETE /api/admin/promo-codes/{id} removes code",
+      "Non-admin on promo CRUD returns 403",
+      "POST /api/bookings with WELCOME10 applies 10% discount server-side",
+      "POST /api/bookings with invalid promo_code returns 404",
+      "POST /api/boarding/validate with unknown reference returns {valid:false, reason:not_found}",
+      "POST /api/boarding/validate on unconfirmed booking returns {valid:false, reason:not_confirmed}",
+      "POST /api/boarding/validate with valid confirmed reference returns passenger+seat info",
+      "POST /api/boarding/validate is idempotent (second call returns already_boarded:true)",
+      "POST /api/promo/validate with inactive code returns 400"
+    ],
+    "frontend": [
+      "Passengers page shows promo input with placeholder 'ENTER CODE E.G. WELCOME10'",
+      "Passengers page: applying WELCOME10 shows discount row in sidebar",
+      "Passengers page: total updates from RM 82.50 to RM 74.25 with WELCOME10",
+      "Passengers page: Remove button reverts total to original",
+      "Passengers page: invalid promo shows error 'Promo code not found'",
+      "PaymentCallback success page renders QR code (data-testid='booking-qr')",
+      "PaymentCallback shows booking reference",
+      "PaymentCallback has return-upsell section (data-testid='return-upsell')",
+      "PaymentCallback has find-return-btn and book-return-btn",
+      "Clicking book-return navigates to /search with reversed from/to",
+      "BookingDetail renders QR code when status=confirmed (data-testid='detail-qr')",
+      "BookingDetail shows boarded_at badge when passenger has boarded",
+      "Admin page promo-codes tab shows seeded codes",
+      "Admin page: can create new promo code via form",
+      "Admin page: can toggle promo code active/off",
+      "Admin page: can delete promo code"
+    ]
+  }
+}

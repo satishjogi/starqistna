@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { QRCodeSVG } from "qrcode.react";
 import api from "../lib/api";
 
 function fmtPrice(v, ccy = "myr") {
@@ -27,9 +28,21 @@ export default function BookingDetail() {
         <div>
           <div className="te-overline">Booking reference</div>
           <div className="font-mono text-4xl font-black" data-testid="detail-reference">{b.reference}</div>
+          {b.boarded_at && (
+            <div className="inline-block mt-2 text-[10px] font-mono font-bold uppercase px-2 py-1 bg-emerald-100 text-emerald-700">
+              Boarded {new Date(b.boarded_at).toLocaleString()}
+            </div>
+          )}
         </div>
-        <div className={`text-xs font-mono font-black uppercase px-3 py-2 ${b.status === "confirmed" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
-          {b.status.replace("_", " ")}
+        <div className="flex items-center gap-4">
+          {b.status === "confirmed" && (
+            <div className="bg-white p-2 border border-black/10" data-testid="detail-qr">
+              <QRCodeSVG value={b.reference} size={112} level="M" />
+            </div>
+          )}
+          <div className={`text-xs font-mono font-black uppercase px-3 py-2 ${b.status === "confirmed" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+            {b.status.replace("_", " ")}
+          </div>
         </div>
       </div>
 
@@ -75,6 +88,12 @@ export default function BookingDetail() {
         <div className="space-y-2 text-sm">
           <div className="flex justify-between"><span>Adult × {b.pricing.adults}</span><span className="font-mono">{fmtPrice(b.pricing.adults * b.pricing.adult_fare, b.pricing.currency)}</span></div>
           <div className="flex justify-between"><span>Child × {b.pricing.children}</span><span className="font-mono">{fmtPrice(b.pricing.children * b.pricing.child_fare, b.pricing.currency)}</span></div>
+          {b.pricing.discount > 0 && (
+            <div className="flex justify-between text-emerald-700">
+              <span>Promo {b.pricing.promo?.code ? `(${b.pricing.promo.code})` : ""}</span>
+              <span className="font-mono">−{fmtPrice(b.pricing.discount, b.pricing.currency)}</span>
+            </div>
+          )}
           <div className="flex justify-between font-black text-lg mt-2"><span>TOTAL</span><span className="font-mono">{fmtPrice(b.pricing.total, b.pricing.currency)}</span></div>
         </div>
       </div>

@@ -148,11 +148,37 @@ class CreateBookingBody(BaseModel):
     passengers: List[PassengerInput]
     contact_email: EmailStr
     contact_phone: str
+    promo_code: Optional[str] = None
 
 
 class CheckoutBody(BaseModel):
     booking_id: str
     origin_url: str
+
+
+class PromoValidateBody(BaseModel):
+    code: str
+    schedule_id: str
+    passenger_count: int = Field(ge=1)
+    adults: int = Field(ge=0)
+    children: int = Field(ge=0)
+
+
+class PromoCreateBody(BaseModel):
+    code: str = Field(min_length=2, max_length=32)
+    type: Literal["percent", "flat"]
+    value: float = Field(gt=0)
+    currency: str = "myr"
+    max_uses: Optional[int] = None
+    valid_until: Optional[str] = None  # ISO date
+    active: bool = True
+    description: Optional[str] = None
+
+
+class BoardingValidateBody(BaseModel):
+    reference: str
+    gate: Optional[str] = None
+    mark_boarded: bool = True
 
 
 # ---------- Search & Terminals ----------
@@ -341,20 +367,145 @@ async def release_seats(lock_token: str):
 
 
 # ---------- Bookings ----------
-def _calc_pricing(sched: dict, passengers: List[dict]) -> dict:
+def _calc_pricing(sched: dict, passengers: List[dict], promo: Optional[dict] = None) -> dict:
     adult_fare = float(sched["adult_fare"])
     child_fare = round(adult_fare * 0.5, 2)
     adults = sum(1 for p in passengers if p["category"] == "adult")
     children = sum(1 for p in passengers if p["category"] == "child")
     subtotal = round(adults * adult_fare + children * child_fare, 2)
+
+    discount = 0.0
+    promo_info = None
+    if promo:
+        if promo["type"] == "percent":
+            discount = round(subtotal * (promo["value"] / 100.0), 2)
+        else:
+            discount = min(round(float(promo["value"]), 2), subtotal)
+        discount = max(0.0, min(discount, subtotal))
+        promo_info = {
+            "code": promo["code"],
+            "type": promo["type"],
+            "value": promo["value"],
+            "discount_amount": discount,
+        }
+
+    total = round(subtotal - discount, 2)
     return {
         "adult_fare": adult_fare,
         "child_fare": child_fare,
         "adults": adults,
         "children": children,
         "subtotal": subtotal,
-        "total": subtotal,
+        "discount": discount,
+        "promo": promo_info,
+        "total": total,
         "currency": sched.get("currency", "myr"),
+    }
+
+
+async def _find_valid_promo(code: str, currency: str) -> dict:
+    promo = await db.promo_codes.find_one({"code": code.upper().strip()}, {"_id": 0})
+    if not promo:
+        raise HTTPException(404, "Promo code not found")
+    if not promo.get("active", True):
+        raise HTTPException(400, "Promo code is inactive")
+    if promo.get("currency") and promo["currency"].lower() != currency.lower():
+        raise HTTPException(400, f"Promo code only valid for {promo['currency'].upper()}")
+    if promo.get("valid_until"):
+        try:
+            if datetime.fromisoformat(promo["valid_until"]).date() < datetime.now(timezone.utc).date():
+                raise HTTPException(400, "Promo code has expired")
+        except ValueError:
+            pass
+    if promo.get("max_uses") is not None and promo.get("used_count", 0) >= promo["max_uses"]:
+        raise HTTPException(400, "Promo code usage limit reached")
+    return promo
+
+
+# ---------- Promo Codes ----------
+@api.post("/promo/validate")
+async def validate_promo(body: PromoValidateBody):
+    sched = await db.schedules.find_one({"id": body.schedule_id}, {"_id": 0})
+    if not sched:
+        raise HTTPException(404, "Schedule not found")
+    if (body.adults + body.children) != body.passenger_count:
+        raise HTTPException(400, "Passenger breakdown mismatch")
+    promo = await _find_valid_promo(body.code, sched.get("currency", "myr"))
+    fake_pax = [{"category": "adult"}] * body.adults + [{"category": "child"}] * body.children
+    pricing = _calc_pricing(sched, fake_pax, promo)
+    return {"valid": True, "promo": pricing["promo"], "pricing": pricing}
+
+
+@api.get("/admin/promo-codes")
+async def list_promo_codes(user: dict = Depends(require_admin)):
+    items = await db.promo_codes.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return items
+
+
+@api.post("/admin/promo-codes")
+async def create_promo_code(body: PromoCreateBody, user: dict = Depends(require_admin)):
+    doc = body.model_dump()
+    doc["code"] = doc["code"].upper().strip()
+    existing = await db.promo_codes.find_one({"code": doc["code"]})
+    if existing:
+        raise HTTPException(400, "Code already exists")
+    doc["id"] = new_id()
+    doc["used_count"] = 0
+    doc["created_at"] = utcnow().isoformat()
+    await db.promo_codes.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.patch("/admin/promo-codes/{code_id}")
+async def toggle_promo_code(code_id: str, active: bool, user: dict = Depends(require_admin)):
+    result = await db.promo_codes.update_one({"id": code_id}, {"$set": {"active": active}})
+    if result.matched_count == 0:
+        raise HTTPException(404, "Promo code not found")
+    return {"updated": True}
+
+
+@api.delete("/admin/promo-codes/{code_id}")
+async def delete_promo_code(code_id: str, user: dict = Depends(require_admin)):
+    result = await db.promo_codes.delete_one({"id": code_id})
+    if result.deleted_count == 0:
+        raise HTTPException(404, "Promo code not found")
+    return {"deleted": True}
+
+
+# ---------- Boarding gate validation (for existing QR readers) ----------
+@api.post("/boarding/validate")
+async def boarding_validate(body: BoardingValidateBody):
+    """Endpoint for existing gate-scanners. QR encodes only the booking `reference` (plain text).
+    The scanner posts the reference here; we return booking details and atomically mark as boarded."""
+    ref = body.reference.strip().upper()
+    booking = await db.bookings.find_one({"reference": ref}, {"_id": 0})
+    if not booking:
+        return {"valid": False, "reason": "not_found", "reference": ref}
+    if booking.get("status") != "confirmed":
+        return {"valid": False, "reason": "not_confirmed", "status": booking.get("status"), "reference": ref}
+    sched = await db.schedules.find_one({"id": booking["schedule_id"]}, {"_id": 0})
+    # Already boarded?
+    already = bool(booking.get("boarded_at"))
+    if body.mark_boarded and not already:
+        await db.bookings.update_one(
+            {"reference": ref},
+            {"$set": {"boarded_at": utcnow().isoformat(), "boarded_gate": body.gate}},
+        )
+        booking["boarded_at"] = utcnow().isoformat()
+        booking["boarded_gate"] = body.gate
+    return {
+        "valid": True,
+        "already_boarded": already,
+        "reference": ref,
+        "schedule": sched,
+        "passengers": booking.get("passengers", []),
+        "seats": booking.get("seats", []),
+        "from_terminal_id": booking.get("from_terminal_id"),
+        "to_terminal_id": booking.get("to_terminal_id"),
+        "departure_date": booking.get("departure_date"),
+        "departure_time": booking.get("departure_time"),
+        "boarded_at": booking.get("boarded_at"),
     }
 
 
@@ -378,7 +529,10 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
     if missing:
         raise HTTPException(409, detail={"message": "Seat locks missing or expired", "seats": missing})
 
-    pricing = _calc_pricing(sched, [p.model_dump() for p in body.passengers])
+    pricing_promo = None
+    if body.promo_code:
+        pricing_promo = await _find_valid_promo(body.promo_code, sched.get("currency", "myr"))
+    pricing = _calc_pricing(sched, [p.model_dump() for p in body.passengers], pricing_promo)
 
     booking_id = new_id()
     # Build passenger <-> seat mapping
@@ -519,22 +673,30 @@ async def payment_status(session_id: str, request: Request):
 
     # Finalize booking idempotently
     if check.payment_status == "paid" and not txn.get("booking_finalized"):
-        booking_id = txn["booking_id"]
-        # mark seat locks as booked
-        await db.seat_locks.update_many(
-            {"booking_id": booking_id, "status": "locked"},
-            {"$set": {"status": "booked", "expires_at": None}},
-        )
-        await db.bookings.update_one(
-            {"id": booking_id},
-            {"$set": {"status": "confirmed", "payment_status": "paid", "paid_at": utcnow().isoformat()}},
-        )
-        await db.payment_transactions.update_one(
-            {"session_id": session_id}, {"$set": {"booking_finalized": True}}
-        )
+        await _finalize_booking(txn["booking_id"], session_id)
 
     booking = await db.bookings.find_one({"id": txn["booking_id"]}, {"_id": 0})
     return {"payment_status": check.payment_status, "status": check.status, "booking": booking}
+
+
+async def _finalize_booking(booking_id: str, session_id: str):
+    """Idempotent: mark seats booked, confirm booking, increment promo use, mark txn finalized."""
+    await db.seat_locks.update_many(
+        {"booking_id": booking_id, "status": "locked"},
+        {"$set": {"status": "booked", "expires_at": None}},
+    )
+    await db.bookings.update_one(
+        {"id": booking_id},
+        {"$set": {"status": "confirmed", "payment_status": "paid", "paid_at": utcnow().isoformat()}},
+    )
+    booking = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    promo = (booking or {}).get("pricing", {}).get("promo")
+    if promo and promo.get("code"):
+        await db.promo_codes.update_one({"code": promo["code"]}, {"$inc": {"used_count": 1}})
+    await db.payment_transactions.update_one(
+        {"session_id": session_id},
+        {"$set": {"booking_finalized": True, "payment_status": "paid", "status": "complete"}},
+    )
 
 
 @api.post("/webhook/stripe")
@@ -552,18 +714,7 @@ async def stripe_webhook(request: Request):
     if event.payment_status == "paid" and event.session_id:
         txn = await db.payment_transactions.find_one({"session_id": event.session_id})
         if txn and not txn.get("booking_finalized"):
-            await db.seat_locks.update_many(
-                {"booking_id": txn["booking_id"], "status": "locked"},
-                {"$set": {"status": "booked", "expires_at": None}},
-            )
-            await db.bookings.update_one(
-                {"id": txn["booking_id"]},
-                {"$set": {"status": "confirmed", "payment_status": "paid", "paid_at": utcnow().isoformat()}},
-            )
-            await db.payment_transactions.update_one(
-                {"session_id": event.session_id},
-                {"$set": {"booking_finalized": True, "payment_status": "paid", "status": "complete"}},
-            )
+            await _finalize_booking(txn["booking_id"], event.session_id)
     return {"ok": True}
 
 
@@ -729,7 +880,25 @@ async def _seed_admin():
             "created_at": utcnow().isoformat(),
         }
     )
-    logger.info("Seeded admin user admin@transit.test / Admin@123")
+    logger.info("Seeded admin user admin@transit.my / Admin@123")
+
+
+async def _seed_promos():
+    if await db.promo_codes.count_documents({}) > 0:
+        return
+    samples = [
+        {"code": "WELCOME10", "type": "percent", "value": 10, "currency": "myr",
+         "max_uses": 1000, "valid_until": None, "active": True,
+         "description": "10% off any booking"},
+        {"code": "RAYA5", "type": "flat", "value": 5, "currency": "myr",
+         "max_uses": None, "valid_until": None, "active": True,
+         "description": "RM 5 off any booking"},
+    ]
+    for s in samples:
+        await db.promo_codes.insert_one(
+            {**s, "id": new_id(), "used_count": 0, "created_at": utcnow().isoformat()}
+        )
+    logger.info("Seeded %d promo codes", len(samples))
 
 
 async def _ensure_indexes():
@@ -749,6 +918,7 @@ async def _ensure_indexes():
         [("from_terminal_id", ASCENDING), ("to_terminal_id", ASCENDING), ("departure_date", ASCENDING)]
     )
     await db.payment_transactions.create_index([("session_id", ASCENDING)], unique=True)
+    await db.promo_codes.create_index([("code", ASCENDING)], unique=True)
 
 
 @api.get("/")
@@ -778,6 +948,7 @@ async def on_start():
     await _seed_terminals()
     await _seed_admin()
     await _seed_schedules()
+    await _seed_promos()
     logger.info("Transit E1 startup complete")
 
 

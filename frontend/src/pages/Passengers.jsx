@@ -27,6 +27,12 @@ export default function Passengers() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  // Promo code state
+  const [promoInput, setPromoInput] = useState("");
+  const [promo, setPromo] = useState(null); // {code,type,value,discount_amount}
+  const [promoError, setPromoError] = useState("");
+  const [promoLoading, setPromoLoading] = useState(false);
+
   if (!flow?.schedule_id) {
     return <div className="p-10">Session expired. <a href="/" className="underline">Start over</a></div>;
   }
@@ -36,6 +42,31 @@ export default function Passengers() {
     copy[i][key] = val;
     setPassengers(copy);
   };
+
+  const applyPromo = async () => {
+    setPromoError("");
+    if (!promoInput.trim()) return;
+    setPromoLoading(true);
+    try {
+      const adults = passengers.filter((p) => p.category === "adult").length;
+      const children = passengers.filter((p) => p.category === "child").length;
+      const { data } = await api.post("/promo/validate", {
+        code: promoInput.trim(),
+        schedule_id: flow.schedule_id,
+        passenger_count: passengers.length,
+        adults,
+        children,
+      });
+      setPromo(data.promo);
+    } catch (e) {
+      setPromo(null);
+      setPromoError(e?.response?.data?.detail || "Invalid promo code");
+    } finally {
+      setPromoLoading(false);
+    }
+  };
+
+  const removePromo = () => { setPromo(null); setPromoInput(""); setPromoError(""); };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -52,6 +83,7 @@ export default function Passengers() {
         passengers: passengers.map((p) => ({ name: p.name, category: p.category, ic_or_passport: p.ic_or_passport })),
         contact_email: email,
         contact_phone: phone,
+        promo_code: promo?.code || undefined,
       };
       const { data: booking } = await api.post("/bookings", body);
       setFlow({ ...flow, booking });
@@ -125,6 +157,42 @@ export default function Passengers() {
               </div>
             )}
           </div>
+
+          <div className="te-card p-6">
+            <div className="te-overline mb-3">Promo code</div>
+            {!promo ? (
+              <div className="flex gap-2">
+                <input
+                  className="te-input flex-1 font-mono uppercase"
+                  placeholder="Enter code e.g. WELCOME10"
+                  value={promoInput}
+                  onChange={(e) => setPromoInput(e.target.value.toUpperCase())}
+                  data-testid="promo-input"
+                />
+                <button
+                  type="button"
+                  onClick={applyPromo}
+                  disabled={promoLoading || !promoInput.trim()}
+                  className="te-btn-outline disabled:opacity-40"
+                  data-testid="promo-apply-btn"
+                >
+                  {promoLoading ? "Checking…" : "Apply"}
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between border border-emerald-300 bg-emerald-50 px-4 py-3 rounded-sm" data-testid="promo-applied">
+                <div>
+                  <div className="font-mono font-black text-sm">{promo.code}</div>
+                  <div className="text-[10px] font-mono text-emerald-700">
+                    {promo.type === "percent" ? `${promo.value}% off` : `Flat ${promo.value} off`} · −{fmtPrice(promo.discount_amount, s.currency)}
+                  </div>
+                </div>
+                <button type="button" onClick={removePromo} className="text-xs font-bold text-emerald-700 underline" data-testid="promo-remove-btn">Remove</button>
+              </div>
+            )}
+            {promoError && <div className="text-xs font-bold text-red-600 mt-2" data-testid="promo-error">{promoError}</div>}
+            <div className="text-[10px] font-mono text-zinc-500 mt-2">TRY: WELCOME10 · RAYA5</div>
+          </div>
         </div>
 
         <div className="lg:col-span-4">
@@ -142,15 +210,26 @@ export default function Passengers() {
               ))}
             </div>
             <div className="te-divider-dashed my-4" />
-            <div className="flex justify-between font-black text-xl">
-              <span>TOTAL</span>
-              <span className="font-mono" data-testid="passengers-total">
-                {fmtPrice(
-                  passengers.reduce((acc, p) => acc + (p.category === "adult" ? s.adult_fare : s.adult_fare * 0.5), 0),
-                  s.currency
-                )}
-              </span>
-            </div>
+            {(() => {
+              const subtotal = passengers.reduce((acc, p) => acc + (p.category === "adult" ? s.adult_fare : s.adult_fare * 0.5), 0);
+              const discount = promo?.discount_amount || 0;
+              const total = Math.max(0, subtotal - discount);
+              return (
+                <>
+                  <div className="flex justify-between text-sm"><span>Subtotal</span><span className="font-mono">{fmtPrice(subtotal, s.currency)}</span></div>
+                  {discount > 0 && (
+                    <div className="flex justify-between text-sm text-emerald-700 mt-1" data-testid="summary-discount-row">
+                      <span>Promo ({promo.code})</span>
+                      <span className="font-mono">−{fmtPrice(discount, s.currency)}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between font-black text-xl mt-3">
+                    <span>TOTAL</span>
+                    <span className="font-mono" data-testid="passengers-total">{fmtPrice(total, s.currency)}</span>
+                  </div>
+                </>
+              );
+            })()}
             {error && <div className="mt-4 text-xs font-bold text-red-600" data-testid="passengers-error">{error}</div>}
             <button className="te-btn-accent w-full mt-5 disabled:opacity-40" disabled={loading} data-testid="pay-now-btn">
               {loading ? "Redirecting to payment…" : "Pay now →"}

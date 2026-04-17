@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useSearchParams, useNavigate } from "react-router-dom";
+import { QRCodeSVG } from "qrcode.react";
 import api from "../lib/api";
 import { clearFlow } from "../lib/booking-store";
 
@@ -64,9 +65,15 @@ export default function PaymentCallback() {
           <h1 className="text-4xl md:text-5xl font-black tracking-tight">Seat secured.</h1>
           <p className="text-zinc-600 mt-3">Your ticket has been issued. A copy was sent to {booking.contact_email}.</p>
 
-          <div className="mt-8 bg-[#F4F4F5] border-l-4 border-[#002FA7] p-6">
-            <div className="te-overline">Booking reference</div>
-            <div className="font-mono text-3xl font-black mt-1" data-testid="booking-reference">{booking.reference}</div>
+          <div className="mt-8 bg-[#F4F4F5] border-l-4 border-[#002FA7] p-6 flex flex-col sm:flex-row sm:items-center gap-6">
+            <div className="flex-1">
+              <div className="te-overline">Booking reference</div>
+              <div className="font-mono text-3xl font-black mt-1" data-testid="booking-reference">{booking.reference}</div>
+              <div className="text-xs text-zinc-600 mt-2">Scan the QR at the boarding gate.</div>
+            </div>
+            <div className="bg-white p-3 border border-black/10" data-testid="booking-qr">
+              <QRCodeSVG value={booking.reference} size={128} level="M" />
+            </div>
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6 text-sm">
@@ -90,7 +97,10 @@ export default function PaymentCallback() {
             </div>
           </div>
 
-          <div className="mt-8 flex gap-3">
+          {/* Return-trip upsell */}
+          <ReturnUpsell booking={booking} />
+
+          <div className="mt-8 flex gap-3 flex-wrap">
             <Link to={`/bookings/${booking.id}`} className="te-btn-primary" data-testid="view-booking-btn">View booking</Link>
             <Link to="/" className="te-btn-outline">Back home</Link>
           </div>
@@ -111,6 +121,81 @@ export default function PaymentCallback() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+
+function ReturnUpsell({ booking }) {
+  const navigate = useNavigate();
+  const [loading, setLoading] = useState(false);
+  const [avail, setAvail] = useState(null);
+  const today = new Date().toISOString().slice(0, 10);
+  const minReturn = booking.departure_date > today ? booking.departure_date : today;
+  const [returnDate, setReturnDate] = useState(minReturn);
+
+  const findReturn = async () => {
+    setLoading(true);
+    try {
+      const { data } = await api.get("/search", {
+        params: {
+          from_terminal_id: booking.to_terminal_id,
+          to_terminal_id: booking.from_terminal_id,
+          date: returnDate,
+        },
+      });
+      setAvail(data);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const bookReturn = () => {
+    // Reuse the same passenger split as the outbound booking
+    const adults = booking.pricing.adults;
+    const children = booking.pricing.children;
+    const p = new URLSearchParams({
+      from: booking.to_terminal_id,
+      to: booking.from_terminal_id,
+      date: returnDate,
+      adults: String(adults),
+      children: String(children),
+    });
+    navigate(`/search?${p.toString()}`);
+  };
+
+  return (
+    <div className="mt-10 border-2 border-dashed border-[#002FA7]/30 p-6" data-testid="return-upsell">
+      <div className="te-overline text-[#002FA7]">Heading back?</div>
+      <div className="flex flex-wrap items-center gap-3 mt-3">
+        <h2 className="text-2xl font-black tracking-tight flex-1">
+          Book your return trip — {booking.to?.city || "destination"} → {booking.from?.city || "origin"}
+        </h2>
+      </div>
+      <div className="mt-4 flex flex-wrap items-end gap-3">
+        <div>
+          <label className="te-label">Return date</label>
+          <input
+            type="date"
+            className="te-input"
+            min={minReturn}
+            value={returnDate}
+            onChange={(e) => setReturnDate(e.target.value)}
+            data-testid="return-date"
+          />
+        </div>
+        <button onClick={findReturn} disabled={loading} className="te-btn-outline" data-testid="find-return-btn">
+          {loading ? "Searching…" : "Find buses"}
+        </button>
+        {avail && (
+          <div className="text-xs font-mono text-zinc-600">
+            {avail.schedules.length} departures available
+          </div>
+        )}
+        <button onClick={bookReturn} className="te-btn-accent ml-auto" data-testid="book-return-btn">
+          Book return →
+        </button>
+      </div>
     </div>
   );
 }

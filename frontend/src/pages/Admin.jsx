@@ -10,12 +10,17 @@ export default function Admin() {
   const [bookings, setBookings] = useState([]);
   const [schedules, setSchedules] = useState([]);
   const [terminals, setTerminals] = useState([]);
+  const [promos, setPromos] = useState([]);
   const [tab, setTab] = useState("bookings");
   const [form, setForm] = useState({
     from_terminal_id: "", to_terminal_id: "", departure_date: "", departure_time: "08:00", arrival_time: "12:00",
     bus_operator: "Transnasional", bus_type: "Standard", adult_fare: 50, rows: 10, currency: "myr",
   });
+  const [promoForm, setPromoForm] = useState({
+    code: "", type: "percent", value: 10, currency: "myr", max_uses: "", valid_until: "", description: "",
+  });
   const [msg, setMsg] = useState("");
+  const [promoMsg, setPromoMsg] = useState("");
 
   useEffect(() => {
     if (!loading && (!user || !user.is_admin)) navigate("/");
@@ -26,6 +31,7 @@ export default function Admin() {
     api.get("/admin/bookings").then(({ data }) => setBookings(data)).catch(() => {});
     api.get("/admin/schedules").then(({ data }) => setSchedules(data)).catch(() => {});
     api.get("/terminals").then(({ data }) => setTerminals(data.all)).catch(() => {});
+    api.get("/admin/promo-codes").then(({ data }) => setPromos(data)).catch(() => {});
   };
 
   useEffect(() => {
@@ -42,6 +48,39 @@ export default function Admin() {
     } catch (e) {
       setMsg(e?.response?.data?.detail || "Failed");
     }
+  };
+
+  const createPromo = async (e) => {
+    e.preventDefault();
+    setPromoMsg("");
+    try {
+      const payload = {
+        code: promoForm.code.trim().toUpperCase(),
+        type: promoForm.type,
+        value: parseFloat(promoForm.value),
+        currency: promoForm.currency,
+        description: promoForm.description || undefined,
+        max_uses: promoForm.max_uses ? parseInt(promoForm.max_uses) : undefined,
+        valid_until: promoForm.valid_until || undefined,
+      };
+      await api.post("/admin/promo-codes", payload);
+      setPromoMsg("Code created.");
+      setPromoForm({ code: "", type: "percent", value: 10, currency: "myr", max_uses: "", valid_until: "", description: "" });
+      loadAll();
+    } catch (e) {
+      setPromoMsg(e?.response?.data?.detail || "Failed");
+    }
+  };
+
+  const togglePromo = async (p) => {
+    await api.patch(`/admin/promo-codes/${p.id}?active=${!p.active}`);
+    loadAll();
+  };
+
+  const deletePromo = async (p) => {
+    if (!window.confirm(`Delete code ${p.code}?`)) return;
+    await api.delete(`/admin/promo-codes/${p.id}`);
+    loadAll();
   };
 
   if (!user?.is_admin) return null;
@@ -66,15 +105,15 @@ export default function Admin() {
         ))}
       </div>
 
-      <div className="mt-10 flex gap-1 border-b border-black/10">
-        {["bookings", "schedules", "add-schedule"].map((t) => (
+      <div className="mt-10 flex gap-1 border-b border-black/10 flex-wrap">
+        {["bookings", "schedules", "add-schedule", "promo-codes"].map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
             className={`px-4 py-2 text-xs font-bold uppercase tracking-wider ${tab === t ? "bg-black text-white" : "text-zinc-500"}`}
             data-testid={`admin-tab-${t}`}
           >
-            {t.replace("-", " ")}
+            {t.replace(/-/g, " ")}
           </button>
         ))}
       </div>
@@ -144,6 +183,84 @@ export default function Admin() {
             {msg && <div className="text-xs font-bold">{msg}</div>}
           </div>
         </form>
+      )}
+
+      {tab === "promo-codes" && (
+        <div className="mt-6 grid grid-cols-1 lg:grid-cols-5 gap-6">
+          <div className="lg:col-span-2">
+            <form onSubmit={createPromo} className="te-card p-6 space-y-4" data-testid="add-promo-form">
+              <div className="te-overline">Create promo code</div>
+              <div>
+                <label className="te-label">Code</label>
+                <input required className="te-input font-mono uppercase" value={promoForm.code} onChange={(e) => setPromoForm({ ...promoForm, code: e.target.value.toUpperCase() })} data-testid="promo-form-code" />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="te-label">Type</label>
+                  <select className="te-input" value={promoForm.type} onChange={(e) => setPromoForm({ ...promoForm, type: e.target.value })}>
+                    <option value="percent">Percent %</option>
+                    <option value="flat">Flat amount</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="te-label">Value</label>
+                  <input type="number" min="1" step="0.01" required className="te-input" value={promoForm.value} onChange={(e) => setPromoForm({ ...promoForm, value: e.target.value })} data-testid="promo-form-value" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="te-label">Currency</label>
+                  <select className="te-input" value={promoForm.currency} onChange={(e) => setPromoForm({ ...promoForm, currency: e.target.value })}>
+                    <option value="myr">MYR</option>
+                    <option value="sgd">SGD</option>
+                    <option value="usd">USD</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="te-label">Max uses (blank = ∞)</label>
+                  <input type="number" min="1" className="te-input" value={promoForm.max_uses} onChange={(e) => setPromoForm({ ...promoForm, max_uses: e.target.value })} />
+                </div>
+              </div>
+              <div>
+                <label className="te-label">Valid until (optional)</label>
+                <input type="date" className="te-input" value={promoForm.valid_until} onChange={(e) => setPromoForm({ ...promoForm, valid_until: e.target.value })} />
+              </div>
+              <div>
+                <label className="te-label">Description</label>
+                <input className="te-input" value={promoForm.description} onChange={(e) => setPromoForm({ ...promoForm, description: e.target.value })} />
+              </div>
+              <button className="te-btn-primary w-full" data-testid="promo-form-submit">Create code</button>
+              {promoMsg && <div className="text-xs font-bold">{promoMsg}</div>}
+            </form>
+          </div>
+          <div className="lg:col-span-3">
+            <div className="te-overline mb-2">Active codes</div>
+            <div className="space-y-2">
+              {promos.length === 0 && <div className="text-sm text-zinc-500 te-card p-5">No codes yet.</div>}
+              {promos.map((p) => (
+                <div key={p.id} className="te-card p-4 grid grid-cols-6 gap-2 items-center" data-testid={`promo-row-${p.code}`}>
+                  <div className="col-span-2">
+                    <div className="font-mono font-black">{p.code}</div>
+                    <div className="text-[10px] text-zinc-500">{p.description}</div>
+                  </div>
+                  <div className="font-mono text-sm">
+                    {p.type === "percent" ? `${p.value}%` : `${p.currency.toUpperCase()} ${Number(p.value).toFixed(2)}`}
+                  </div>
+                  <div className="font-mono text-xs">{p.used_count || 0}{p.max_uses ? ` / ${p.max_uses}` : ""}</div>
+                  <div className="font-mono text-xs">{p.valid_until || "∞"}</div>
+                  <div className="flex gap-2 justify-end">
+                    <button onClick={() => togglePromo(p)} className={`text-[10px] px-2 py-1 font-bold uppercase border ${p.active ? "bg-emerald-100 border-emerald-300 text-emerald-700" : "bg-zinc-100 border-black/20 text-zinc-500"}`} data-testid={`promo-toggle-${p.code}`}>
+                      {p.active ? "active" : "off"}
+                    </button>
+                    <button onClick={() => deletePromo(p)} className="text-[10px] px-2 py-1 font-bold uppercase border border-red-200 text-red-600 hover:bg-red-50" data-testid={`promo-delete-${p.code}`}>
+                      delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
