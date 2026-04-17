@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import api from "../lib/api";
 
 const HERO_BG = "https://images.unsplash.com/photo-1544620347-1959828a2a7d?q=80&w=2000&auto=format&fit=crop";
@@ -91,13 +91,32 @@ function TerminalSelect({ label, value, onChange, testId, exclude }) {
 
 export default function Home() {
   const navigate = useNavigate();
+  const [params] = useSearchParams();
   const [from, setFrom] = useState(null);
   const [to, setTo] = useState(null);
   const today = new Date().toISOString().slice(0, 10);
-  const [date, setDate] = useState(today);
-  const [adults, setAdults] = useState(1);
-  const [children, setChildren] = useState(0);
+  const [date, setDate] = useState(params.get("date") || today);
+  const [adults, setAdults] = useState(parseInt(params.get("adults") || "1"));
+  const [children, setChildren] = useState(parseInt(params.get("children") || "0"));
   const [error, setError] = useState("");
+
+  // Prefill from/to terminals when URL params present (e.g. after "Modify search")
+  useEffect(() => {
+    const fromId = params.get("from");
+    const toId = params.get("to");
+    if (!fromId && !toId) return;
+    api.get("/terminals").then(({ data }) => {
+      if (fromId) {
+        const f = data.all.find((t) => t.id === fromId);
+        if (f) setFrom(f);
+      }
+      if (toId) {
+        const t = data.all.find((x) => x.id === toId);
+        if (t) setTo(t);
+      }
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const submit = (e) => {
     e.preventDefault();

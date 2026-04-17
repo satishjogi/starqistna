@@ -47,7 +47,13 @@ export default function SearchResults() {
     <div className="px-6 md:px-12 lg:px-20 py-10 min-h-[60vh]">
       {/* Breadcrumb header */}
       <div className="mb-8">
-        <Link to="/" className="text-xs font-mono text-zinc-500 hover:text-black" data-testid="back-home">← MODIFY SEARCH</Link>
+        <Link
+          to={`/?from=${from || ""}&to=${to || ""}&date=${date || ""}&adults=${adults}&children=${children}`}
+          className="text-xs font-mono text-zinc-500 hover:text-black"
+          data-testid="back-home"
+        >
+          ← MODIFY SEARCH
+        </Link>
         {data?.from && data?.to && (
           <div className="mt-4 flex flex-wrap items-end gap-6">
             <div>
