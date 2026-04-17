@@ -1,0 +1,248 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import api from "../lib/api";
+
+const HERO_BG = "https://images.unsplash.com/photo-1544620347-1959828a2a7d?q=80&w=2000&auto=format&fit=crop";
+
+function TerminalSelect({ label, value, onChange, testId, exclude }) {
+  const [open, setOpen] = useState(false);
+  const [grouped, setGrouped] = useState([]);
+  const [q, setQ] = useState("");
+
+  useEffect(() => {
+    api.get("/terminals").then(({ data }) => setGrouped(data.grouped)).catch(() => {});
+  }, []);
+
+  const filtered = useMemo(() => {
+    if (!q) return grouped;
+    const lower = q.toLowerCase();
+    return grouped
+      .map((g) => ({
+        ...g,
+        terminals: g.terminals.filter(
+          (t) =>
+            t.name.toLowerCase().includes(lower) ||
+            t.city.toLowerCase().includes(lower) ||
+            t.code.toLowerCase().includes(lower)
+        ),
+      }))
+      .filter((g) => g.terminals.length > 0);
+  }, [q, grouped]);
+
+  return (
+    <div className="relative">
+      <label className="te-label">{label}</label>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full text-left px-4 py-4 bg-white border border-black/15 hover:border-[#002FA7] transition-colors rounded-sm"
+        data-testid={testId}
+      >
+        {value ? (
+          <div>
+            <div className="font-bold">{value.city}</div>
+            <div className="text-xs text-zinc-500 font-mono">{value.code} · {value.name}</div>
+          </div>
+        ) : (
+          <div className="text-zinc-400">Select terminal</div>
+        )}
+      </button>
+      {open && (
+        <div className="absolute z-40 top-[calc(100%+4px)] left-0 right-0 bg-white border border-black/15 shadow-xl rounded-sm max-h-96 overflow-auto">
+          <div className="p-3 border-b border-black/10 sticky top-0 bg-white">
+            <input
+              className="te-input"
+              placeholder="Search city or terminal…"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              data-testid={`${testId}-search`}
+              autoFocus
+            />
+          </div>
+          {filtered.map((g) => (
+            <div key={g.city}>
+              <div className="px-4 pt-3 pb-1 te-overline text-[10px]">{g.city}</div>
+              {g.terminals.map((t) => {
+                const disabled = exclude && exclude.id === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => { onChange(t); setOpen(false); setQ(""); }}
+                    className={`w-full text-left px-4 py-3 hover:bg-zinc-50 border-b border-black/5 flex items-center justify-between ${disabled ? "opacity-40 cursor-not-allowed" : ""}`}
+                    data-testid={`${testId}-opt-${t.code}`}
+                  >
+                    <div>
+                      <div className="text-sm font-semibold">{t.name}</div>
+                      <div className="text-[10px] font-mono text-zinc-500 tracking-wider">{t.code} · {t.state}</div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+          {filtered.length === 0 && <div className="p-6 text-sm text-zinc-500 text-center">No terminals found</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function Home() {
+  const navigate = useNavigate();
+  const [from, setFrom] = useState(null);
+  const [to, setTo] = useState(null);
+  const today = new Date().toISOString().slice(0, 10);
+  const [date, setDate] = useState(today);
+  const [adults, setAdults] = useState(1);
+  const [children, setChildren] = useState(0);
+  const [error, setError] = useState("");
+
+  const submit = (e) => {
+    e.preventDefault();
+    setError("");
+    if (!from || !to) return setError("Please select both departure and arrival terminals.");
+    if (from.id === to.id) return setError("Departure and arrival cannot be the same.");
+    if (adults + children < 1) return setError("At least one passenger is required.");
+    const params = new URLSearchParams({
+      from: from.id,
+      to: to.id,
+      date,
+      adults: String(adults),
+      children: String(children),
+    });
+    navigate(`/search?${params.toString()}`);
+  };
+
+  return (
+    <div>
+      {/* Hero */}
+      <section className="relative overflow-hidden border-b border-black/10">
+        <div className="absolute inset-0 -z-10 hero-grid" />
+        <div className="absolute inset-0 -z-20">
+          <img src={HERO_BG} alt="" className="w-full h-full object-cover opacity-10" />
+        </div>
+        <div className="px-6 md:px-12 lg:px-20 pt-16 pb-24">
+          <div className="grid grid-cols-12 gap-4 items-end">
+            <div className="col-span-12 lg:col-span-7">
+              <div className="te-overline mb-4" data-testid="hero-overline">System 01 · Inter-city Buses</div>
+              <h1 className="text-5xl sm:text-6xl lg:text-7xl font-black tracking-tighter leading-[0.9]">
+                Book the bus.<br/>
+                <span className="text-[#FF4500]">Keep the seat.</span>
+              </h1>
+              <p className="mt-6 text-lg text-zinc-600 max-w-xl">
+                Scheduled inter-city buses across Malaysia & Singapore. Real seat locks. No overbooking. Pay with card — iPay88 coming soon.
+              </p>
+            </div>
+            <div className="col-span-12 lg:col-span-5 hidden lg:flex items-end justify-end">
+              <div className="font-mono text-[10px] text-zinc-500 tracking-wider text-right">
+                <div className="mb-1">ACTIVE TERMINALS · 14</div>
+                <div className="mb-1">DAILY SCHEDULES · 500+</div>
+                <div>DOUBLE-BOOK PROTECTED · YES</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Search form — dense control-board style */}
+          <form onSubmit={submit} className="mt-12 bg-black p-[2px] rounded-sm" data-testid="search-form">
+            <div className="grid grid-cols-12 gap-[2px]">
+              <div className="col-span-12 md:col-span-4 bg-white p-5">
+                <TerminalSelect label="From" value={from} onChange={setFrom} testId="from-terminal" exclude={to} />
+              </div>
+              <div className="col-span-12 md:col-span-4 bg-white p-5">
+                <TerminalSelect label="To" value={to} onChange={setTo} testId="to-terminal" exclude={from} />
+              </div>
+              <div className="col-span-6 md:col-span-2 bg-white p-5">
+                <label className="te-label">Date</label>
+                <input
+                  type="date"
+                  className="te-input"
+                  value={date}
+                  min={today}
+                  onChange={(e) => setDate(e.target.value)}
+                  data-testid="search-date"
+                />
+              </div>
+              <div className="col-span-6 md:col-span-2 bg-white p-5">
+                <label className="te-label">Passengers</label>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1">
+                    <div className="text-[9px] font-mono text-zinc-500">ADULT</div>
+                    <div className="flex items-center gap-1 mt-1">
+                      <button type="button" onClick={() => setAdults(Math.max(1, adults - 1))} className="w-7 h-7 border border-black/20 rounded-sm font-bold" data-testid="adult-minus">−</button>
+                      <div className="flex-1 text-center font-mono font-bold" data-testid="adult-count">{adults}</div>
+                      <button type="button" onClick={() => setAdults(Math.min(10, adults + 1))} className="w-7 h-7 border border-black/20 rounded-sm font-bold" data-testid="adult-plus">+</button>
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-[9px] font-mono text-zinc-500">CHILD</div>
+                    <div className="flex items-center gap-1 mt-1">
+                      <button type="button" onClick={() => setChildren(Math.max(0, children - 1))} className="w-7 h-7 border border-black/20 rounded-sm font-bold" data-testid="child-minus">−</button>
+                      <div className="flex-1 text-center font-mono font-bold" data-testid="child-count">{children}</div>
+                      <button type="button" onClick={() => setChildren(Math.min(10, children + 1))} className="w-7 h-7 border border-black/20 rounded-sm font-bold" data-testid="child-plus">+</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="bg-white p-4 flex items-center justify-between flex-wrap gap-3">
+              <div className="text-xs font-mono text-zinc-500">CHILD FARE · 50% OF ADULT · AUTO-CALCULATED</div>
+              {error && <div className="text-xs font-bold text-red-600" data-testid="search-error">{error}</div>}
+              <button type="submit" className="te-btn-accent" data-testid="search-submit-btn">
+                Search Buses →
+              </button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      {/* Features */}
+      <section className="px-6 md:px-12 lg:px-20 py-20">
+        <div className="te-overline mb-3">How it works</div>
+        <h2 className="text-3xl md:text-5xl font-black tracking-tight max-w-2xl">Three clicks to a confirmed seat.</h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-[1px] mt-12 bg-black/10 border border-black/10">
+          {[
+            { n: "01", t: "Search", d: "Pick your departure terminal (with sub-terminals), destination and date." },
+            { n: "02", t: "Select seats", d: "Our seat map locks your selection for 10 minutes. No double-booking possible." },
+            { n: "03", t: "Pay securely", d: "Pay by card via Stripe. Tickets delivered instantly with reference code." },
+          ].map((s) => (
+            <div key={s.n} className="bg-white p-8">
+              <div className="font-mono text-xs text-[#FF4500] tracking-wider">{s.n}</div>
+              <h3 className="text-2xl font-black mt-4">{s.t}</h3>
+              <p className="text-sm text-zinc-600 mt-3">{s.d}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* Popular routes strip */}
+      <section className="border-t border-b border-black/10 bg-zinc-50 overflow-hidden">
+        <div className="px-6 md:px-12 lg:px-20 py-10">
+          <div className="te-overline mb-3">Popular routes</div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
+            {[
+              ["KUALA LUMPUR", "PENANG"],
+              ["KUALA LUMPUR", "SINGAPORE"],
+              ["KUALA LUMPUR", "JOHOR BAHRU"],
+              ["KUALA LUMPUR", "MELAKA"],
+              ["PENANG", "KUALA LUMPUR"],
+              ["SINGAPORE", "KUALA LUMPUR"],
+              ["JOHOR BAHRU", "KUALA LUMPUR"],
+              ["KUALA LUMPUR", "IPOH"],
+            ].map(([a, b], i) => (
+              <div key={i} className="bg-white border border-black/10 p-5 hover:border-[#002FA7] transition">
+                <div className="font-mono text-[10px] text-zinc-500">ROUTE · {String(i + 1).padStart(2, "0")}</div>
+                <div className="flex items-center gap-2 mt-2 text-sm font-black tracking-tight">
+                  <span>{a}</span>
+                  <span className="text-[#FF4500]">→</span>
+                  <span>{b}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}

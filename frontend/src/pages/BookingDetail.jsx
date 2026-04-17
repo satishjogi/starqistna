@@ -1,0 +1,83 @@
+import React, { useEffect, useState } from "react";
+import { Link, useParams } from "react-router-dom";
+import api from "../lib/api";
+
+function fmtPrice(v, ccy = "myr") {
+  const map = { myr: "RM", sgd: "S$", usd: "$" };
+  return `${map[ccy] || ccy.toUpperCase()} ${Number(v).toFixed(2)}`;
+}
+
+export default function BookingDetail() {
+  const { id } = useParams();
+  const [b, setB] = useState(null);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    api.get(`/bookings/${id}`).then(({ data }) => setB(data)).catch((e) => setErr(e?.response?.data?.detail || "Failed to load booking"));
+  }, [id]);
+
+  if (err) return <div className="p-10 text-red-600">{err}</div>;
+  if (!b) return <div className="p-10 font-mono text-zinc-500">LOADING…</div>;
+
+  return (
+    <div className="px-6 md:px-12 lg:px-20 py-10 max-w-4xl">
+      <Link to="/dashboard" className="text-xs font-mono text-zinc-500 hover:text-black" data-testid="back-dashboard">← MY BOOKINGS</Link>
+
+      <div className="mt-4 flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <div className="te-overline">Booking reference</div>
+          <div className="font-mono text-4xl font-black" data-testid="detail-reference">{b.reference}</div>
+        </div>
+        <div className={`text-xs font-mono font-black uppercase px-3 py-2 ${b.status === "confirmed" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+          {b.status.replace("_", " ")}
+        </div>
+      </div>
+
+      <div className="te-card p-8 mt-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+          <div>
+            <div className="te-overline text-[10px]">From</div>
+            <div className="text-2xl font-black">{b.from?.city}</div>
+            <div className="text-xs font-mono text-zinc-500">{b.from?.code} · {b.from?.name}</div>
+          </div>
+          <div>
+            <div className="te-overline text-[10px]">To</div>
+            <div className="text-2xl font-black">{b.to?.city}</div>
+            <div className="text-xs font-mono text-zinc-500">{b.to?.code} · {b.to?.name}</div>
+          </div>
+          <div>
+            <div className="te-overline text-[10px]">Departure</div>
+            <div className="font-mono font-black">{b.departure_date} · {b.departure_time}</div>
+          </div>
+          <div>
+            <div className="te-overline text-[10px]">Operator</div>
+            <div className="font-black">{b.schedule?.bus_operator} <span className="text-xs text-zinc-500 font-mono">· {b.schedule?.bus_type}</span></div>
+          </div>
+        </div>
+
+        <div className="te-divider-dashed my-6" />
+
+        <div className="te-overline text-[10px] mb-3">Passengers</div>
+        <div className="space-y-2">
+          {b.passengers.map((p, i) => (
+            <div key={i} className="flex justify-between items-center border-b border-black/5 pb-2">
+              <div>
+                <div className="font-bold">{p.name}</div>
+                <div className="text-[10px] font-mono uppercase text-zinc-500">{p.category} {p.ic_or_passport && `· ${p.ic_or_passport}`}</div>
+              </div>
+              <div className="font-mono font-black">SEAT {p.seat_number}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="te-divider-dashed my-6" />
+
+        <div className="space-y-2 text-sm">
+          <div className="flex justify-between"><span>Adult × {b.pricing.adults}</span><span className="font-mono">{fmtPrice(b.pricing.adults * b.pricing.adult_fare, b.pricing.currency)}</span></div>
+          <div className="flex justify-between"><span>Child × {b.pricing.children}</span><span className="font-mono">{fmtPrice(b.pricing.children * b.pricing.child_fare, b.pricing.currency)}</span></div>
+          <div className="flex justify-between font-black text-lg mt-2"><span>TOTAL</span><span className="font-mono">{fmtPrice(b.pricing.total, b.pricing.currency)}</span></div>
+        </div>
+      </div>
+    </div>
+  );
+}
