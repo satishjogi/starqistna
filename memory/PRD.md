@@ -40,21 +40,32 @@ Build a complete online bus booking system where visitors can search departure t
   - Session booking-store for flow continuity through payment redirect
 - **Testing**: 22/22 backend tests pass, all frontend flows verified (iteration_1.json)
 
+## Implemented (2026-04-17 · iteration 2)
+- **Promo codes**
+  - `promo_codes` collection (`code` unique, `type: percent|flat`, `value`, `currency`, `max_uses`, `used_count`, `valid_until`, `active`)
+  - Endpoints: `POST /api/promo/validate`, admin `GET/POST/PATCH/DELETE /api/admin/promo-codes`
+  - Applied server-side in `POST /api/bookings` via `_calc_pricing(promo)` — discount is NEVER trusted from frontend
+  - `used_count` auto-increments on booking confirmation via `_finalize_booking` (idempotent, called from both status poll & Stripe webhook)
+  - Seeded codes: `WELCOME10` (10%), `RAYA5` (flat RM 5)
+  - Frontend: Passengers page promo input with Apply/Remove, discount row in sidebar; Admin tab "Promo codes" with create form + toggle/delete
+- **QR codes**
+  - `qrcode.react` (QRCodeSVG) renders plain-text QR of `booking.reference` on `/payment/success` and `/bookings/:id` (status=confirmed)
+  - `POST /api/boarding/validate` for existing gate readers — accepts `{reference, gate?, mark_boarded?}` → returns passenger+seat info; idempotent (returns `already_boarded:true` on repeat); writes `boarded_at` + `boarded_gate`
+  - BookingDetail shows "Boarded" badge once `boarded_at` is set
+- **Round-trip booking (upsell)**
+  - `ReturnUpsell` section on PaymentCallback success page — reuses outbound adult/child split, defaults return date to outbound date, reverses from/to terminal IDs when navigating to `/search`
+
 ## Backlog / next tasks
 ### P1
 - iPay88 integration (need merchant credentials: Merchant Code, Merchant Key, environment)
-- Email ticket delivery (Resend / SendGrid) on `payment_status=paid`
-- QR code on booking detail page (for boarding)
-- Round-trip booking (return journey)
-- Admin: edit/delete schedules, terminal CRUD, refund handling
+- Email ticket delivery (Resend / SendGrid) with QR attached on `payment_status=paid`
+- React Native mobile app — deferred until web system is perfected (user request)
 
 ### P2
-- React Native mobile app consuming same APIs
-- Operator portal (bus operators self-service)
-- Promo codes / discounts
-- Multi-language (BM / EN / ZH)
-- Push notifications for delays
-- Seat preferences (window/aisle saved to user profile)
+- Operator portal — skipped (single-company, not needed per user)
+- Promo code per-user usage limit (e.g. "first-time users only")
+- Admin: edit/delete schedules, terminal CRUD, refund handling
+- Multi-language (BM / EN / ZH), push notifications, seat preferences
 
 ## Notes
 - Admin login: `admin@transit.my` / `Admin@123` (auto-seeded)
