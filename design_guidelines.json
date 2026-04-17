@@ -1,0 +1,137 @@
+{
+  "project_name": "Transit E1 - Bus Booking System",
+  "theme_strategy": {
+    "theme": "light",
+    "archetype": "Archetype 4 (Swiss & High-Contrast)",
+    "description": "A 'Transit Authority' aesthetic prioritizing extreme clarity, functional beauty, and trust for handling payments. Abandons typical soft e-commerce UI for a more structured, neo-brutalist, data-forward approach."
+  },
+  "colors": {
+    "background": {
+      "default": "#FFFFFF",
+      "subtle": "#F4F4F5",
+      "muted": "#E4E4E7"
+    },
+    "text": {
+      "primary": "#09090B",
+      "secondary": "#52525B",
+      "disabled": "#A1A1AA"
+    },
+    "brand": {
+      "primary": "#002FA7",
+      "primary_hover": "#00258A",
+      "accent": "#FF4500",
+      "accent_hover": "#E03C00"
+    },
+    "status": {
+      "success": "#10B981",
+      "warning": "#F59E0B",
+      "error": "#EF4444",
+      "seat_available": "#FFFFFF",
+      "seat_selected": "#FF4500",
+      "seat_booked": "#E4E4E7"
+    },
+    "border": {
+      "default": "rgba(9, 9, 11, 0.1)",
+      "strong": "rgba(9, 9, 11, 0.2)",
+      "focus": "#002FA7"
+    }
+  },
+  "typography": {
+    "fonts": {
+      "heading": "'Cabinet Grotesk', sans-serif",
+      "body": "'Manrope', sans-serif",
+      "mono": "'JetBrains Mono', monospace"
+    },
+    "scales": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tight leading-none font-black",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight leading-tight font-bold",
+      "h3": "text-xl sm:text-2xl tracking-tight font-bold",
+      "body_lg": "text-lg leading-relaxed",
+      "body": "text-base leading-relaxed",
+      "body_sm": "text-sm leading-normal",
+      "mono_data": "font-mono text-sm tracking-wider uppercase",
+      "overline": "text-xs font-bold tracking-[0.2em] uppercase text-secondary"
+    },
+    "rules": [
+      "No generic sans for headings (Inter banned).",
+      "Use JetBrains Mono for all terminal codes, times, prices, and reference IDs.",
+      "Headings must have tight tracking (-0.02em to -0.04em)."
+    ]
+  },
+  "spacing_and_layout": {
+    "philosophy": "Optical alignment with a strict visible grid. Expose the skeleton of the UI.",
+    "container_padding": "px-6 md:px-12 lg:px-24",
+    "grids": {
+      "search_hero": "grid grid-cols-1 md:grid-cols-12 gap-1 items-end bg-black/10 border border-black/10 p-1 rounded-sm",
+      "dashboard": "grid grid-cols-1 md:grid-cols-4 gap-6",
+      "seat_map": "grid gap-3 justify-center items-center"
+    },
+    "radii": {
+      "default": "rounded-none",
+      "button": "rounded-sm",
+      "card": "rounded-sm",
+      "input": "rounded-sm"
+    }
+  },
+  "components": {
+    "header": {
+      "style": "sticky top-0 z-50 backdrop-blur-xl bg-white/80 border-b border-black/10",
+      "navigation": "flex items-center gap-8"
+    },
+    "buttons": {
+      "primary": "bg-[#002FA7] text-white hover:bg-[#002FA7]/90 font-bold tracking-wide uppercase px-8 py-4 transition-colors duration-150",
+      "accent": "bg-[#FF4500] text-white hover:bg-[#E03C00] shadow-[0_4px_14px_0_rgba(255,69,0,0.39)] hover:shadow-[0_6px_20px_rgba(255,69,0,0.23)] hover:-translate-y-[1px] transition-all duration-200",
+      "outline": "bg-transparent border border-black/20 text-primary hover:border-black/50 hover:bg-black/5 transition-colors duration-150"
+    },
+    "inputs": {
+      "search_hero_input": "text-2xl md:text-3xl font-bold bg-white border-none focus:ring-0 placeholder:text-black/20 h-20 px-6",
+      "standard": "border border-black/20 bg-white focus:border-[#002FA7] focus:ring-1 focus:ring-[#002FA7] transition-all rounded-sm",
+      "label": "text-sm font-bold uppercase tracking-wider mb-2 block"
+    },
+    "cards": {
+      "default": "bg-white border border-black/10 p-6 md:p-8 rounded-sm hover:border-black/30 transition-colors",
+      "interactive": "hover:-translate-y-1 hover:shadow-xl transition-all duration-300"
+    },
+    "seat_selection": {
+      "container": "bg-white border border-black/10 p-8 overflow-auto",
+      "seat_available": "w-12 h-14 border border-black/20 rounded-md hover:border-[#002FA7] hover:text-[#002FA7] transition-colors cursor-pointer flex items-center justify-center font-mono text-xs font-bold",
+      "seat_selected": "w-12 h-14 bg-[#FF4500] text-white rounded-md shadow-md flex items-center justify-center font-mono text-xs font-bold ring-2 ring-offset-2 ring-[#FF4500]",
+      "seat_booked": "w-12 h-14 border border-black/10 bg-gray-100 text-gray-400 rounded-md flex items-center justify-center font-mono text-xs cursor-not-allowed opacity-60"
+    },
+    "ticket_summary": {
+      "style": "bg-[#F4F4F5] border-l-4 border-[#002FA7] p-6",
+      "divider": "border-t border-dashed border-black/20 my-6"
+    }
+  },
+  "motion": {
+    "philosophy": "Utilitarian and rapid. No bouncy easings.",
+    "transition_default": "transition-all duration-150 ease-out",
+    "hover_lift": "hover:-translate-y-[2px]"
+  },
+  "icons": {
+    "library": "@phosphor-icons/react",
+    "style": "duotone for marketing graphics, bold/regular for UI controls"
+  },
+  "media": {
+    "rules": "Never use placeholder images. Use standard generic avatars or the provided Unsplash URLs.",
+    "images": {
+      "hero_background": "https://images.unsplash.com/photo-1544620347-1959828a2a7d?q=80&w=2000&auto=format&fit=crop",
+      "terminal_shot": "https://images.unsplash.com/photo-1517400508447-f8dd518b86db?q=80&w=1200&auto=format&fit=crop",
+      "lifestyle_travelers": "https://images.unsplash.com/photo-1522202176988-66273c2fd55f?q=80&w=1200&auto=format&fit=crop",
+      "route_abstract": "https://images.unsplash.com/photo-1524661135-423995f22d0b?q=80&w=1200&auto=format&fit=crop"
+    }
+  },
+  "accessibility": {
+    "contrast": "All text must pass WCAG AA (4.5:1). Selected states use high-contrast orange/white.",
+    "focus": "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[#002FA7]",
+    "test_ids": "All interactive elements MUST have data-testid attributes (e.g., data-testid='seat-btn-1A', data-testid='search-submit-btn')."
+  },
+  "instructions_to_main_agent": [
+    "Ensure 'Cabinet Grotesk' and 'JetBrains Mono' are imported via Google Fonts or Fontsource.",
+    "Build the hero search form as a dense, grid-based component resembling a physical control board (Bento Grid Style).",
+    "For the Seat Selection map, avoid pure HTML generic radio buttons; build a visual grid using 'div/button' with clear 'Available/Selected/Booked' states. Use Phosphor Icons for the steering wheel/driver position.",
+    "Payment Gateway section (Stripe/iPay88) should be styled purely functionally with crisp borders. Do not use heavy shadows.",
+    "Ensure the application strictly follows mobile-first design as this UI will influence React Native down the line.",
+    "Never use generic Shadcn soft cards. Strip away 'shadow-sm' and 'rounded-xl' from standard components, replacing them with 'rounded-sm' and 'border-black/10'."
+  ]
+}
