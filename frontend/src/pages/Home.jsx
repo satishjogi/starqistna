@@ -216,6 +216,9 @@ export default function Home() {
         </div>
       </section>
 
+      {/* Popular routes - clickable, right under search */}
+      <PopularRoutes />
+
       {/* Features */}
       <section className="px-6 md:px-12 lg:px-20 py-20">
         <div className="te-overline mb-3">How it works</div>
@@ -234,34 +237,119 @@ export default function Home() {
           ))}
         </div>
       </section>
+    </div>
+  );
+}
 
-      {/* Popular routes strip */}
-      <section className="border-t border-b border-black/10 bg-zinc-50 overflow-hidden">
-        <div className="px-6 md:px-12 lg:px-20 py-10">
-          <div className="te-overline mb-3">Popular routes</div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
-            {[
-              ["KUALA LUMPUR", "PENANG"],
-              ["KUALA LUMPUR", "SINGAPORE"],
-              ["KUALA LUMPUR", "JOHOR BAHRU"],
-              ["KUALA LUMPUR", "MELAKA"],
-              ["PENANG", "KUALA LUMPUR"],
-              ["SINGAPORE", "KUALA LUMPUR"],
-              ["JOHOR BAHRU", "KUALA LUMPUR"],
-              ["KUALA LUMPUR", "IPOH"],
-            ].map(([a, b], i) => (
-              <div key={i} className="bg-white border border-black/10 p-5 hover:border-[#002FA7] transition">
-                <div className="font-mono text-[10px] text-zinc-500">ROUTE · {String(i + 1).padStart(2, "0")}</div>
-                <div className="flex items-center gap-2 mt-2 text-sm font-black tracking-tight">
-                  <span>{a}</span>
-                  <span className="text-[#FF4500]">→</span>
-                  <span>{b}</span>
+// ----- Popular Routes (clickable) -----
+const POPULAR_ROUTES = [
+  { from: "Kuala Lumpur", to: "Melaka",        tag: "GO TODAY",      line: "90-min weekend escape",       price: 25, size: "lg", accent: "#FF4500" },
+  { from: "Kuala Lumpur", to: "Johor Bahru",   tag: "HOT SELLING",   line: "South-bound workhorse",       price: 45, size: "md", accent: "#002FA7" },
+  { from: "Kuala Lumpur", to: "Singapore",     tag: "CROSS-BORDER",  line: "Beat the causeway crawl",     price: 55, size: "md", accent: "#002FA7" },
+  { from: "Kuala Lumpur", to: "Penang",        tag: "FOODIE FAVE",   line: "Char kuey teow calls",         price: 49, size: "md", accent: "#FF4500" },
+  { from: "Kuala Lumpur", to: "Ipoh",          tag: "QUICK ESCAPE",  line: "White coffee country",         price: 35, size: "sm", accent: "#002FA7" },
+  { from: "Singapore",    to: "Kuala Lumpur",  tag: "TOP RETURN",    line: "Back to the capital",          price: 55, size: "sm", accent: "#002FA7" },
+  { from: "Johor Bahru",  to: "Kuala Lumpur",  tag: "COMMUTER",      line: "Monday morning rush",          price: 45, size: "sm", accent: "#FF4500" },
+  { from: "Penang",       to: "Kuala Lumpur",  tag: "NORTHBOUND",    line: "Island to city",               price: 49, size: "sm", accent: "#002FA7" },
+  { from: "Kuala Lumpur", to: "Kuantan",       tag: "EAST COAST",    line: "Beach weekend bound",          price: 52, size: "sm", accent: "#FF4500" },
+];
+
+function PopularRoutes() {
+  const navigate = useNavigate();
+  const [cityMap, setCityMap] = useState({});
+  const today = new Date().toISOString().slice(0, 10);
+
+  useEffect(() => {
+    api.get("/terminals").then(({ data }) => {
+      const map = {};
+      data.all.forEach((t) => { if (!map[t.city]) map[t.city] = t; });
+      setCityMap(map);
+    }).catch(() => {});
+  }, []);
+
+  const go = (r) => {
+    const f = cityMap[r.from];
+    const t = cityMap[r.to];
+    if (!f || !t) return;
+    const p = new URLSearchParams({ from: f.id, to: t.id, date: today, adults: "1", children: "0" });
+    navigate(`/search?${p.toString()}`);
+  };
+
+  return (
+    <section className="px-6 md:px-12 lg:px-20 py-16 border-t border-black/10" data-testid="popular-routes-section">
+      <div className="flex flex-wrap items-end justify-between gap-3 mb-8">
+        <div>
+          <div className="te-overline mb-2">Popular routes</div>
+          <h2 className="text-3xl md:text-5xl font-black tracking-tight">
+            Where everyone's going <span className="text-[#FF4500]">today.</span>
+          </h2>
+        </div>
+        <div className="font-mono text-[10px] text-zinc-500 tracking-wider">
+          TAP A ROUTE · SEARCHES FOR {today}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-4 gap-[1px] bg-black/10 border border-black/10">
+        {POPULAR_ROUTES.map((r, i) => {
+          const rowSpan = r.size === "lg" ? "md:row-span-2 md:col-span-2" : "";
+          const big = r.size === "lg";
+          return (
+            <button
+              key={i}
+              type="button"
+              onClick={() => go(r)}
+              className={`group relative bg-white p-6 text-left hover:bg-zinc-50 transition-all duration-200 overflow-hidden ${rowSpan}`}
+              data-testid={`popular-route-${r.from.replace(/\s/g, "")}-${r.to.replace(/\s/g, "")}`}
+            >
+              {/* diagonal colour bar */}
+              <div
+                className="absolute top-0 right-0 w-[6px] h-full transition-all duration-300 group-hover:w-[10px]"
+                style={{ backgroundColor: r.accent }}
+              />
+              <div className="flex items-start justify-between">
+                <span
+                  className="text-[9px] font-mono font-bold tracking-[0.2em] px-2 py-1 uppercase"
+                  style={{ backgroundColor: r.accent, color: "white" }}
+                >
+                  {r.tag}
+                </span>
+                <span className="font-mono text-[10px] text-zinc-400">{String(i + 1).padStart(2, "0")}</span>
+              </div>
+
+              <div className={`mt-${big ? "10" : "6"}`}>
+                <div className={`font-black tracking-tighter leading-[0.95] ${big ? "text-4xl md:text-5xl" : "text-xl md:text-2xl"}`}>
+                  {r.from}
+                </div>
+                <div
+                  className={`inline-block my-2 font-mono font-black ${big ? "text-3xl" : "text-xl"}`}
+                  style={{ color: r.accent }}
+                >
+                  ↓
+                </div>
+                <div className={`font-black tracking-tighter leading-[0.95] ${big ? "text-4xl md:text-5xl" : "text-xl md:text-2xl"}`}>
+                  {r.to}
                 </div>
               </div>
-            ))}
-          </div>
-        </div>
-      </section>
-    </div>
+
+              <div className={`mt-${big ? "8" : "5"} pt-4 border-t border-dashed border-black/15 flex items-end justify-between`}>
+                <div className="flex-1 pr-2">
+                  <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider">{r.line}</div>
+                  <div className={`font-mono font-black mt-1 ${big ? "text-2xl" : "text-base"}`}>
+                    FROM RM {r.price}
+                  </div>
+                </div>
+                <div
+                  className="w-9 h-9 flex items-center justify-center transition-transform duration-200 group-hover:translate-x-1 font-black"
+                  style={{ backgroundColor: r.accent, color: "white" }}
+                  aria-hidden
+                >
+                  →
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </section>
   );
 }
