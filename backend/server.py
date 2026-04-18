@@ -810,10 +810,86 @@ class CreateScheduleBody(BaseModel):
     departure_time: str
     arrival_time: str
     bus_operator: str = "Star Qistna"
-    bus_type: str = "Standard"
+    bus_type: Literal["VIP 27", "Executive", "Standard"] = "Standard"
     adult_fare: float
     rows: int = 10
     currency: str = "myr"
+
+
+class TerminalCreateBody(BaseModel):
+    city: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    code: str = Field(min_length=2, max_length=6)
+    state: Optional[str] = None
+    country: Literal["MY", "SG"] = "MY"
+
+
+class TerminalUpdateBody(BaseModel):
+    city: Optional[str] = None
+    name: Optional[str] = None
+    code: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[Literal["MY", "SG"]] = None
+
+
+@api.get("/admin/terminals")
+async def admin_list_terminals(user: dict = Depends(require_admin)):
+    items = await db.terminals.find({}, {"_id": 0}).sort("city", 1).to_list(500)
+    # attach schedule counts for delete safety
+    for t in items:
+        t["schedule_count"] = await db.schedules.count_documents(
+            {"$or": [{"from_terminal_id": t["id"]}, {"to_terminal_id": t["id"]}]}
+        )
+    return items
+
+
+@api.post("/admin/terminals")
+async def admin_create_terminal(body: TerminalCreateBody, user: dict = Depends(require_admin)):
+    code = body.code.upper().strip()
+    if await db.terminals.find_one({"code": code}):
+        raise HTTPException(400, f"Terminal code {code} already exists")
+    doc = {
+        "id": new_id(),
+        "city": body.city.strip(),
+        "name": body.name.strip(),
+        "code": code,
+        "state": (body.state or "").strip() or None,
+        "country": body.country,
+    }
+    await db.terminals.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.patch("/admin/terminals/{terminal_id}")
+async def admin_update_terminal(terminal_id: str, body: TerminalUpdateBody, user: dict = Depends(require_admin)):
+    updates = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    if "code" in updates:
+        updates["code"] = updates["code"].upper().strip()
+        clash = await db.terminals.find_one({"code": updates["code"], "id": {"$ne": terminal_id}})
+        if clash:
+            raise HTTPException(400, "Another terminal already uses this code")
+    if not updates:
+        raise HTTPException(400, "No changes provided")
+    result = await db.terminals.update_one({"id": terminal_id}, {"$set": updates})
+    if result.matched_count == 0:
+        raise HTTPException(404, "Terminal not found")
+    updated = await db.terminals.find_one({"id": terminal_id}, {"_id": 0})
+    return updated
+
+
+@api.delete("/admin/terminals/{terminal_id}")
+async def admin_delete_terminal(terminal_id: str, user: dict = Depends(require_admin)):
+    # Block delete if any schedule references this terminal
+    count = await db.schedules.count_documents(
+        {"$or": [{"from_terminal_id": terminal_id}, {"to_terminal_id": terminal_id}]}
+    )
+    if count > 0:
+        raise HTTPException(400, f"Cannot delete — {count} schedule(s) reference this terminal")
+    result = await db.terminals.delete_one({"id": terminal_id})
+    if result.deleted_count == 0:
+        raise HTTPException(404, "Terminal not found")
+    return {"deleted": True}
 
 
 @api.post("/admin/schedules")

@@ -19,8 +19,12 @@ export default function Admin() {
   const [promoForm, setPromoForm] = useState({
     code: "", type: "percent", value: 10, currency: "myr", max_uses: "", valid_until: "", description: "",
   });
+  const [terminalForm, setTerminalForm] = useState({
+    city: "", name: "", code: "", state: "", country: "MY",
+  });
   const [msg, setMsg] = useState("");
   const [promoMsg, setPromoMsg] = useState("");
+  const [terminalMsg, setTerminalMsg] = useState("");
 
   useEffect(() => {
     if (!loading && (!user || !user.is_admin)) navigate("/");
@@ -30,7 +34,7 @@ export default function Admin() {
     api.get("/admin/stats").then(({ data }) => setStats(data)).catch(() => {});
     api.get("/admin/bookings").then(({ data }) => setBookings(data)).catch(() => {});
     api.get("/admin/schedules").then(({ data }) => setSchedules(data)).catch(() => {});
-    api.get("/terminals").then(({ data }) => setTerminals(data.all)).catch(() => {});
+    api.get("/admin/terminals").then(({ data }) => setTerminals(data)).catch(() => {});
     api.get("/admin/promo-codes").then(({ data }) => setPromos(data)).catch(() => {});
   };
 
@@ -83,6 +87,39 @@ export default function Admin() {
     loadAll();
   };
 
+  const createTerminal = async (e) => {
+    e.preventDefault();
+    setTerminalMsg("");
+    try {
+      await api.post("/admin/terminals", {
+        city: terminalForm.city.trim(),
+        name: terminalForm.name.trim(),
+        code: terminalForm.code.trim().toUpperCase(),
+        state: terminalForm.state.trim() || null,
+        country: terminalForm.country,
+      });
+      setTerminalMsg("Terminal added.");
+      setTerminalForm({ city: "", name: "", code: "", state: "", country: "MY" });
+      loadAll();
+    } catch (e) {
+      setTerminalMsg(e?.response?.data?.detail || "Failed");
+    }
+  };
+
+  const deleteTerminal = async (t) => {
+    if (t.schedule_count > 0) {
+      alert(`Cannot delete — ${t.schedule_count} schedule(s) reference this terminal.`);
+      return;
+    }
+    if (!window.confirm(`Delete terminal ${t.code} (${t.name})?`)) return;
+    try {
+      await api.delete(`/admin/terminals/${t.id}`);
+      loadAll();
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Delete failed");
+    }
+  };
+
   if (!user?.is_admin) return null;
 
   return (
@@ -106,7 +143,7 @@ export default function Admin() {
       </div>
 
       <div className="mt-10 flex gap-1 border-b border-black/10 flex-wrap">
-        {["bookings", "schedules", "add-schedule", "promo-codes"].map((t) => (
+        {["bookings", "schedules", "add-schedule", "terminals", "promo-codes"].map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -165,24 +202,124 @@ export default function Admin() {
             </select>
           </div>
           <div><label className="te-label">Date</label><input type="date" className="te-input" required value={form.departure_date} onChange={(e) => setForm({ ...form, departure_date: e.target.value })} /></div>
-          <div><label className="te-label">Operator</label><input className="te-input" value={form.bus_operator} onChange={(e) => setForm({ ...form, bus_operator: e.target.value })} /></div>
-          <div><label className="te-label">Departure</label><input type="time" className="te-input" value={form.departure_time} onChange={(e) => setForm({ ...form, departure_time: e.target.value })} /></div>
-          <div><label className="te-label">Arrival</label><input type="time" className="te-input" value={form.arrival_time} onChange={(e) => setForm({ ...form, arrival_time: e.target.value })} /></div>
+          <div>
+            <label className="te-label">Coach class</label>
+            <div className="grid grid-cols-3 gap-[1px] bg-black/10 border border-black/15" data-testid="coach-class-picker">
+              {["VIP 27", "Executive", "Standard"].map((bt) => {
+                const selected = form.bus_type === bt;
+                return (
+                  <button
+                    key={bt}
+                    type="button"
+                    onClick={() => setForm({ ...form, bus_type: bt })}
+                    className={`px-3 py-2.5 text-xs font-bold uppercase tracking-wider transition ${
+                      selected ? "bg-[#B5121B] text-white" : "bg-white hover:bg-zinc-50"
+                    }`}
+                    data-testid={`coach-class-${bt.replace(" ", "-").toLowerCase()}`}
+                  >
+                    {bt}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div><label className="te-label">Departure time</label><input type="time" className="te-input" value={form.departure_time} onChange={(e) => setForm({ ...form, departure_time: e.target.value })} /></div>
+          <div><label className="te-label">Arrival time</label><input type="time" className="te-input" value={form.arrival_time} onChange={(e) => setForm({ ...form, arrival_time: e.target.value })} /></div>
           <div><label className="te-label">Adult fare</label><input type="number" step="0.01" className="te-input" value={form.adult_fare} onChange={(e) => setForm({ ...form, adult_fare: e.target.value })} /></div>
           <div><label className="te-label">Rows (seats = rows × 4)</label><input type="number" className="te-input" value={form.rows} onChange={(e) => setForm({ ...form, rows: e.target.value })} /></div>
-          <div>
-            <label className="te-label">Currency</label>
-            <select className="te-input" value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value })}>
-              <option value="myr">MYR</option>
-              <option value="sgd">SGD</option>
-              <option value="usd">USD</option>
-            </select>
+          <div className="md:col-span-2 text-[10px] font-mono text-zinc-500">
+            OPERATOR · STAR QISTNA (single operator) · CURRENCY AUTO-DERIVED FROM ORIGIN TERMINAL COUNTRY
           </div>
           <div className="md:col-span-2 flex items-center gap-4">
             <button className="te-btn-primary" data-testid="add-sched-submit">Add schedule</button>
             {msg && <div className="text-xs font-bold">{msg}</div>}
           </div>
         </form>
+      )}
+
+      {tab === "terminals" && (
+        <div className="mt-6 grid grid-cols-1 lg:grid-cols-5 gap-6">
+          <div className="lg:col-span-2">
+            <form onSubmit={createTerminal} className="te-card p-6 space-y-4" data-testid="add-terminal-form">
+              <div className="te-overline">Add terminal</div>
+              <div>
+                <label className="te-label">City</label>
+                <input required className="te-input" value={terminalForm.city} onChange={(e) => setTerminalForm({ ...terminalForm, city: e.target.value })} placeholder="Kuala Lumpur" data-testid="terminal-city" />
+              </div>
+              <div>
+                <label className="te-label">Terminal name</label>
+                <input required className="te-input" value={terminalForm.name} onChange={(e) => setTerminalForm({ ...terminalForm, name: e.target.value })} placeholder="KL Sentral" data-testid="terminal-name" />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="te-label">Code (2–6)</label>
+                  <input required className="te-input font-mono uppercase" value={terminalForm.code} onChange={(e) => setTerminalForm({ ...terminalForm, code: e.target.value.toUpperCase() })} placeholder="KLS" data-testid="terminal-code" />
+                </div>
+                <div>
+                  <label className="te-label">State</label>
+                  <input className="te-input" value={terminalForm.state} onChange={(e) => setTerminalForm({ ...terminalForm, state: e.target.value })} placeholder="WP" data-testid="terminal-state" />
+                </div>
+              </div>
+              <div>
+                <label className="te-label">Country (decides billing currency)</label>
+                <div className="grid grid-cols-2 gap-[1px] bg-black/10 border border-black/15">
+                  {[{ c: "MY", label: "Malaysia · MYR" }, { c: "SG", label: "Singapore · SGD" }].map((o) => {
+                    const selected = terminalForm.country === o.c;
+                    return (
+                      <button
+                        key={o.c}
+                        type="button"
+                        onClick={() => setTerminalForm({ ...terminalForm, country: o.c })}
+                        className={`px-3 py-2.5 text-xs font-bold uppercase tracking-wider transition ${
+                          selected ? "bg-[#002FA7] text-white" : "bg-white hover:bg-zinc-50"
+                        }`}
+                        data-testid={`terminal-country-${o.c}`}
+                      >
+                        {o.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <button className="te-btn-primary w-full" data-testid="terminal-form-submit">Add terminal</button>
+              {terminalMsg && <div className="text-xs font-bold" data-testid="terminal-msg">{terminalMsg}</div>}
+            </form>
+          </div>
+          <div className="lg:col-span-3">
+            <div className="te-overline mb-2">All terminals ({terminals.length})</div>
+            <div className="space-y-2 max-h-[600px] overflow-auto pr-1">
+              {terminals.map((t) => (
+                <div key={t.id} className="te-card p-4 grid grid-cols-12 gap-2 items-center" data-testid={`terminal-row-${t.code}`}>
+                  <div className="col-span-3">
+                    <div className="font-black">{t.city}</div>
+                    <div className="text-[10px] font-mono text-zinc-500">{t.state || "—"}</div>
+                  </div>
+                  <div className="col-span-5 text-sm">{t.name}</div>
+                  <div className="col-span-1">
+                    <span className="font-mono text-[10px] font-bold bg-zinc-900 text-white px-1.5 py-0.5">{t.code}</span>
+                  </div>
+                  <div className="col-span-1">
+                    <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 ${t.country === "SG" ? "bg-rose-100 text-rose-700" : "bg-blue-100 text-blue-700"}`}>
+                      {t.country || "MY"}
+                    </span>
+                  </div>
+                  <div className="col-span-1 font-mono text-[10px] text-zinc-500">{t.schedule_count || 0} sch</div>
+                  <div className="col-span-1 flex justify-end">
+                    <button
+                      onClick={() => deleteTerminal(t)}
+                      disabled={t.schedule_count > 0}
+                      title={t.schedule_count > 0 ? `Cannot delete — ${t.schedule_count} schedules` : "Delete"}
+                      className="text-[10px] px-2 py-1 font-bold uppercase border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-30 disabled:cursor-not-allowed"
+                      data-testid={`terminal-delete-${t.code}`}
+                    >
+                      del
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       )}
 
       {tab === "promo-codes" && (
