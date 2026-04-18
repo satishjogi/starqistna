@@ -12,6 +12,7 @@ from pymongo.errors import DuplicateKeyError
 import os
 import logging
 import uuid
+import asyncio
 import bcrypt
 import jwt
 import pyotp
@@ -25,6 +26,7 @@ from emergentintegrations.payments.stripe.checkout import (
     CheckoutStatusResponse,
     CheckoutSessionRequest,
 )
+from email_service import send_booking_confirmation
 
 # ---------- Setup ----------
 ROOT_DIR = Path(__file__).parent
@@ -845,7 +847,7 @@ async def payment_status(session_id: str, request: Request):
 
 
 async def _finalize_booking(booking_id: str, session_id: str):
-    """Idempotent: mark seats booked, confirm booking, increment promo use, mark txn finalized."""
+    """Idempotent: mark seats booked, confirm booking, increment promo use, mark txn finalized, send email."""
     await db.seat_locks.update_many(
         {"booking_id": booking_id, "status": "locked"},
         {"$set": {"status": "booked", "expires_at": None}},
@@ -862,6 +864,11 @@ async def _finalize_booking(booking_id: str, session_id: str):
         {"session_id": session_id},
         {"$set": {"booking_finalized": True, "payment_status": "paid", "status": "complete"}},
     )
+    # Fire-and-forget email delivery
+    if booking:
+        from_term = await db.terminals.find_one({"id": booking.get("from_terminal_id")}, {"_id": 0})
+        to_term = await db.terminals.find_one({"id": booking.get("to_terminal_id")}, {"_id": 0})
+        asyncio.create_task(send_booking_confirmation(booking, from_term, to_term))
 
 
 @api.post("/webhook/stripe")
