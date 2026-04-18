@@ -185,7 +185,7 @@ export default function Home() {
               </div>
               <div className="col-span-6 md:col-span-2 bg-white p-5">
                 <label className="te-label">Passengers</label>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-col md:flex-row md:items-center gap-3 md:gap-2">
                   <div className="flex-1">
                     <div className="text-[9px] font-mono text-zinc-500">ADULT</div>
                     <div className="flex items-center gap-1 mt-1">
