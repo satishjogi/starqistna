@@ -4,9 +4,14 @@ import base64
 import logging
 import asyncio
 from io import BytesIO
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 import qrcode
 import resend
+
+load_dotenv(Path(__file__).parent / ".env")
 
 logger = logging.getLogger("transit.email")
 
