@@ -10,7 +10,7 @@ export default function Header() {
     <header className="sticky top-0 z-50 backdrop-blur-xl bg-white/85 border-b border-black/10">
       <div className="px-6 md:px-12 lg:px-20 h-16 flex items-center justify-between">
         <Link to="/" className="flex items-center gap-3" data-testid="brand-link">
-          <img src="/logo.png" alt="Star Qistna" className="h-14 w-auto -my-3" />
+          <img src="/logo.png" alt="Star Qistna" className="h-8 md:h-14 w-auto md:-my-3" />
           <div className="leading-none hidden md:block">
             <div className="text-[9px] tracking-[0.25em] font-mono text-zinc-500">FIRST CLASS MASSAGE COACH</div>
           </div>
