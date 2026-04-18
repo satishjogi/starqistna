@@ -33,6 +33,16 @@ export default function Passengers() {
   const [promoError, setPromoError] = useState("");
   const [promoLoading, setPromoLoading] = useState(false);
 
+  // Gateway selection — currency-aware
+  const scheduleCurrency = (flow?.schedule?.currency || "myr").toLowerCase();
+  const gatewayOptions = scheduleCurrency === "sgd"
+    ? [{ id: "stripe", name: "Credit / Debit Card", provider: "Stripe", methods: "Visa · Mastercard · Amex", available: true }]
+    : [
+        { id: "stripe", name: "Credit / Debit Card", provider: "Stripe", methods: "Visa · Mastercard · Amex", available: true },
+        { id: "ipay88", name: "FPX, Boost, GrabPay", provider: "iPay88", methods: "FPX · Boost · GrabPay · Local Cards", available: false, note: "Coming soon" },
+      ];
+  const [gateway, setGateway] = useState("stripe");
+
   if (!flow?.schedule_id) {
     return <div className="p-10">Session expired. <a href="/" className="underline">Start over</a></div>;
   }
@@ -92,6 +102,7 @@ export default function Passengers() {
       const { data: checkout } = await api.post("/payments/checkout", {
         booking_id: booking.id,
         origin_url: window.location.origin,
+        gateway,
       });
       window.location.href = checkout.url;
     } catch (e) {
@@ -193,6 +204,61 @@ export default function Passengers() {
             {promoError && <div className="text-xs font-bold text-red-600 mt-2" data-testid="promo-error">{promoError}</div>}
             <div className="text-[10px] font-mono text-zinc-500 mt-2">TRY: WELCOME10 · RAYA5</div>
           </div>
+
+          <div className="te-card p-6">
+            <div className="flex items-center justify-between mb-3">
+              <div className="te-overline">Payment method</div>
+              <div className="text-[10px] font-mono font-bold bg-black text-white px-2 py-1 tracking-wider" data-testid="currency-badge">
+                BILLED IN {scheduleCurrency.toUpperCase()}
+              </div>
+            </div>
+            {scheduleCurrency === "sgd" && (
+              <div className="text-xs text-zinc-600 mb-3">
+                Singapore-boarding tickets are billed in Singapore Dollars (SGD).
+              </div>
+            )}
+            <div className="space-y-2">
+              {gatewayOptions.map((g) => {
+                const selected = gateway === g.id && g.available;
+                return (
+                  <button
+                    key={g.id}
+                    type="button"
+                    disabled={!g.available}
+                    onClick={() => g.available && setGateway(g.id)}
+                    className={`w-full text-left p-4 border transition-all ${
+                      selected
+                        ? "border-[#B5121B] bg-[#B5121B]/5"
+                        : g.available
+                        ? "border-black/15 hover:border-black/40"
+                        : "border-black/10 opacity-50 cursor-not-allowed"
+                    }`}
+                    data-testid={`gateway-${g.id}`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 ${
+                        selected ? "border-[#B5121B]" : "border-black/30"
+                      }`}>
+                        {selected && <div className="w-2 h-2 rounded-full bg-[#B5121B]" />}
+                      </div>
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <div className="font-bold">{g.name}</div>
+                          <div className="text-[10px] font-mono text-zinc-500 tracking-wider">via {g.provider}</div>
+                          {g.note && (
+                            <span className="text-[9px] font-mono font-bold px-2 py-0.5 bg-amber-100 text-amber-700 tracking-wider uppercase">
+                              {g.note}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] font-mono text-zinc-500 mt-1">{g.methods}</div>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </div>
 
         <div className="lg:col-span-4">
@@ -232,9 +298,9 @@ export default function Passengers() {
             })()}
             {error && <div className="mt-4 text-xs font-bold text-red-600" data-testid="passengers-error">{error}</div>}
             <button className="te-btn-accent w-full mt-5 disabled:opacity-40" disabled={loading} data-testid="pay-now-btn">
-              {loading ? "Redirecting to payment…" : "Pay now →"}
+              {loading ? "Redirecting to payment…" : `Pay with ${gateway === "stripe" ? "Card" : "iPay88"} →`}
             </button>
-            <div className="text-[10px] font-mono text-zinc-500 mt-3 text-center">SECURE CHECKOUT · STRIPE</div>
+            <div className="text-[10px] font-mono text-zinc-500 mt-3 text-center">SECURE CHECKOUT · {gateway === "stripe" ? "STRIPE" : "IPAY88"}</div>
           </div>
         </div>
       </form>

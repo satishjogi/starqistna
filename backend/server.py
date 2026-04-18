@@ -154,6 +154,7 @@ class CreateBookingBody(BaseModel):
 class CheckoutBody(BaseModel):
     booking_id: str
     origin_url: str
+    gateway: Literal["stripe", "ipay88"] = "stripe"
 
 
 class PromoValidateBody(BaseModel):
@@ -595,6 +596,48 @@ async def get_booking(booking_id: str, user: Optional[dict] = Depends(current_us
 
 
 # ---------- Payments (Stripe) ----------
+def _payment_options_for(currency: str) -> list:
+    """Return list of payment gateway options based on currency.
+    MYR bookings: Stripe available, iPay88 coming soon.
+    SGD bookings: Stripe only (single MY iPay88 account doesn't cover SG).
+    """
+    c = (currency or "myr").lower()
+    opts = [
+        {
+            "id": "stripe",
+            "name": "Credit / Debit Card",
+            "provider": "Stripe",
+            "methods": ["Visa", "Mastercard", "Amex"],
+            "available": True,
+            "note": None,
+        }
+    ]
+    if c == "myr":
+        opts.append({
+            "id": "ipay88",
+            "name": "FPX, Boost, GrabPay & Local Cards",
+            "provider": "iPay88",
+            "methods": ["FPX", "Boost", "GrabPay", "TouchNGo", "Local Cards"],
+            "available": False,
+            "note": "Coming soon",
+        })
+    return opts
+
+
+@api.get("/payments/options/{booking_id}")
+async def payment_options(booking_id: str):
+    booking = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    if not booking:
+        raise HTTPException(404, "Booking not found")
+    currency = booking.get("pricing", {}).get("currency", "myr")
+    return {
+        "booking_id": booking_id,
+        "currency": currency,
+        "amount": booking.get("pricing", {}).get("total", 0),
+        "options": _payment_options_for(currency),
+    }
+
+
 @api.post("/payments/checkout")
 async def create_checkout(body: CheckoutBody, request: Request, user: Optional[dict] = Depends(current_user)):
     booking = await db.bookings.find_one({"id": body.booking_id}, {"_id": 0})
@@ -603,9 +646,17 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
     if booking["payment_status"] == "paid":
         raise HTTPException(400, "Booking already paid")
 
+    currency = booking["pricing"].get("currency", "myr")
+    available_ids = {o["id"] for o in _payment_options_for(currency) if o["available"]}
+    if body.gateway not in available_ids:
+        raise HTTPException(400, f"Payment gateway '{body.gateway}' is not available for {currency.upper()} bookings")
+
+    if body.gateway == "ipay88":
+        # placeholder for future — will raise until credentials are wired
+        raise HTTPException(501, "iPay88 integration coming soon")
+
     # SERVER-SIDE amount (never trust frontend)
     amount = float(booking["pricing"]["total"])
-    currency = booking["pricing"].get("currency", "myr")
 
     host_url = str(request.base_url).rstrip("/")
     webhook_url = f"{host_url}/api/webhook/stripe"
@@ -757,7 +808,13 @@ class CreateScheduleBody(BaseModel):
 
 @api.post("/admin/schedules")
 async def admin_create_schedule(body: CreateScheduleBody, user: dict = Depends(require_admin)):
+    # Auto-derive currency from origin terminal country (SG → SGD, else MYR)
+    origin = await db.terminals.find_one({"id": body.from_terminal_id}, {"_id": 0})
+    if not origin:
+        raise HTTPException(400, "Invalid from_terminal_id")
+    derived_currency = COUNTRY_TO_CURRENCY.get(origin.get("country", "MY"), "myr")
     doc = body.model_dump()
+    doc["currency"] = derived_currency
     doc["id"] = new_id()
     doc["total_seats"] = doc["rows"] * 4
     doc["created_at"] = utcnow().isoformat()
@@ -768,29 +825,36 @@ async def admin_create_schedule(body: CreateScheduleBody, user: dict = Depends(r
 
 # ---------- Seeding & Indexes ----------
 MALAYSIAN_TERMINALS = [
-    ("Kuala Lumpur", "KL Sentral", "KLS", "WP"),
-    ("Kuala Lumpur", "Terminal Bersepadu Selatan (TBS)", "TBS", "WP"),
-    ("Kuala Lumpur", "Pudu Sentral", "PDS", "WP"),
-    ("Kuala Lumpur", "Hentian Duta", "HDT", "WP"),
-    ("Penang", "Sungai Nibong", "SGN", "PG"),
-    ("Penang", "Butterworth Penang Sentral", "BPS", "PG"),
-    ("Johor Bahru", "Larkin Sentral", "LKS", "JH"),
-    ("Johor Bahru", "JB Sentral (Causeway)", "JBS", "JH"),
-    ("Melaka", "Melaka Sentral", "MKS", "ML"),
-    ("Ipoh", "Ipoh Amanjaya", "IPA", "PK"),
-    ("Singapore", "Golden Mile Complex", "GMC", "SG"),
-    ("Singapore", "Queen Street Terminal", "QST", "SG"),
-    ("Kota Bharu", "Kota Bharu Terminal", "KTB", "KN"),
-    ("Kuantan", "Terminal Sentral Kuantan", "TSK", "PH"),
+    # (city, name, code, state, country)
+    ("Kuala Lumpur", "KL Sentral", "KLS", "WP", "MY"),
+    ("Kuala Lumpur", "Terminal Bersepadu Selatan (TBS)", "TBS", "WP", "MY"),
+    ("Kuala Lumpur", "Pudu Sentral", "PDS", "WP", "MY"),
+    ("Kuala Lumpur", "Hentian Duta", "HDT", "WP", "MY"),
+    ("Penang", "Sungai Nibong", "SGN", "PG", "MY"),
+    ("Penang", "Butterworth Penang Sentral", "BPS", "PG", "MY"),
+    ("Johor Bahru", "Larkin Sentral", "LKS", "JH", "MY"),
+    ("Johor Bahru", "JB Sentral (Causeway)", "JBS", "JH", "MY"),
+    ("Melaka", "Melaka Sentral", "MKS", "ML", "MY"),
+    ("Ipoh", "Ipoh Amanjaya", "IPA", "PK", "MY"),
+    ("Singapore", "Golden Mile Complex", "GMC", "SG", "SG"),
+    ("Singapore", "Queen Street Terminal", "QST", "SG", "SG"),
+    ("Kota Bharu", "Kota Bharu Terminal", "KTB", "KN", "MY"),
+    ("Kuantan", "Terminal Sentral Kuantan", "TSK", "PH", "MY"),
 ]
+
+COUNTRY_TO_CURRENCY = {"MY": "myr", "SG": "sgd"}
 
 
 async def _seed_terminals():
     if await db.terminals.count_documents({}) > 0:
+        # Backfill country on any existing record missing it
+        async for t in db.terminals.find({"country": {"$exists": False}}):
+            country = "SG" if t.get("city") == "Singapore" else "MY"
+            await db.terminals.update_one({"id": t["id"]}, {"$set": {"country": country}})
         return
-    for city, name, code, state in MALAYSIAN_TERMINALS:
+    for city, name, code, state, country in MALAYSIAN_TERMINALS:
         await db.terminals.insert_one(
-            {"id": new_id(), "city": city, "name": name, "code": code, "state": state}
+            {"id": new_id(), "city": city, "name": name, "code": code, "state": state, "country": country}
         )
     logger.info("Seeded %d terminals", len(MALAYSIAN_TERMINALS))
 
@@ -845,6 +909,9 @@ async def _seed_schedules():
                 op = OPERATORS[i % len(OPERATORS)]
                 bt = BUS_TYPES[i % len(BUS_TYPES)]
                 origin_term = alt_from if (i == 1 and alt_from) else from_t
+                sched_currency = COUNTRY_TO_CURRENCY.get(origin_term.get("country", "MY"), "myr")
+                # For SGD schedules, approximate local pricing (MYR * 0.33 rounded to nearest whole)
+                sched_fare = round(fare * 0.33) if sched_currency == "sgd" else fare
                 await db.schedules.insert_one(
                     {
                         "id": new_id(),
@@ -855,15 +922,35 @@ async def _seed_schedules():
                         "arrival_time": at,
                         "bus_operator": op,
                         "bus_type": bt,
-                        "adult_fare": fare,
+                        "adult_fare": sched_fare,
                         "rows": 10,
                         "total_seats": 40,
-                        "currency": "myr",
+                        "currency": sched_currency,
                         "created_at": utcnow().isoformat(),
                     }
                 )
                 total += 1
     logger.info("Seeded %d schedules", total)
+
+
+async def _migrate_sg_schedules():
+    """One-time migration: for schedules where the origin terminal is in Singapore,
+    ensure currency is 'sgd' and fares are adjusted from MYR."""
+    sg_terminals = await db.terminals.find({"country": "SG"}, {"_id": 0, "id": 1}).to_list(100)
+    sg_ids = [t["id"] for t in sg_terminals]
+    if not sg_ids:
+        return
+    wrong = db.schedules.find({"from_terminal_id": {"$in": sg_ids}, "currency": {"$ne": "sgd"}}, {"_id": 0})
+    fixed = 0
+    async for s in wrong:
+        new_fare = round(float(s.get("adult_fare", 0)) * 0.33)
+        await db.schedules.update_one(
+            {"id": s["id"]},
+            {"$set": {"currency": "sgd", "adult_fare": new_fare}},
+        )
+        fixed += 1
+    if fixed:
+        logger.info("Migrated %d SG-origin schedules to SGD pricing", fixed)
 
 
 async def _seed_admin():
@@ -948,8 +1035,9 @@ async def on_start():
     await _seed_terminals()
     await _seed_admin()
     await _seed_schedules()
+    await _migrate_sg_schedules()
     await _seed_promos()
-    logger.info("Transit E1 startup complete")
+    logger.info("Star Qistna startup complete")
 
 
 @app.on_event("shutdown")
