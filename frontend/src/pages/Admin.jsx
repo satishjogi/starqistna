@@ -13,8 +13,11 @@ export default function Admin() {
   const [promos, setPromos] = useState([]);
   const [tab, setTab] = useState("bookings");
   const [form, setForm] = useState({
-    from_terminal_id: "", to_terminal_id: "", departure_date: "", departure_time: "08:00", arrival_time: "12:00",
-    bus_operator: "Star Qistna", bus_type: "Standard", adult_fare: 50, rows: 10, currency: "myr",
+    from_terminal_id: "", to_terminal_id: "",
+    start_date: "", end_date: "",
+    days_of_week: [0, 1, 2, 3, 4, 5, 6],
+    departure_time: "08:00", arrival_time: "12:00",
+    bus_type: "Standard", adult_fare: 50, rows: 10,
   });
   const [promoForm, setPromoForm] = useState({
     code: "", type: "percent", value: 10, currency: "myr", max_uses: "", valid_until: "", description: "",
@@ -45,13 +48,35 @@ export default function Admin() {
   const createSched = async (e) => {
     e.preventDefault();
     setMsg("");
+    if (!form.start_date || !form.end_date) {
+      setMsg("Start date and end date are both required.");
+      return;
+    }
+    if (form.end_date < form.start_date) {
+      setMsg("End date must be on or after start date.");
+      return;
+    }
+    if (form.days_of_week.length === 0) {
+      setMsg("Pick at least one day of the week.");
+      return;
+    }
     try {
-      await api.post("/admin/schedules", { ...form, adult_fare: parseFloat(form.adult_fare), rows: parseInt(form.rows) });
-      setMsg("Schedule added.");
+      const { data } = await api.post("/admin/schedules/bulk", {
+        ...form,
+        adult_fare: parseFloat(form.adult_fare),
+        rows: parseInt(form.rows),
+      });
+      setMsg(`Created ${data.created} schedule(s)${data.skipped_duplicates ? ` · ${data.skipped_duplicates} skipped (duplicates)` : ""} · billed in ${data.currency.toUpperCase()}.`);
       loadAll();
     } catch (e) {
       setMsg(e?.response?.data?.detail || "Failed");
     }
+  };
+
+  const toggleDay = (d) => {
+    const set = new Set(form.days_of_week);
+    if (set.has(d)) set.delete(d); else set.add(d);
+    setForm({ ...form, days_of_week: [...set].sort() });
   };
 
   const createPromo = async (e) => {
@@ -186,7 +211,7 @@ export default function Admin() {
       )}
 
       {tab === "add-schedule" && (
-        <form onSubmit={createSched} className="te-card p-6 mt-6 grid grid-cols-1 md:grid-cols-2 gap-4 max-w-3xl" data-testid="add-sched-form">
+        <form onSubmit={createSched} className="te-card p-6 mt-6 grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl" data-testid="add-sched-form">
           <div>
             <label className="te-label">From Terminal</label>
             <select className="te-input" required value={form.from_terminal_id} onChange={(e) => setForm({ ...form, from_terminal_id: e.target.value })}>
@@ -201,7 +226,38 @@ export default function Admin() {
               {terminals.map((t) => <option key={t.id} value={t.id}>{t.city} · {t.name}</option>)}
             </select>
           </div>
-          <div><label className="te-label">Date</label><input type="date" className="te-input" required value={form.departure_date} onChange={(e) => setForm({ ...form, departure_date: e.target.value })} /></div>
+          <div>
+            <label className="te-label">First trip date</label>
+            <input type="date" className="te-input" required value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} data-testid="sched-start-date" />
+          </div>
+          <div>
+            <label className="te-label">Last trip date (inclusive) <span className="text-[#B5121B]">*</span></label>
+            <input type="date" className="te-input" required value={form.end_date} onChange={(e) => setForm({ ...form, end_date: e.target.value })} data-testid="sched-end-date" />
+          </div>
+          <div className="md:col-span-2">
+            <label className="te-label">Runs on (days of week)</label>
+            <div className="grid grid-cols-7 gap-[1px] bg-black/10 border border-black/15" data-testid="days-of-week-picker">
+              {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day, i) => {
+                const active = form.days_of_week.includes(i);
+                return (
+                  <button
+                    key={day}
+                    type="button"
+                    onClick={() => toggleDay(i)}
+                    className={`px-2 py-2.5 text-xs font-bold uppercase tracking-wider transition ${active ? "bg-[#002FA7] text-white" : "bg-white hover:bg-zinc-50 text-zinc-500"}`}
+                    data-testid={`dow-${day.toLowerCase()}`}
+                  >
+                    {day}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex gap-3 mt-2 text-[10px] font-mono">
+              <button type="button" className="underline text-zinc-600" onClick={() => setForm({ ...form, days_of_week: [0, 1, 2, 3, 4, 5, 6] })}>All days</button>
+              <button type="button" className="underline text-zinc-600" onClick={() => setForm({ ...form, days_of_week: [0, 1, 2, 3, 4] })}>Weekdays</button>
+              <button type="button" className="underline text-zinc-600" onClick={() => setForm({ ...form, days_of_week: [5, 6] })}>Weekends</button>
+            </div>
+          </div>
           <div>
             <label className="te-label">Coach class</label>
             <div className="grid grid-cols-3 gap-[1px] bg-black/10 border border-black/15" data-testid="coach-class-picker">
@@ -212,9 +268,7 @@ export default function Admin() {
                     key={bt}
                     type="button"
                     onClick={() => setForm({ ...form, bus_type: bt })}
-                    className={`px-3 py-2.5 text-xs font-bold uppercase tracking-wider transition ${
-                      selected ? "bg-[#B5121B] text-white" : "bg-white hover:bg-zinc-50"
-                    }`}
+                    className={`px-3 py-2.5 text-xs font-bold uppercase tracking-wider transition ${selected ? "bg-[#B5121B] text-white" : "bg-white hover:bg-zinc-50"}`}
                     data-testid={`coach-class-${bt.replace(" ", "-").toLowerCase()}`}
                   >
                     {bt}
@@ -223,16 +277,30 @@ export default function Admin() {
               })}
             </div>
           </div>
-          <div><label className="te-label">Departure time</label><input type="time" className="te-input" value={form.departure_time} onChange={(e) => setForm({ ...form, departure_time: e.target.value })} /></div>
-          <div><label className="te-label">Arrival time</label><input type="time" className="te-input" value={form.arrival_time} onChange={(e) => setForm({ ...form, arrival_time: e.target.value })} /></div>
-          <div><label className="te-label">Adult fare</label><input type="number" step="0.01" className="te-input" value={form.adult_fare} onChange={(e) => setForm({ ...form, adult_fare: e.target.value })} /></div>
-          <div><label className="te-label">Rows (seats = rows × 4)</label><input type="number" className="te-input" value={form.rows} onChange={(e) => setForm({ ...form, rows: e.target.value })} /></div>
-          <div className="md:col-span-2 text-[10px] font-mono text-zinc-500">
-            OPERATOR · STAR QISTNA (single operator) · CURRENCY AUTO-DERIVED FROM ORIGIN TERMINAL COUNTRY
+          <div>
+            <label className="te-label">Adult fare</label>
+            <input type="number" step="0.01" className="te-input" value={form.adult_fare} onChange={(e) => setForm({ ...form, adult_fare: e.target.value })} />
+          </div>
+          <div>
+            <label className="te-label">Departure time</label>
+            <input type="time" className="te-input" value={form.departure_time} onChange={(e) => setForm({ ...form, departure_time: e.target.value })} />
+          </div>
+          <div>
+            <label className="te-label">Arrival time</label>
+            <input type="time" className="te-input" value={form.arrival_time} onChange={(e) => setForm({ ...form, arrival_time: e.target.value })} />
+          </div>
+          <div>
+            <label className="te-label">Rows (seats = rows × 4)</label>
+            <input type="number" className="te-input" value={form.rows} onChange={(e) => setForm({ ...form, rows: e.target.value })} />
+          </div>
+          <div className="md:col-span-2 text-[10px] font-mono text-zinc-500 leading-relaxed border-l-2 border-[#002FA7] pl-3 py-1">
+            OPERATOR · STAR QISTNA (single operator)<br/>
+            CURRENCY · AUTO-DERIVED FROM ORIGIN TERMINAL COUNTRY (SG → SGD, MY → MYR)<br/>
+            BULK MODE · CREATES ONE SCHEDULE PER SELECTED WEEKDAY BETWEEN START & END DATES · MAX 180 DAYS
           </div>
           <div className="md:col-span-2 flex items-center gap-4">
-            <button className="te-btn-primary" data-testid="add-sched-submit">Add schedule</button>
-            {msg && <div className="text-xs font-bold">{msg}</div>}
+            <button className="te-btn-primary" data-testid="add-sched-submit">Generate schedules</button>
+            {msg && <div className="text-xs font-bold" data-testid="sched-msg">{msg}</div>}
           </div>
         </form>
       )}

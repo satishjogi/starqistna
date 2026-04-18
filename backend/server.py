@@ -816,6 +816,19 @@ class CreateScheduleBody(BaseModel):
     currency: str = "myr"
 
 
+class BulkScheduleBody(BaseModel):
+    from_terminal_id: str
+    to_terminal_id: str
+    start_date: str  # YYYY-MM-DD  (first trip)
+    end_date: str    # YYYY-MM-DD  (last trip — inclusive)
+    days_of_week: List[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])  # 0=Mon..6=Sun
+    departure_time: str
+    arrival_time: str
+    bus_type: Literal["VIP 27", "Executive", "Standard"] = "Standard"
+    adult_fare: float
+    rows: int = 10
+
+
 class TerminalCreateBody(BaseModel):
     city: str = Field(min_length=1)
     name: str = Field(min_length=1)
@@ -907,6 +920,103 @@ async def admin_create_schedule(body: CreateScheduleBody, user: dict = Depends(r
     await db.schedules.insert_one(doc)
     doc.pop("_id", None)
     return doc
+
+
+@api.post("/admin/schedules/bulk")
+async def admin_bulk_create_schedules(body: BulkScheduleBody, user: dict = Depends(require_admin)):
+    """Generate one schedule per date matching days_of_week between start_date and end_date (inclusive).
+    Enforces: end_date >= start_date, max 180-day span, no open-ended schedules."""
+    try:
+        start = datetime.fromisoformat(body.start_date).date()
+        end = datetime.fromisoformat(body.end_date).date()
+    except ValueError:
+        raise HTTPException(400, "Invalid start_date or end_date (expected YYYY-MM-DD)")
+    if end < start:
+        raise HTTPException(400, "end_date must be on or after start_date")
+    span = (end - start).days + 1
+    if span > 180:
+        raise HTTPException(400, f"Date range too large ({span} days). Max 180 days per bulk create.")
+    if not body.days_of_week or any(d < 0 or d > 6 for d in body.days_of_week):
+        raise HTTPException(400, "days_of_week must be a non-empty list of 0..6 (0=Mon..6=Sun)")
+
+    origin = await db.terminals.find_one({"id": body.from_terminal_id}, {"_id": 0})
+    dest = await db.terminals.find_one({"id": body.to_terminal_id}, {"_id": 0})
+    if not origin or not dest:
+        raise HTTPException(400, "Invalid from_terminal_id or to_terminal_id")
+    if body.from_terminal_id == body.to_terminal_id:
+        raise HTTPException(400, "From and To terminals must differ")
+    derived_currency = COUNTRY_TO_CURRENCY.get(origin.get("country", "MY"), "myr")
+
+    dow_set = set(body.days_of_week)
+    created = 0
+    skipped = 0
+    cur = start
+    while cur <= end:
+        if cur.weekday() in dow_set:
+            # Avoid exact duplicates (same route + date + time)
+            existing = await db.schedules.find_one({
+                "from_terminal_id": body.from_terminal_id,
+                "to_terminal_id": body.to_terminal_id,
+                "departure_date": cur.isoformat(),
+                "departure_time": body.departure_time,
+            })
+            if existing:
+                skipped += 1
+            else:
+                await db.schedules.insert_one({
+                    "id": new_id(),
+                    "from_terminal_id": body.from_terminal_id,
+                    "to_terminal_id": body.to_terminal_id,
+                    "departure_date": cur.isoformat(),
+                    "departure_time": body.departure_time,
+                    "arrival_time": body.arrival_time,
+                    "bus_operator": "Star Qistna",
+                    "bus_type": body.bus_type,
+                    "adult_fare": body.adult_fare,
+                    "rows": body.rows,
+                    "total_seats": body.rows * 4,
+                    "currency": derived_currency,
+                    "created_at": utcnow().isoformat(),
+                })
+                created += 1
+        cur += timedelta(days=1)
+    return {
+        "created": created,
+        "skipped_duplicates": skipped,
+        "start_date": body.start_date,
+        "end_date": body.end_date,
+        "currency": derived_currency,
+    }
+
+
+@api.delete("/admin/schedules/range")
+async def admin_delete_schedules_range(
+    from_terminal_id: str,
+    to_terminal_id: str,
+    start_date: str,
+    end_date: str,
+    user: dict = Depends(require_admin),
+):
+    """Delete all schedules for a route within a date range. Blocks if any bookings exist for those schedules."""
+    try:
+        datetime.fromisoformat(start_date)
+        datetime.fromisoformat(end_date)
+    except ValueError:
+        raise HTTPException(400, "Invalid date format (expected YYYY-MM-DD)")
+    target = await db.schedules.find({
+        "from_terminal_id": from_terminal_id,
+        "to_terminal_id": to_terminal_id,
+        "departure_date": {"$gte": start_date, "$lte": end_date},
+    }, {"_id": 0, "id": 1}).to_list(1000)
+    ids = [s["id"] for s in target]
+    if not ids:
+        return {"deleted": 0, "bookings_blocking": 0}
+    # Block if any booking references these schedules
+    booking_count = await db.bookings.count_documents({"schedule_id": {"$in": ids}})
+    if booking_count > 0:
+        raise HTTPException(400, f"Cannot delete — {booking_count} booking(s) exist for these schedules")
+    result = await db.schedules.delete_many({"id": {"$in": ids}})
+    return {"deleted": result.deleted_count, "range": f"{start_date}..{end_date}"}
 
 
 # ---------- Seeding & Indexes ----------
