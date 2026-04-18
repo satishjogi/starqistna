@@ -867,20 +867,20 @@ async def _seed_schedules():
 
 
 async def _seed_admin():
-    if await db.users.find_one({"email": "admin@transit.my"}):
+    if await db.users.find_one({"email": "admin@starqistna.com"}):
         return
     await db.users.insert_one(
         {
             "id": new_id(),
-            "email": "admin@transit.my",
-            "full_name": "Transit Admin",
+            "email": "admin@starqistna.com",
+            "full_name": "Star Qistna Admin",
             "phone": "+60123456789",
             "password_hash": hash_password("Admin@123"),
             "is_admin": True,
             "created_at": utcnow().isoformat(),
         }
     )
-    logger.info("Seeded admin user admin@transit.my / Admin@123")
+    logger.info("Seeded admin user admin@starqistna.com / Admin@123")
 
 
 async def _seed_promos():
