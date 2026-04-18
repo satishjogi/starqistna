@@ -61,7 +61,7 @@ export default function SearchResults() {
               <div className="text-2xl font-black">{data.from.city}</div>
               <div className="text-xs font-mono text-zinc-500">{data.from.code} · {data.from.name}</div>
             </div>
-            <div className="text-3xl text-[#FF4500] font-black">→</div>
+            <div className="text-3xl text-[#B5121B] font-black">→</div>
             <div>
               <div className="te-overline">To</div>
               <div className="text-2xl font-black">{data.to.city}</div>
@@ -116,7 +116,7 @@ export default function SearchResults() {
                     </div>
                     <div className="col-span-6 md:col-span-2">
                       <div className="te-overline text-[10px]">Seats</div>
-                      <div className={`font-mono font-bold ${s.seats_available < 5 ? "text-[#FF4500]" : ""}`}>
+                      <div className={`font-mono font-bold ${s.seats_available < 5 ? "text-[#B5121B]" : ""}`}>
                         {s.seats_available} / {s.total_seats}
                       </div>
                     </div>

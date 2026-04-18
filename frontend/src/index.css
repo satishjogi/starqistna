@@ -8,8 +8,8 @@
 :root {
     --brand-primary: #002FA7;
     --brand-primary-hover: #00258A;
-    --brand-accent: #FF4500;
-    --brand-accent-hover: #E03C00;
+    --brand-accent: #B5121B;
+    --brand-accent-hover: #8D0E15;
     --bg-default: #FFFFFF;
     --bg-subtle: #F4F4F5;
     --bg-muted: #E4E4E7;
@@ -122,12 +122,12 @@ h1, h2, h3, h4, h5 {
     border: none;
     cursor: pointer;
     transition: all 200ms ease;
-    box-shadow: 0 4px 14px 0 rgba(255, 69, 0, 0.35);
+    box-shadow: 0 4px 14px 0 rgba(181, 18, 27, 0.35);
     border-radius: 2px;
 }
 .te-btn-accent:hover {
     background: var(--brand-accent-hover);
-    box-shadow: 0 6px 20px rgba(255, 69, 0, 0.45);
+    box-shadow: 0 6px 20px rgba(181, 18, 27, 0.45);
     transform: translateY(-1px);
 }
 
@@ -208,7 +208,7 @@ h1, h2, h3, h4, h5 {
     color: white;
     border: 1px solid var(--brand-accent);
     cursor: pointer;
-    box-shadow: 0 0 0 2px rgba(255, 69, 0, 0.25);
+    box-shadow: 0 0 0 2px rgba(181, 18, 27, 0.25);
 }
 .seat-booked {
     background: #E4E4E7;

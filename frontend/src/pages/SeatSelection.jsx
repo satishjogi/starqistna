@@ -115,7 +115,7 @@ export default function SeatSelection() {
       <div className="flex flex-wrap items-end gap-4 mb-6">
         <div>
           <h1 className="text-3xl md:text-4xl font-black tracking-tight">
-            {data.from.city} <span className="text-[#FF4500]">→</span> {data.to.city}
+            {data.from.city} <span className="text-[#B5121B]">→</span> {data.to.city}
           </h1>
           <div className="font-mono text-xs text-zinc-500 mt-1">
             {data.schedule.departure_date} · {data.schedule.departure_time} → {data.schedule.arrival_time} · {data.schedule.bus_operator}

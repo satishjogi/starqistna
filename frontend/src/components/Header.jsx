@@ -9,11 +9,10 @@ export default function Header() {
   return (
     <header className="sticky top-0 z-50 backdrop-blur-xl bg-white/85 border-b border-black/10">
       <div className="px-6 md:px-12 lg:px-20 h-16 flex items-center justify-between">
-        <Link to="/" className="flex items-center gap-2" data-testid="brand-link">
-          <div className="w-8 h-8 bg-[#002FA7] flex items-center justify-center text-white font-black text-sm rounded-sm">TE</div>
-          <div className="leading-none">
-            <div className="font-black tracking-tight text-lg">TRANSIT/E1</div>
-            <div className="text-[9px] tracking-[0.25em] font-mono text-zinc-500 mt-0.5">BUS BOOKING SYSTEM</div>
+        <Link to="/" className="flex items-center gap-3" data-testid="brand-link">
+          <img src="/logo.png" alt="Star Qistna" className="h-14 w-auto -my-3" />
+          <div className="leading-none hidden md:block">
+            <div className="text-[9px] tracking-[0.25em] font-mono text-zinc-500">FIRST CLASS MASSAGE COACH</div>
           </div>
         </Link>
 

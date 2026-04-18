@@ -148,7 +148,7 @@ export default function Home() {
               <div className="te-overline mb-4" data-testid="hero-overline">System 01 · Inter-city Buses</div>
               <h1 className="text-5xl sm:text-6xl lg:text-7xl font-black tracking-tighter leading-[0.9]">
                 Book the bus.<br/>
-                <span className="text-[#FF4500]">Keep the seat.</span>
+                <span className="text-[#B5121B]">Keep the seat.</span>
               </h1>
               <p className="mt-6 text-lg text-zinc-600 max-w-xl">
                 Scheduled inter-city buses across Malaysia & Singapore. Real seat locks. No overbooking. Pay with card — iPay88 coming soon.
@@ -230,7 +230,7 @@ export default function Home() {
             { n: "03", t: "Pay securely", d: "Pay by card via Stripe. Tickets delivered instantly with reference code." },
           ].map((s) => (
             <div key={s.n} className="bg-white p-8">
-              <div className="font-mono text-xs text-[#FF4500] tracking-wider">{s.n}</div>
+              <div className="font-mono text-xs text-[#B5121B] tracking-wider">{s.n}</div>
               <h3 className="text-2xl font-black mt-4">{s.t}</h3>
               <p className="text-sm text-zinc-600 mt-3">{s.d}</p>
             </div>
@@ -243,15 +243,15 @@ export default function Home() {
 
 // ----- Popular Routes (clickable) -----
 const POPULAR_ROUTES = [
-  { from: "Kuala Lumpur", to: "Melaka",        tag: "GO TODAY",      line: "90-min weekend escape",       price: 25, size: "lg", accent: "#FF4500" },
+  { from: "Kuala Lumpur", to: "Melaka",        tag: "GO TODAY",      line: "90-min weekend escape",       price: 25, size: "lg", accent: "#B5121B" },
   { from: "Kuala Lumpur", to: "Johor Bahru",   tag: "HOT SELLING",   line: "South-bound workhorse",       price: 45, size: "md", accent: "#002FA7" },
   { from: "Kuala Lumpur", to: "Singapore",     tag: "CROSS-BORDER",  line: "Beat the causeway crawl",     price: 55, size: "md", accent: "#002FA7" },
-  { from: "Kuala Lumpur", to: "Penang",        tag: "FOODIE FAVE",   line: "Char kuey teow calls",         price: 49, size: "md", accent: "#FF4500" },
+  { from: "Kuala Lumpur", to: "Penang",        tag: "FOODIE FAVE",   line: "Char kuey teow calls",         price: 49, size: "md", accent: "#B5121B" },
   { from: "Kuala Lumpur", to: "Ipoh",          tag: "QUICK ESCAPE",  line: "White coffee country",         price: 35, size: "sm", accent: "#002FA7" },
   { from: "Singapore",    to: "Kuala Lumpur",  tag: "TOP RETURN",    line: "Back to the capital",          price: 55, size: "sm", accent: "#002FA7" },
-  { from: "Johor Bahru",  to: "Kuala Lumpur",  tag: "COMMUTER",      line: "Monday morning rush",          price: 45, size: "sm", accent: "#FF4500" },
+  { from: "Johor Bahru",  to: "Kuala Lumpur",  tag: "COMMUTER",      line: "Monday morning rush",          price: 45, size: "sm", accent: "#B5121B" },
   { from: "Penang",       to: "Kuala Lumpur",  tag: "NORTHBOUND",    line: "Island to city",               price: 49, size: "sm", accent: "#002FA7" },
-  { from: "Kuala Lumpur", to: "Kuantan",       tag: "EAST COAST",    line: "Beach weekend bound",          price: 52, size: "sm", accent: "#FF4500" },
+  { from: "Kuala Lumpur", to: "Kuantan",       tag: "EAST COAST",    line: "Beach weekend bound",          price: 52, size: "sm", accent: "#B5121B" },
 ];
 
 function PopularRoutes() {
@@ -281,7 +281,7 @@ function PopularRoutes() {
         <div>
           <div className="te-overline mb-2">Popular routes</div>
           <h2 className="text-3xl md:text-5xl font-black tracking-tight">
-            Where everyone's going <span className="text-[#FF4500]">today.</span>
+            Where everyone's going <span className="text-[#B5121B]">today.</span>
           </h2>
         </div>
         <div className="font-mono text-[10px] text-zinc-500 tracking-wider">
