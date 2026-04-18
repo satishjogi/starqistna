@@ -147,11 +147,11 @@ export default function Home() {
             <div className="col-span-12 lg:col-span-7">
               <div className="te-overline mb-4" data-testid="hero-overline">System 01 · Inter-city Buses</div>
               <h1 className="text-5xl sm:text-6xl lg:text-7xl font-black tracking-tighter leading-[0.9]">
-                Book the bus.<br/>
-                <span className="text-[#B5121B]">Keep the seat.</span>
+                Arrive rested.<br/>
+                <span className="text-[#B5121B]">First class coach.</span>
               </h1>
               <p className="mt-6 text-lg text-zinc-600 max-w-xl">
-                Scheduled inter-city buses across Malaysia & Singapore. Real seat locks. No overbooking. Pay with card — iPay88 coming soon.
+                Star Qistna runs premium massage-coach service across Malaysia & Singapore. Real seat locks. No overbooking. Pay by card — iPay88 coming soon.
               </p>
             </div>
             <div className="col-span-12 lg:col-span-5 hidden lg:flex items-end justify-end">

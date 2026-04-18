@@ -543,7 +543,7 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
         p["seat_number"] = sa["seat_number"]
         pax_with_seat.append(p)
 
-    booking_ref = "TE" + booking_id.replace("-", "")[:8].upper()
+    booking_ref = "SQ" + booking_id.replace("-", "")[:8].upper()
     doc = {
         "id": booking_id,
         "reference": booking_ref,
