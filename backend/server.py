@@ -14,6 +14,7 @@ import logging
 import uuid
 import bcrypt
 import jwt
+import pyotp
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from typing import List, Optional, Literal
@@ -86,7 +87,7 @@ async def current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(b
         raise HTTPException(401, "Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(401, "Invalid token")
-    user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
+    user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0, "totp_secret": 0})
     return user
 
 
@@ -114,6 +115,24 @@ class RegisterBody(BaseModel):
 class LoginBody(BaseModel):
     email: EmailStr
     password: str
+
+
+class TwoFASetupBody(BaseModel):
+    password: str
+
+
+class TwoFAEnableBody(BaseModel):
+    code: str = Field(min_length=6, max_length=6)
+
+
+class TwoFADisableBody(BaseModel):
+    password: str
+    code: str = Field(min_length=6, max_length=6)
+
+
+class TwoFAVerifyBody(BaseModel):
+    challenge_token: str
+    code: str = Field(min_length=6, max_length=6)
 
 
 class TokenResponse(BaseModel):
@@ -293,17 +312,102 @@ async def register(body: RegisterBody):
         "created_at": utcnow().isoformat(),
     }
     await db.users.insert_one(doc)
-    user_public = {k: v for k, v in doc.items() if k not in ("password_hash", "_id")}
+    user_public = {k: v for k, v in doc.items() if k not in ("password_hash", "_id", "totp_secret")}
     return TokenResponse(access_token=issue_jwt(user_id, doc["email"]), user=user_public)
 
 
-@api.post("/auth/login", response_model=TokenResponse)
+@api.post("/auth/login")
 async def login(body: LoginBody):
     user = await db.users.find_one({"email": body.email.lower()})
     if not user or not verify_password(body.password, user["password_hash"]):
         raise HTTPException(401, "Invalid email or password")
-    user_public = {k: v for k, v in user.items() if k not in ("password_hash", "_id")}
+
+    # If 2FA is enabled, return a short-lived challenge instead of the JWT
+    if user.get("totp_enabled"):
+        challenge = jwt.encode(
+            {
+                "sub": user["id"],
+                "email": user["email"],
+                "scope": "2fa_challenge",
+                "exp": utcnow() + timedelta(minutes=5),
+                "iat": utcnow(),
+            },
+            JWT_SECRET,
+            algorithm=JWT_ALG,
+        )
+        return {"requires_2fa": True, "challenge_token": challenge}
+
+    user_public = {k: v for k, v in user.items() if k not in ("password_hash", "_id", "totp_secret")}
     return TokenResponse(access_token=issue_jwt(user["id"], user["email"]), user=user_public)
+
+
+@api.post("/auth/2fa/verify")
+async def verify_2fa(body: TwoFAVerifyBody):
+    try:
+        payload = jwt.decode(body.challenge_token, JWT_SECRET, algorithms=[JWT_ALG])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(401, "Challenge expired — log in again")
+    except jwt.InvalidTokenError:
+        raise HTTPException(401, "Invalid challenge token")
+    if payload.get("scope") != "2fa_challenge":
+        raise HTTPException(401, "Invalid challenge scope")
+
+    user = await db.users.find_one({"id": payload["sub"]})
+    if not user or not user.get("totp_enabled") or not user.get("totp_secret"):
+        raise HTTPException(400, "2FA is not enabled for this account")
+
+    totp = pyotp.TOTP(user["totp_secret"])
+    if not totp.verify(body.code, valid_window=1):
+        raise HTTPException(401, "Invalid 2FA code")
+
+    user_public = {k: v for k, v in user.items() if k not in ("password_hash", "_id", "totp_secret")}
+    return TokenResponse(access_token=issue_jwt(user["id"], user["email"]), user=user_public)
+
+
+@api.post("/auth/2fa/setup")
+async def setup_2fa(body: TwoFASetupBody, user: dict = Depends(require_user)):
+    # Re-verify password before generating secret
+    full = await db.users.find_one({"id": user["id"]})
+    if not full or not verify_password(body.password, full["password_hash"]):
+        raise HTTPException(401, "Password check failed")
+    if full.get("totp_enabled"):
+        raise HTTPException(400, "2FA is already enabled")
+    secret = pyotp.random_base32()
+    await db.users.update_one({"id": user["id"]}, {"$set": {"totp_secret": secret, "totp_enabled": False}})
+    issuer = "Star Qistna"
+    uri = pyotp.TOTP(secret).provisioning_uri(name=user["email"], issuer_name=issuer)
+    return {"secret": secret, "otpauth_uri": uri, "issuer": issuer}
+
+
+@api.post("/auth/2fa/enable")
+async def enable_2fa(body: TwoFAEnableBody, user: dict = Depends(require_user)):
+    full = await db.users.find_one({"id": user["id"]})
+    if not full or not full.get("totp_secret"):
+        raise HTTPException(400, "Start the setup flow first")
+    if full.get("totp_enabled"):
+        raise HTTPException(400, "2FA is already enabled")
+    totp = pyotp.TOTP(full["totp_secret"])
+    if not totp.verify(body.code, valid_window=1):
+        raise HTTPException(401, "Invalid 2FA code — re-scan the QR and try again")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"totp_enabled": True}})
+    return {"enabled": True}
+
+
+@api.post("/auth/2fa/disable")
+async def disable_2fa(body: TwoFADisableBody, user: dict = Depends(require_user)):
+    full = await db.users.find_one({"id": user["id"]})
+    if not full or not full.get("totp_enabled"):
+        raise HTTPException(400, "2FA is not enabled")
+    if not verify_password(body.password, full["password_hash"]):
+        raise HTTPException(401, "Password check failed")
+    totp = pyotp.TOTP(full["totp_secret"])
+    if not totp.verify(body.code, valid_window=1):
+        raise HTTPException(401, "Invalid 2FA code")
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"totp_enabled": False}, "$unset": {"totp_secret": ""}},
+    )
+    return {"enabled": False}
 
 
 @api.get("/auth/me")

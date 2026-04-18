@@ -48,7 +48,7 @@ function TerminalSelect({ label, value, onChange, testId, exclude }) {
         )}
       </button>
       {open && (
-        <div className="absolute z-40 top-[calc(100%+4px)] left-0 right-0 bg-white border border-black/15 shadow-xl rounded-sm max-h-96 overflow-auto">
+        <div className="absolute z-[60] top-[calc(100%+4px)] left-0 right-0 bg-white border border-black/15 shadow-xl rounded-sm max-h-96 overflow-auto">
           <div className="p-3 border-b border-black/10 sticky top-0 bg-white">
             <input
               className="te-input"

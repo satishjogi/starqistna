@@ -21,9 +21,10 @@ export default function Footer() {
         <div>
           <div className="te-overline mb-3">Support</div>
           <ul className="space-y-2 text-sm">
-            <li>Help Center</li>
-            <li>Refunds</li>
-            <li>Contact</li>
+            <li><a href="/terms" className="hover:underline">Terms of Service</a></li>
+            <li><a href="/privacy" className="hover:underline">Privacy Policy</a></li>
+            <li><a href="/refund" className="hover:underline">Refund Policy</a></li>
+            <li><a href="mailto:support@starqistna.com" className="hover:underline">Contact</a></li>
           </ul>
         </div>
       </div>
