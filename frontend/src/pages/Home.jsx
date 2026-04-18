@@ -137,9 +137,9 @@ export default function Home() {
   return (
     <div>
       {/* Hero */}
-      <section className="relative overflow-hidden border-b border-black/10">
-        <div className="absolute inset-0 -z-10 hero-grid" />
-        <div className="absolute inset-0 -z-20">
+      <section className="relative border-b border-black/10">
+        <div className="absolute inset-0 -z-10 hero-grid overflow-hidden" />
+        <div className="absolute inset-0 -z-20 overflow-hidden">
           <img src={HERO_BG} alt="" className="w-full h-full object-cover opacity-10" />
         </div>
         <div className="px-6 md:px-12 lg:px-20 pt-16 pb-24">
