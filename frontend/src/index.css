@@ -43,6 +43,9 @@ h1, h2, h3, h4, h5 {
     font-family: 'JetBrains Mono', monospace;
 }
 
+/* Hide Emergent badge if any script tries to re-inject it */
+#emergent-badge { display: none !important; }
+
 @layer base {
     :root {
         --background: 0 0% 100%;
