@@ -5,6 +5,7 @@ import logging
 import asyncio
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 
@@ -49,7 +50,8 @@ def _render_ticket_html(booking: dict, from_term: dict, to_term: dict) -> str:
         for p in booking.get("passengers", [])
     )
 
-    qr = _qr_png_base64(ref)
+    # Use external QR service URL — Gmail etc. load HTTP(S) images, but block inline base64.
+    qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=220x220&data={quote(ref)}&margin=8"
 
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Your Star Qistna ticket</title></head>
@@ -70,7 +72,7 @@ def _render_ticket_html(booking: dict, from_term: dict, to_term: dict) -> str:
             <div style="font-family:monospace;font-weight:900;font-size:28px;letter-spacing:1px;margin-top:4px">{ref}</div>
           </td>
           <td align="right" style="padding:16px 24px;vertical-align:middle">
-            <img alt="QR" src="data:image/png;base64,{qr}" width="128" height="128" style="display:block;background:#fff;padding:6px;border:1px solid #e4e4e7" />
+            <img alt="QR {ref}" src="{qr_url}" width="128" height="128" style="display:block;background:#fff;padding:6px;border:1px solid #e4e4e7" />
           </td>
         </tr>
       </table>
@@ -117,14 +119,17 @@ def _render_ticket_html(booking: dict, from_term: dict, to_term: dict) -> str:
 </body></html>"""
 
 
-def _send_sync(to_email: str, subject: str, html: str) -> dict:
-    return resend.Emails.send({
+def _send_sync(to_email: str, subject: str, html: str, attachments: list = None) -> dict:
+    payload = {
         "from": EMAIL_FROM,
         "to": [to_email],
         "subject": subject,
         "html": html,
         "reply_to": [EMAIL_REPLY_TO],
-    })
+    }
+    if attachments:
+        payload["attachments"] = attachments
+    return resend.Emails.send(payload)
 
 
 async def send_booking_confirmation(booking: dict, from_term: dict, to_term: dict):
@@ -138,8 +143,16 @@ async def send_booking_confirmation(booking: dict, from_term: dict, to_term: dic
         return
     html = _render_ticket_html(booking, from_term, to_term)
     subject = f"Star Qistna — Booking confirmed · {booking.get('reference','')}"
+    # Attach QR as a PNG file so the ticket QR is always accessible,
+    # even if the recipient's client blocks external images.
+    ref = booking.get("reference", "ticket")
+    qr_bytes_b64 = _qr_png_base64(ref)
+    attachments = [{
+        "filename": f"{ref}.png",
+        "content": qr_bytes_b64,
+    }]
     try:
-        res = await asyncio.to_thread(_send_sync, to_email, subject, html)
+        res = await asyncio.to_thread(_send_sync, to_email, subject, html, attachments)
         logger.info("Sent booking email to %s ref=%s id=%s", to_email, booking.get("reference"), res.get("id"))
     except Exception as e:
         logger.exception("Failed to send booking email to %s: %s", to_email, e)
