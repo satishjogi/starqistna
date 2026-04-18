@@ -50,8 +50,11 @@ def _render_ticket_html(booking: dict, from_term: dict, to_term: dict) -> str:
         for p in booking.get("passengers", [])
     )
 
-    # Use external QR service URL — Gmail etc. load HTTP(S) images, but block inline base64.
-    qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=220x220&data={quote(ref)}&margin=8"
+    # CID inline reference — resolved from the PNG attachment added in send_booking_confirmation.
+    # Gmail, Outlook, Apple Mail all render CID-referenced attachments inline.
+    qr_src = "cid:qrcode"
+    # Public fallback URL for clients that don't resolve CIDs.
+    qr_fallback = f"https://quickchart.io/qr?text={quote(ref)}&size=220&margin=2"
 
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Your Star Qistna ticket</title></head>
@@ -72,7 +75,7 @@ def _render_ticket_html(booking: dict, from_term: dict, to_term: dict) -> str:
             <div style="font-family:monospace;font-weight:900;font-size:28px;letter-spacing:1px;margin-top:4px">{ref}</div>
           </td>
           <td align="right" style="padding:16px 24px;vertical-align:middle">
-            <img alt="QR {ref}" src="{qr_url}" width="128" height="128" style="display:block;background:#fff;padding:6px;border:1px solid #e4e4e7" />
+            <img alt="QR {ref}" src="{qr_src}" width="128" height="128" style="display:block;background:#fff;padding:6px;border:1px solid #e4e4e7" />
           </td>
         </tr>
       </table>
@@ -143,13 +146,15 @@ async def send_booking_confirmation(booking: dict, from_term: dict, to_term: dic
         return
     html = _render_ticket_html(booking, from_term, to_term)
     subject = f"Star Qistna — Booking confirmed · {booking.get('reference','')}"
-    # Attach QR as a PNG file so the ticket QR is always accessible,
-    # even if the recipient's client blocks external images.
+    # Attach QR as a PNG file with a Content-ID so the HTML body can reference it
+    # as <img src="cid:qrcode">. Attachment also remains downloadable as a fallback.
     ref = booking.get("reference", "ticket")
     qr_bytes_b64 = _qr_png_base64(ref)
     attachments = [{
         "filename": f"{ref}.png",
         "content": qr_bytes_b64,
+        "content_type": "image/png",
+        "content_id": "qrcode",
     }]
     try:
         res = await asyncio.to_thread(_send_sync, to_email, subject, html, attachments)
