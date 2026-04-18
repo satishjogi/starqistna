@@ -14,7 +14,7 @@ export default function Admin() {
   const [tab, setTab] = useState("bookings");
   const [form, setForm] = useState({
     from_terminal_id: "", to_terminal_id: "", departure_date: "", departure_time: "08:00", arrival_time: "12:00",
-    bus_operator: "Transnasional", bus_type: "Standard", adult_fare: 50, rows: 10, currency: "myr",
+    bus_operator: "Star Qistna", bus_type: "Standard", adult_fare: 50, rows: 10, currency: "myr",
   });
   const [promoForm, setPromoForm] = useState({
     code: "", type: "percent", value: 10, currency: "myr", max_uses: "", valid_until: "", description: "",

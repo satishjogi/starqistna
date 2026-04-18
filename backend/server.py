@@ -713,7 +713,17 @@ async def payment_status(session_id: str, request: Request):
     host_url = str(request.base_url).rstrip("/")
     webhook_url = f"{host_url}/api/webhook/stripe"
     stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-    check: CheckoutStatusResponse = await stripe_checkout.get_checkout_status(session_id)
+    try:
+        check: CheckoutStatusResponse = await stripe_checkout.get_checkout_status(session_id)
+    except Exception as e:
+        logger.warning("Stripe status fetch failed for %s: %s", session_id, e)
+        booking = await db.bookings.find_one({"id": txn["booking_id"]}, {"_id": 0})
+        return {
+            "payment_status": txn.get("payment_status", "unknown"),
+            "status": txn.get("status", "unknown"),
+            "booking": booking,
+            "error": "stripe_status_unavailable",
+        }
 
     updates = {
         "status": check.status,
@@ -799,7 +809,7 @@ class CreateScheduleBody(BaseModel):
     departure_date: str
     departure_time: str
     arrival_time: str
-    bus_operator: str
+    bus_operator: str = "Star Qistna"
     bus_type: str = "Standard"
     adult_fare: float
     rows: int = 10
@@ -859,7 +869,7 @@ async def _seed_terminals():
     logger.info("Seeded %d terminals", len(MALAYSIAN_TERMINALS))
 
 
-OPERATORS = ["Transnasional", "Plusliner", "Aeroline", "KKKL Express", "Super Nice"]
+OPERATORS = ["Star Qistna"]
 BUS_TYPES = ["VIP 27", "Executive", "Standard"]
 
 
@@ -931,6 +941,16 @@ async def _seed_schedules():
                 )
                 total += 1
     logger.info("Seeded %d schedules", total)
+
+
+async def _migrate_operator_names():
+    """All schedules belong to single operator 'Star Qistna'."""
+    result = await db.schedules.update_many(
+        {"bus_operator": {"$ne": "Star Qistna"}},
+        {"$set": {"bus_operator": "Star Qistna"}},
+    )
+    if result.modified_count:
+        logger.info("Migrated %d schedules to Star Qistna operator", result.modified_count)
 
 
 async def _migrate_sg_schedules():
@@ -1036,6 +1056,7 @@ async def on_start():
     await _seed_admin()
     await _seed_schedules()
     await _migrate_sg_schedules()
+    await _migrate_operator_names()
     await _seed_promos()
     logger.info("Star Qistna startup complete")
 
