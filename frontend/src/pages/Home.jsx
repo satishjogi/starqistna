@@ -188,17 +188,17 @@ export default function Home() {
                 <div className="flex flex-col md:flex-row md:items-center gap-3 md:gap-2">
                   <div className="flex-1">
                     <div className="text-[9px] font-mono text-zinc-500">ADULT</div>
-                    <div className="flex items-center gap-1 mt-1">
+                    <div className="flex items-center justify-center gap-1 mt-1">
                       <button type="button" onClick={() => setAdults(Math.max(1, adults - 1))} className="w-7 h-7 border border-black/20 rounded-sm font-bold" data-testid="adult-minus">−</button>
-                      <div className="flex-1 text-center font-mono font-bold" data-testid="adult-count">{adults}</div>
+                      <div className="w-6 text-center font-mono font-bold" data-testid="adult-count">{adults}</div>
                       <button type="button" onClick={() => setAdults(Math.min(10, adults + 1))} className="w-7 h-7 border border-black/20 rounded-sm font-bold" data-testid="adult-plus">+</button>
                     </div>
                   </div>
                   <div className="flex-1">
                     <div className="text-[9px] font-mono text-zinc-500">CHILD</div>
-                    <div className="flex items-center gap-1 mt-1">
+                    <div className="flex items-center justify-center gap-1 mt-1">
                       <button type="button" onClick={() => setChildren(Math.max(0, children - 1))} className="w-7 h-7 border border-black/20 rounded-sm font-bold" data-testid="child-minus">−</button>
-                      <div className="flex-1 text-center font-mono font-bold" data-testid="child-count">{children}</div>
+                      <div className="w-6 text-center font-mono font-bold" data-testid="child-count">{children}</div>
                       <button type="button" onClick={() => setChildren(Math.min(10, children + 1))} className="w-7 h-7 border border-black/20 rounded-sm font-bold" data-testid="child-plus">+</button>
                     </div>
                   </div>
