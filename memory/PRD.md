@@ -62,7 +62,12 @@ Build a complete online bus booking system where visitors can search departure t
   - Frontend: `GoogleAuthButton` component + `AuthCallback` page (`/auth/callback`) handles `#session_id` hash → POST to backend → navigate to dashboard (or prompt 2FA).
   - Buttons visible on both `/login` and `/register` above the email form with an "OR CONTINUE WITH EMAIL" divider.
   - No Google Cloud setup required — redirect flow uses `https://auth.emergentagent.com/`.
-- **Testing**: 13/13 backend tests pass, all frontend flows verified (iteration_3.json)
+- **My Next Trip widget** (Dashboard)
+  - New `NextTripWidget` component surfaces the **soonest upcoming confirmed booking** at the top of `/dashboard`.
+  - Live countdown (DD/HH/MM/SS, updates every second), route, seats, passengers, operator, inline QR code of the reference.
+  - CTAs: "View ticket" (→ `/bookings/:id`) and "Add to calendar" (generates and downloads a `.ics` file — cross-platform, no third-party calendar service required).
+  - Gracefully hidden when the user has no upcoming confirmed bookings.
+- **Testing**: iteration_3 (13/13 backend + frontend), iteration_4/5 (widget feature + CSS fix verified)
 
 ## Backlog / next tasks
 ### P1
