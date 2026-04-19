@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import api from "../lib/api";
 import { useAuth } from "../lib/auth";
+import NextTripWidget from "../components/NextTripWidget";
 
 function fmtPrice(v, ccy = "myr") {
   const map = { myr: "RM", sgd: "S$", usd: "$" };
@@ -36,8 +37,10 @@ export default function Dashboard() {
   return (
     <div className="px-6 md:px-12 lg:px-20 py-10">
       <div className="te-overline mb-2">Passenger dashboard</div>
-      <h1 className="text-4xl md:text-5xl font-black tracking-tight">Hi, {user.full_name.split(" ")[0]}.</h1>
+      <h1 className="text-4xl md:text-5xl font-black tracking-tight">Hi, {(user.full_name || user.email || "there").split(" ")[0]}.</h1>
       <p className="text-zinc-600 mt-2">{user.email}</p>
+
+      <NextTripWidget bookings={bookings} />
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-10">
         <div className="te-card p-6">
