@@ -55,6 +55,15 @@ Build a complete online bus booking system where visitors can search departure t
 - **Round-trip booking (upsell)**
   - `ReturnUpsell` section on PaymentCallback success page — reuses outbound adult/child split, defaults return date to outbound date, reverses from/to terminal IDs when navigating to `/search`
 
+## Implemented (2026-04-19 · iteration 3)
+- **Passenger counter UI polish** — `−`, number, `+` on Home page are now tightly grouped & centered (desktop + mobile)
+- **Google social login (Emergent-managed)**
+  - Backend: `POST /api/auth/google/session` exchanges Emergent `session_id` for our JWT. Auto-links by email (no duplicate users). Enforces TOTP if the account has 2FA enabled (returns `challenge_token` same shape as password login).
+  - Frontend: `GoogleAuthButton` component + `AuthCallback` page (`/auth/callback`) handles `#session_id` hash → POST to backend → navigate to dashboard (or prompt 2FA).
+  - Buttons visible on both `/login` and `/register` above the email form with an "OR CONTINUE WITH EMAIL" divider.
+  - No Google Cloud setup required — redirect flow uses `https://auth.emergentagent.com/`.
+- **Testing**: 13/13 backend tests pass, all frontend flows verified (iteration_3.json)
+
 ## Backlog / next tasks
 ### P1
 - iPay88 integration (need merchant credentials: Merchant Code, Merchant Key, environment)
