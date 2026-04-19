@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
 import api from "../lib/api";
+import GoogleAuthButton from "../components/GoogleAuthButton";
 
 export default function Login() {
   const { refresh } = useAuth();
@@ -59,6 +60,12 @@ export default function Login() {
             <div className="te-overline mb-2">Access</div>
             <h1 className="text-4xl font-black tracking-tight mb-8">Log in</h1>
             <form onSubmit={submit} className="te-card p-8 space-y-4" data-testid="login-form">
+              <GoogleAuthButton testId="login-google-btn" label="Continue with Google" />
+              <div className="flex items-center gap-3 text-[10px] font-mono text-zinc-400">
+                <div className="flex-1 h-px bg-zinc-200" />
+                OR CONTINUE WITH EMAIL
+                <div className="flex-1 h-px bg-zinc-200" />
+              </div>
               <div>
                 <label className="te-label">Email</label>
                 <input className="te-input" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} data-testid="login-email" />

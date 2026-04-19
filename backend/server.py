@@ -26,6 +26,7 @@ from emergentintegrations.payments.stripe.checkout import (
     CheckoutStatusResponse,
     CheckoutSessionRequest,
 )
+import httpx
 from email_service import send_booking_confirmation
 
 # ---------- Setup ----------
@@ -415,6 +416,83 @@ async def disable_2fa(body: TwoFADisableBody, user: dict = Depends(require_user)
 @api.get("/auth/me")
 async def me(user: dict = Depends(require_user)):
     return user
+
+
+# ---------- Google Social Login (Emergent-managed) ----------
+# REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
+class GoogleSessionBody(BaseModel):
+    session_id: str
+
+
+@api.post("/auth/google/session")
+async def google_session(body: GoogleSessionBody):
+    """Exchange an Emergent OAuth session_id for our own JWT (auto-linking by email).
+    If the existing account has 2FA enabled, returns a 2FA challenge token instead.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+                headers={"X-Session-ID": body.session_id},
+            )
+    except httpx.HTTPError as e:
+        logging.exception("Emergent auth call failed")
+        raise HTTPException(502, f"Auth provider unavailable: {e}")
+
+    if resp.status_code != 200:
+        raise HTTPException(401, "Invalid or expired Google session")
+
+    data = resp.json()
+    email = (data.get("email") or "").lower().strip()
+    name = data.get("name") or ""
+    picture = data.get("picture") or ""
+    if not email:
+        raise HTTPException(400, "Google account did not return an email")
+
+    # Auto-link: find existing user by email, else create
+    existing = await db.users.find_one({"email": email})
+    if existing:
+        user_id = existing["id"]
+        updates = {"google_linked": True, "last_login_at": utcnow().isoformat()}
+        if name and not existing.get("full_name"):
+            updates["full_name"] = name
+        if picture and not existing.get("picture"):
+            updates["picture"] = picture
+        await db.users.update_one({"id": user_id}, {"$set": updates})
+        user_doc = {**existing, **updates}
+    else:
+        user_id = new_id()
+        user_doc = {
+            "id": user_id,
+            "email": email,
+            "full_name": name,
+            "phone": "",
+            "password_hash": "",  # no password for google-only accounts
+            "is_admin": False,
+            "google_linked": True,
+            "picture": picture,
+            "created_at": utcnow().isoformat(),
+            "last_login_at": utcnow().isoformat(),
+        }
+        await db.users.insert_one(user_doc)
+
+    # Enforce 2FA if enabled on the account
+    if user_doc.get("totp_enabled"):
+        challenge = jwt.encode(
+            {
+                "sub": user_id,
+                "email": email,
+                "scope": "2fa_challenge",
+                "exp": utcnow() + timedelta(minutes=5),
+                "iat": utcnow(),
+            },
+            JWT_SECRET,
+            algorithm=JWT_ALG,
+        )
+        return {"requires_2fa": True, "challenge_token": challenge}
+
+    user_public = {k: v for k, v in user_doc.items() if k not in ("password_hash", "_id", "totp_secret")}
+    return TokenResponse(access_token=issue_jwt(user_id, email), user=user_public)
 
 
 # ---------- Seat locks (prevents double booking) ----------

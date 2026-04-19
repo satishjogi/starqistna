@@ -12,6 +12,7 @@ import PaymentCallback from "./pages/PaymentCallback";
 import PaymentCancel from "./pages/PaymentCancel";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
+import AuthCallback from "./pages/AuthCallback";
 import Dashboard from "./pages/Dashboard";
 import BookingDetail from "./pages/BookingDetail";
 import Admin from "./pages/Admin";
@@ -45,6 +46,7 @@ export default function App() {
             <Route path="/payment/cancel" element={<PaymentCancel />} />
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
+            <Route path="/auth/callback" element={<AuthCallback />} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/bookings/:id" element={<BookingDetail />} />
             <Route path="/admin" element={<Admin />} />
