@@ -41,6 +41,7 @@ JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALG = os.environ.get("JWT_ALGORITHM", "HS256")
 JWT_EXPIRE_HOURS = int(os.environ.get("JWT_EXPIRE_HOURS", "168"))
 STRIPE_API_KEY = os.environ["STRIPE_API_KEY"]
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
 
 app = FastAPI(title="Transit E1 - Bus Booking API")
 api = APIRouter(prefix="/api")
@@ -954,7 +955,24 @@ async def stripe_webhook(request: Request):
     body_bytes = await request.body()
     sig = request.headers.get("Stripe-Signature")
     host_url = str(request.base_url).rstrip("/")
-    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=f"{host_url}/api/webhook/stripe")
+
+    # In production, STRIPE_WEBHOOK_SECRET must be set so the library verifies the
+    # Stripe-Signature header via stripe.Webhook.construct_event(). If it is not
+    # set (e.g. local/dev), we fall back to unverified parsing but log a warning.
+    if not STRIPE_WEBHOOK_SECRET:
+        logger.warning(
+            "stripe_webhook: STRIPE_WEBHOOK_SECRET is not set — signature verification is disabled. "
+            "Set STRIPE_WEBHOOK_SECRET in backend/.env for production."
+        )
+    if STRIPE_WEBHOOK_SECRET and not sig:
+        # Signature header missing but we expect to verify — reject.
+        raise HTTPException(400, "Missing Stripe-Signature header")
+
+    stripe_checkout = StripeCheckout(
+        api_key=STRIPE_API_KEY,
+        webhook_secret=STRIPE_WEBHOOK_SECRET or None,
+        webhook_url=f"{host_url}/api/webhook/stripe",
+    )
     try:
         event = await stripe_checkout.handle_webhook(body_bytes, sig)
     except Exception as e:
