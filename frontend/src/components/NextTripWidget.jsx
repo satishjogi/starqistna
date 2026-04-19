@@ -93,7 +93,7 @@ export default function NextTripWidget({ bookings }) {
 
   return (
     <div
-      className="mt-8 relative overflow-hidden te-card p-6 md:p-8 bg-black text-white"
+      className="mt-8 relative overflow-hidden p-6 md:p-8 bg-black text-white border border-black/10 rounded-sm"
       data-testid="next-trip-widget"
     >
       {/* Decorative accent bar */}
