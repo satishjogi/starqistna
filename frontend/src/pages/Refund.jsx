@@ -2,7 +2,7 @@ import React from "react";
 
 export default function Refund() {
   return (
-    <div className="px-6 md:px-12 lg:px-20 py-12 max-w-4xl" data-testid="refund-page">
+    <div className="px-4 md:px-6 lg:px-10 py-12 max-w-4xl" data-testid="refund-page">
       <div className="te-overline mb-2">Legal</div>
       <h1 className="text-4xl md:text-5xl font-black tracking-tight">Refund & Cancellation Policy</h1>
       <div className="te-overline mt-2">Last updated · April 2026</div>

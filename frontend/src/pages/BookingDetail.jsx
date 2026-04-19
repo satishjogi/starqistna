@@ -21,7 +21,7 @@ export default function BookingDetail() {
   if (!b) return <div className="p-10 font-mono text-zinc-500">LOADING…</div>;
 
   return (
-    <div className="px-6 md:px-12 lg:px-20 py-10 max-w-4xl">
+    <div className="px-4 md:px-6 lg:px-10 py-10 max-w-4xl">
       <Link to="/dashboard" className="text-xs font-mono text-zinc-500 hover:text-black" data-testid="back-dashboard">← MY BOOKINGS</Link>
 
       <div className="mt-4 flex flex-wrap items-start justify-between gap-4">

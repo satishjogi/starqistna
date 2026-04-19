@@ -53,7 +53,7 @@ export default function Login() {
   };
 
   return (
-    <div className="px-6 md:px-12 lg:px-20 py-16 flex justify-center">
+    <div className="px-4 md:px-6 lg:px-10 py-16 flex justify-center">
       <div className="w-full max-w-md">
         {!challenge ? (
           <>

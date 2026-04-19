@@ -64,7 +64,7 @@ export default function AuthCallback() {
   };
 
   return (
-    <div className="px-6 md:px-12 lg:px-20 py-24 flex justify-center" data-testid="auth-callback">
+    <div className="px-4 md:px-6 lg:px-10 py-24 flex justify-center" data-testid="auth-callback">
       <div className="w-full max-w-md text-center">
         {!challenge ? (
           <>

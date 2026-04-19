@@ -67,7 +67,7 @@ export default function Security() {
   const enabled = user.totp_enabled;
 
   return (
-    <div className="px-6 md:px-12 lg:px-20 py-10 max-w-3xl">
+    <div className="px-4 md:px-6 lg:px-10 py-10 max-w-3xl">
       <div className="te-overline mb-2">Account</div>
       <h1 className="text-4xl md:text-5xl font-black tracking-tight">Security</h1>
 

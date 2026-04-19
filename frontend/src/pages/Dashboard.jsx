@@ -35,7 +35,7 @@ export default function Dashboard() {
   if (!user) return null;
 
   return (
-    <div className="px-6 md:px-12 lg:px-20 py-10">
+    <div className="px-4 md:px-6 lg:px-10 py-10">
       <div className="te-overline mb-2">Passenger dashboard</div>
       <h1 className="text-4xl md:text-5xl font-black tracking-tight">Hi, {(user.full_name || user.email || "there").split(" ")[0]}.</h1>
       <p className="text-zinc-600 mt-2">{user.email}</p>

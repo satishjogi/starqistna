@@ -3,7 +3,7 @@ import React from "react";
 export default function Footer() {
   return (
     <footer className="border-t border-black/10 mt-24 bg-white">
-      <div className="px-6 md:px-12 lg:px-20 py-12 grid grid-cols-1 md:grid-cols-4 gap-8">
+      <div className="px-4 md:px-6 lg:px-10 py-12 grid grid-cols-1 md:grid-cols-4 gap-8">
         <div className="md:col-span-2">
           <img src="/logo.png" alt="Star Qistna" className="h-14 w-auto" />
           <p className="text-sm text-zinc-600 mt-4 max-w-md">
@@ -28,7 +28,7 @@ export default function Footer() {
           </ul>
         </div>
       </div>
-      <div className="border-t border-black/10 px-6 md:px-12 lg:px-20 py-5 flex flex-col sm:flex-row justify-between text-xs font-mono text-zinc-500">
+      <div className="border-t border-black/10 px-4 md:px-6 lg:px-10 py-5 flex flex-col sm:flex-row justify-between text-xs font-mono text-zinc-500">
         <div>© {new Date().getFullYear()} STAR QISTNA · ALL RIGHTS RESERVED</div>
         <div>PAYMENTS BY STRIPE · IPAY88 (COMING SOON)</div>
       </div>

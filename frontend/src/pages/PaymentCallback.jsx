@@ -50,7 +50,7 @@ export default function PaymentCallback() {
   }, [sessionId]);
 
   return (
-    <div className="px-6 md:px-12 lg:px-20 py-16 max-w-3xl mx-auto">
+    <div className="px-4 md:px-6 lg:px-10 py-16 max-w-3xl mx-auto">
       {status === "pending" && (
         <div className="te-card p-10 text-center" data-testid="payment-pending">
           <div className="te-overline mb-2">Processing</div>

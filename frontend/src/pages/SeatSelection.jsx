@@ -110,7 +110,7 @@ export default function SeatSelection() {
   if (!data) return <div className="p-10 text-red-600">{error}</div>;
 
   return (
-    <div className="px-6 md:px-12 lg:px-20 py-10">
+    <div className="px-4 md:px-6 lg:px-10 py-10">
       <div className="te-overline mb-2">Step 02 · Select your seats</div>
       <div className="flex flex-wrap items-end gap-4 mb-6">
         <div>

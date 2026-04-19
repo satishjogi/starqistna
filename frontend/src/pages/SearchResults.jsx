@@ -44,7 +44,7 @@ export default function SearchResults() {
   };
 
   return (
-    <div className="px-6 md:px-12 lg:px-20 py-10 min-h-[60vh]">
+    <div className="px-4 md:px-6 lg:px-10 py-10 min-h-[60vh]">
       {/* Breadcrumb header */}
       <div className="mb-8">
         <Link

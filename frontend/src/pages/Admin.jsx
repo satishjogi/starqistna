@@ -148,7 +148,7 @@ export default function Admin() {
   if (!user?.is_admin) return null;
 
   return (
-    <div className="px-6 md:px-12 lg:px-20 py-10">
+    <div className="px-4 md:px-6 lg:px-10 py-10">
       <div className="te-overline mb-2">Control · Admin</div>
       <h1 className="text-4xl font-black tracking-tight">Operations</h1>
 

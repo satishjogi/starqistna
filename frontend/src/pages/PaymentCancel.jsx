@@ -5,7 +5,7 @@ export default function PaymentCancel() {
   const [p] = useSearchParams();
   const bookingId = p.get("booking_id");
   return (
-    <div className="px-6 md:px-12 lg:px-20 py-16 max-w-3xl mx-auto">
+    <div className="px-4 md:px-6 lg:px-10 py-16 max-w-3xl mx-auto">
       <div className="te-card p-10" data-testid="payment-cancel">
         <div className="te-overline mb-2 text-amber-600">Cancelled</div>
         <h1 className="text-4xl font-black tracking-tight">Payment cancelled.</h1>

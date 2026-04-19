@@ -142,7 +142,7 @@ export default function Home() {
         <div className="absolute inset-0 -z-20 overflow-hidden">
           <img src={HERO_BG} alt="" className="w-full h-full object-cover opacity-10" />
         </div>
-        <div className="px-6 md:px-12 lg:px-20 pt-16 pb-24">
+        <div className="px-4 md:px-6 lg:px-10 pt-16 pb-24">
           <div className="grid grid-cols-12 gap-4 items-end">
             <div className="col-span-12 lg:col-span-7">
               <div className="te-overline mb-4" data-testid="hero-overline">System 01 · Inter-city Buses</div>
@@ -220,7 +220,7 @@ export default function Home() {
       <PopularRoutes />
 
       {/* Features */}
-      <section className="px-6 md:px-12 lg:px-20 py-20">
+      <section className="px-4 md:px-6 lg:px-10 py-20">
         <div className="te-overline mb-3">How it works</div>
         <h2 className="text-3xl md:text-5xl font-black tracking-tight max-w-2xl">Three clicks to a confirmed seat.</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-[1px] mt-12 bg-black/10 border border-black/10">
@@ -276,7 +276,7 @@ function PopularRoutes() {
   };
 
   return (
-    <section className="px-6 md:px-12 lg:px-20 py-16 border-t border-black/10" data-testid="popular-routes-section">
+    <section className="px-4 md:px-6 lg:px-10 py-16 border-t border-black/10" data-testid="popular-routes-section">
       <div className="flex flex-wrap items-end justify-between gap-3 mb-8">
         <div>
           <div className="te-overline mb-2">Popular routes</div>

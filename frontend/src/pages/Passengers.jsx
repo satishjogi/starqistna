@@ -114,7 +114,7 @@ export default function Passengers() {
   const s = flow.schedule;
 
   return (
-    <div className="px-6 md:px-12 lg:px-20 py-10">
+    <div className="px-4 md:px-6 lg:px-10 py-10">
       <div className="te-overline mb-2">Step 03 · Passenger details</div>
       <h1 className="text-3xl md:text-4xl font-black tracking-tight mb-8">Who is travelling?</h1>
 
