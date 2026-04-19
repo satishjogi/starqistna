@@ -57,17 +57,12 @@ Build a complete online bus booking system where visitors can search departure t
 
 ## Implemented (2026-04-19 · iteration 3)
 - **Passenger counter UI polish** — `−`, number, `+` on Home page are now tightly grouped & centered (desktop + mobile)
-- **Google social login (Emergent-managed)**
-  - Backend: `POST /api/auth/google/session` exchanges Emergent `session_id` for our JWT. Auto-links by email (no duplicate users). Enforces TOTP if the account has 2FA enabled (returns `challenge_token` same shape as password login).
-  - Frontend: `GoogleAuthButton` component + `AuthCallback` page (`/auth/callback`) handles `#session_id` hash → POST to backend → navigate to dashboard (or prompt 2FA).
-  - Buttons visible on both `/login` and `/register` above the email form with an "OR CONTINUE WITH EMAIL" divider.
-  - No Google Cloud setup required — redirect flow uses `https://auth.emergentagent.com/`.
-- **My Next Trip widget** (Dashboard)
-  - New `NextTripWidget` component surfaces the **soonest upcoming confirmed booking** at the top of `/dashboard`.
-  - Live countdown (DD/HH/MM/SS, updates every second), route, seats, passengers, operator, inline QR code of the reference.
-  - CTAs: "View ticket" (→ `/bookings/:id`) and "Add to calendar" (generates and downloads a `.ics` file — cross-platform, no third-party calendar service required).
-  - Gracefully hidden when the user has no upcoming confirmed bookings.
-- **Testing**: iteration_3 (13/13 backend + frontend), iteration_4/5 (widget feature + CSS fix verified)
+- **Google social login (Emergent-managed)** — `POST /api/auth/google/session`, auto-link by email, 2FA still enforced; `GoogleAuthButton` on `/login` and `/register` + `/auth/callback` page.
+- **My Next Trip widget** on Dashboard — countdown, QR, "View ticket" + "Add to calendar" (.ics) CTAs.
+- **Tighter horizontal gutters** — `px-6 md:px-12 lg:px-20` → `px-4 md:px-6 lg:px-10` site-wide.
+- **Stripe webhook signature verification** — `STRIPE_WEBHOOK_SECRET` env flag; when set the webhook rejects unsigned / bad-signature requests.
+- **Admin Payments tab** — `GET /api/admin/payments` with status filter + aggregate summary; Admin UI has summary cards, filter pills, transaction table with Stripe Dashboard deep-links.
+- **Testing**: iterations 3–6 all green.
 
 ## Backlog / next tasks
 ### P1
