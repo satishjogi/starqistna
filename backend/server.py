@@ -1004,6 +1004,46 @@ async def admin_bookings(user: dict = Depends(require_admin)):
     return items
 
 
+@api.get("/admin/payments")
+async def admin_payments(
+    status_filter: Optional[str] = None,
+    user: dict = Depends(require_admin),
+):
+    """List Stripe payment transactions joined with booking reference + customer email."""
+    query: dict = {}
+    if status_filter and status_filter != "all":
+        query["payment_status"] = status_filter
+
+    items = await db.payment_transactions.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
+
+    # Aggregate summary
+    summary = {
+        "total": len(items),
+        "paid": 0,
+        "initiated": 0,
+        "failed": 0,
+        "refunded": 0,
+        "gross_myr": 0.0,
+        "gross_sgd": 0.0,
+    }
+    for t in items:
+        ps = (t.get("payment_status") or "initiated").lower()
+        if ps == "paid":
+            summary["paid"] += 1
+            ccy = (t.get("currency") or "myr").lower()
+            key = "gross_myr" if ccy == "myr" else "gross_sgd" if ccy == "sgd" else None
+            if key:
+                summary[key] += float(t.get("amount") or 0)
+        elif ps == "failed":
+            summary["failed"] += 1
+        elif ps in ("refunded", "canceled", "expired"):
+            summary["refunded"] += 1
+        else:
+            summary["initiated"] += 1
+
+    return {"summary": summary, "items": items}
+
+
 @api.get("/admin/schedules")
 async def admin_schedules(user: dict = Depends(require_admin)):
     items = await db.schedules.find({}, {"_id": 0}).sort("departure_date", 1).to_list(500)
