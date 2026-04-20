@@ -14,6 +14,9 @@ export default function Admin() {
   const [payments, setPayments] = useState({ summary: null, items: [] });
   const [paymentsFilter, setPaymentsFilter] = useState("all");
   const [paymentsLoading, setPaymentsLoading] = useState(false);
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditFilter, setAuditFilter] = useState({ resource: "all", action: "all", actor_email: "" });
   const [tab, setTab] = useState("bookings");
   const [form, setForm] = useState({
     from_terminal_id: "", to_terminal_id: "",
@@ -53,6 +56,25 @@ export default function Admin() {
       .catch(() => {})
       .finally(() => setPaymentsLoading(false));
   };
+
+  const loadAuditLogs = (filter = auditFilter) => {
+    setAuditLoading(true);
+    const params = new URLSearchParams();
+    if (filter.resource && filter.resource !== "all") params.set("resource", filter.resource);
+    if (filter.action && filter.action !== "all") params.set("action", filter.action);
+    if (filter.actor_email) params.set("actor_email", filter.actor_email);
+    params.set("limit", "300");
+    api
+      .get(`/admin/audit-logs?${params.toString()}`)
+      .then(({ data }) => setAuditLogs(data.items || []))
+      .catch(() => setAuditLogs([]))
+      .finally(() => setAuditLoading(false));
+  };
+
+  useEffect(() => {
+    if (user?.is_admin && tab === "audit-log") loadAuditLogs(auditFilter);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, auditFilter.resource, auditFilter.action, user]);
 
   useEffect(() => {
     if (user?.is_admin && tab === "payments") loadPayments(paymentsFilter);
@@ -186,7 +208,7 @@ export default function Admin() {
       </div>
 
       <div className="mt-10 flex gap-1 border-b border-black/10 flex-wrap">
-        {["bookings", "payments", "schedules", "add-schedule", "terminals", "promo-codes"].map((t) => (
+        {["bookings", "payments", "schedules", "add-schedule", "terminals", "promo-codes", "audit-log"].map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -602,6 +624,109 @@ export default function Admin() {
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+      )}
+
+      {tab === "audit-log" && (
+        <div className="mt-6 space-y-4" data-testid="audit-log-section">
+          <div className="te-card p-4">
+            <div className="te-overline mb-3">Filters</div>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <div>
+                <label className="te-label">Resource</label>
+                <select
+                  className="te-input"
+                  value={auditFilter.resource}
+                  onChange={(e) => setAuditFilter({ ...auditFilter, resource: e.target.value })}
+                  data-testid="audit-filter-resource"
+                >
+                  <option value="all">All</option>
+                  <option value="terminal">Terminal</option>
+                  <option value="schedule">Schedule</option>
+                  <option value="promo_code">Promo code</option>
+                </select>
+              </div>
+              <div>
+                <label className="te-label">Action</label>
+                <select
+                  className="te-input"
+                  value={auditFilter.action}
+                  onChange={(e) => setAuditFilter({ ...auditFilter, action: e.target.value })}
+                  data-testid="audit-filter-action"
+                >
+                  <option value="all">All</option>
+                  <option value="create">Create</option>
+                  <option value="update">Update</option>
+                  <option value="delete">Delete</option>
+                  <option value="toggle">Toggle</option>
+                  <option value="bulk_create">Bulk create</option>
+                  <option value="delete_range">Delete range</option>
+                </select>
+              </div>
+              <div>
+                <label className="te-label">Actor email contains</label>
+                <input
+                  className="te-input"
+                  placeholder="admin@…"
+                  value={auditFilter.actor_email}
+                  onChange={(e) => setAuditFilter({ ...auditFilter, actor_email: e.target.value })}
+                  data-testid="audit-filter-actor"
+                />
+              </div>
+              <div className="flex items-end">
+                <button
+                  type="button"
+                  onClick={() => loadAuditLogs(auditFilter)}
+                  className="te-btn-outline w-full"
+                  data-testid="audit-refresh-btn"
+                >
+                  {auditLoading ? "Loading…" : "Refresh"}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="te-card p-0 overflow-hidden">
+            <div className="grid grid-cols-12 gap-2 px-4 py-3 bg-black text-white text-[10px] font-mono uppercase tracking-wider">
+              <div className="col-span-3">When</div>
+              <div className="col-span-3">Actor</div>
+              <div className="col-span-2">Action</div>
+              <div className="col-span-2">Resource</div>
+              <div className="col-span-2">Details</div>
+            </div>
+            {auditLogs.length === 0 && (
+              <div className="p-6 text-sm text-zinc-500" data-testid="audit-empty">
+                {auditLoading ? "Loading audit trail…" : "No audit entries match these filters yet."}
+              </div>
+            )}
+            {auditLogs.map((row) => (
+              <div
+                key={row.id}
+                className="grid grid-cols-12 gap-2 px-4 py-3 border-t border-black/5 text-xs items-start"
+                data-testid={`audit-row-${row.id}`}
+              >
+                <div className="col-span-3 font-mono text-[11px]">{row.created_at}</div>
+                <div className="col-span-3">
+                  <div className="font-bold truncate">{row.actor_email || "—"}</div>
+                  {row.ip && <div className="font-mono text-[10px] text-zinc-500">{row.ip}</div>}
+                </div>
+                <div className="col-span-2">
+                  <span className="inline-block px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-zinc-100 border border-black/10">
+                    {row.action}
+                  </span>
+                </div>
+                <div className="col-span-2 font-mono text-[11px]">
+                  <div>{row.resource}</div>
+                  {row.resource_id && <div className="text-zinc-500 truncate">{row.resource_id}</div>}
+                </div>
+                <div className="col-span-2 font-mono text-[10px] text-zinc-600 break-words">
+                  {row.details && Object.keys(row.details).length > 0
+                    ? JSON.stringify(row.details)
+                    : "—"}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}

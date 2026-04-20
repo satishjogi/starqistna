@@ -108,6 +108,37 @@ async def require_admin(user: dict = Depends(require_user)) -> dict:
     return user
 
 
+async def log_audit(
+    user: dict,
+    action: str,
+    resource: str,
+    resource_id: Optional[str] = None,
+    details: Optional[dict] = None,
+    request: Optional[Request] = None,
+):
+    """Record an admin action to the audit_logs collection."""
+    ip = None
+    if request is not None:
+        # Respect X-Forwarded-For if present (behind proxy/ingress)
+        fwd = request.headers.get("x-forwarded-for")
+        ip = (fwd.split(",")[0].strip() if fwd else None) or (request.client.host if request.client else None)
+    try:
+        await db.audit_logs.insert_one({
+            "id": new_id(),
+            "actor_id": user.get("id"),
+            "actor_email": user.get("email"),
+            "action": action,           # e.g. "create", "update", "delete", "toggle"
+            "resource": resource,       # e.g. "terminal", "schedule", "promo_code"
+            "resource_id": resource_id,
+            "details": details or {},
+            "ip": ip,
+            "created_at": utcnow().isoformat(),
+        })
+    except Exception as e:
+        # Audit logging must never break the main request
+        logger.warning("audit log failed: %s", e)
+
+
 # ---------- Models ----------
 class RegisterBody(BaseModel):
     email: EmailStr
@@ -737,7 +768,7 @@ async def list_promo_codes(user: dict = Depends(require_admin)):
 
 
 @api.post("/admin/promo-codes")
-async def create_promo_code(body: PromoCreateBody, user: dict = Depends(require_admin)):
+async def create_promo_code(body: PromoCreateBody, request: Request, user: dict = Depends(require_admin)):
     doc = body.model_dump()
     doc["code"] = doc["code"].upper().strip()
     existing = await db.promo_codes.find_one({"code": doc["code"]})
@@ -748,22 +779,28 @@ async def create_promo_code(body: PromoCreateBody, user: dict = Depends(require_
     doc["created_at"] = utcnow().isoformat()
     await db.promo_codes.insert_one(doc)
     doc.pop("_id", None)
+    await log_audit(user, "create", "promo_code", doc["id"],
+                    {"code": doc["code"], "type": doc.get("type"), "value": doc.get("value")}, request)
     return doc
 
 
 @api.patch("/admin/promo-codes/{code_id}")
-async def toggle_promo_code(code_id: str, active: bool, user: dict = Depends(require_admin)):
+async def toggle_promo_code(code_id: str, active: bool, request: Request, user: dict = Depends(require_admin)):
     result = await db.promo_codes.update_one({"id": code_id}, {"$set": {"active": active}})
     if result.matched_count == 0:
         raise HTTPException(404, "Promo code not found")
+    await log_audit(user, "toggle", "promo_code", code_id, {"active": active}, request)
     return {"updated": True}
 
 
 @api.delete("/admin/promo-codes/{code_id}")
-async def delete_promo_code(code_id: str, user: dict = Depends(require_admin)):
+async def delete_promo_code(code_id: str, request: Request, user: dict = Depends(require_admin)):
+    existing = await db.promo_codes.find_one({"id": code_id}, {"_id": 0, "code": 1})
     result = await db.promo_codes.delete_one({"id": code_id})
     if result.deleted_count == 0:
         raise HTTPException(404, "Promo code not found")
+    await log_audit(user, "delete", "promo_code", code_id,
+                    {"code": (existing or {}).get("code")}, request)
     return {"deleted": True}
 
 
@@ -1162,6 +1199,27 @@ async def admin_payments(
     return {"summary": summary, "items": items}
 
 
+@api.get("/admin/audit-logs")
+async def admin_audit_logs(
+    limit: int = 200,
+    resource: Optional[str] = None,
+    action: Optional[str] = None,
+    actor_email: Optional[str] = None,
+    user: dict = Depends(require_admin),
+):
+    """List admin audit log entries, newest first."""
+    query: dict = {}
+    if resource and resource != "all":
+        query["resource"] = resource
+    if action and action != "all":
+        query["action"] = action
+    if actor_email:
+        query["actor_email"] = {"$regex": actor_email, "$options": "i"}
+    limit = max(1, min(limit, 1000))
+    items = await db.audit_logs.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    return {"total": len(items), "items": items}
+
+
 @api.get("/admin/schedules")
 async def admin_schedules(user: dict = Depends(require_admin)):
     items = await db.schedules.find({}, {"_id": 0}).sort("departure_date", 1).to_list(500)
@@ -1222,7 +1280,7 @@ async def admin_list_terminals(user: dict = Depends(require_admin)):
 
 
 @api.post("/admin/terminals")
-async def admin_create_terminal(body: TerminalCreateBody, user: dict = Depends(require_admin)):
+async def admin_create_terminal(body: TerminalCreateBody, request: Request, user: dict = Depends(require_admin)):
     code = body.code.upper().strip()
     if await db.terminals.find_one({"code": code}):
         raise HTTPException(400, f"Terminal code {code} already exists")
@@ -1236,11 +1294,13 @@ async def admin_create_terminal(body: TerminalCreateBody, user: dict = Depends(r
     }
     await db.terminals.insert_one(doc)
     doc.pop("_id", None)
+    await log_audit(user, "create", "terminal", doc["id"],
+                    {"code": doc["code"], "city": doc["city"], "name": doc["name"]}, request)
     return doc
 
 
 @api.patch("/admin/terminals/{terminal_id}")
-async def admin_update_terminal(terminal_id: str, body: TerminalUpdateBody, user: dict = Depends(require_admin)):
+async def admin_update_terminal(terminal_id: str, body: TerminalUpdateBody, request: Request, user: dict = Depends(require_admin)):
     updates = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
     if "code" in updates:
         updates["code"] = updates["code"].upper().strip()
@@ -1253,25 +1313,29 @@ async def admin_update_terminal(terminal_id: str, body: TerminalUpdateBody, user
     if result.matched_count == 0:
         raise HTTPException(404, "Terminal not found")
     updated = await db.terminals.find_one({"id": terminal_id}, {"_id": 0})
+    await log_audit(user, "update", "terminal", terminal_id, {"changes": updates}, request)
     return updated
 
 
 @api.delete("/admin/terminals/{terminal_id}")
-async def admin_delete_terminal(terminal_id: str, user: dict = Depends(require_admin)):
+async def admin_delete_terminal(terminal_id: str, request: Request, user: dict = Depends(require_admin)):
     # Block delete if any schedule references this terminal
     count = await db.schedules.count_documents(
         {"$or": [{"from_terminal_id": terminal_id}, {"to_terminal_id": terminal_id}]}
     )
     if count > 0:
         raise HTTPException(400, f"Cannot delete — {count} schedule(s) reference this terminal")
+    existing = await db.terminals.find_one({"id": terminal_id}, {"_id": 0, "code": 1, "city": 1})
     result = await db.terminals.delete_one({"id": terminal_id})
     if result.deleted_count == 0:
         raise HTTPException(404, "Terminal not found")
+    await log_audit(user, "delete", "terminal", terminal_id,
+                    {"code": (existing or {}).get("code"), "city": (existing or {}).get("city")}, request)
     return {"deleted": True}
 
 
 @api.post("/admin/schedules")
-async def admin_create_schedule(body: CreateScheduleBody, user: dict = Depends(require_admin)):
+async def admin_create_schedule(body: CreateScheduleBody, request: Request, user: dict = Depends(require_admin)):
     # Auto-derive currency from origin terminal country (SG → SGD, else MYR)
     origin = await db.terminals.find_one({"id": body.from_terminal_id}, {"_id": 0})
     if not origin:
@@ -1284,11 +1348,19 @@ async def admin_create_schedule(body: CreateScheduleBody, user: dict = Depends(r
     doc["created_at"] = utcnow().isoformat()
     await db.schedules.insert_one(doc)
     doc.pop("_id", None)
+    await log_audit(user, "create", "schedule", doc["id"], {
+        "from_terminal_id": doc.get("from_terminal_id"),
+        "to_terminal_id": doc.get("to_terminal_id"),
+        "departure_date": doc.get("departure_date"),
+        "departure_time": doc.get("departure_time"),
+        "adult_fare": doc.get("adult_fare"),
+        "currency": derived_currency,
+    }, request)
     return doc
 
 
 @api.post("/admin/schedules/bulk")
-async def admin_bulk_create_schedules(body: BulkScheduleBody, user: dict = Depends(require_admin)):
+async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, user: dict = Depends(require_admin)):
     """Generate one schedule per date matching days_of_week between start_date and end_date (inclusive).
     Enforces: end_date >= start_date, max 180-day span, no open-ended schedules."""
     try:
@@ -1345,6 +1417,16 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, user: dict = Depen
                 })
                 created += 1
         cur += timedelta(days=1)
+    await log_audit(user, "bulk_create", "schedule", None, {
+        "from_terminal_id": body.from_terminal_id,
+        "to_terminal_id": body.to_terminal_id,
+        "start_date": body.start_date,
+        "end_date": body.end_date,
+        "days_of_week": body.days_of_week,
+        "departure_time": body.departure_time,
+        "created": created,
+        "skipped_duplicates": skipped,
+    }, request)
     return {
         "created": created,
         "skipped_duplicates": skipped,
@@ -1360,6 +1442,7 @@ async def admin_delete_schedules_range(
     to_terminal_id: str,
     start_date: str,
     end_date: str,
+    request: Request,
     user: dict = Depends(require_admin),
 ):
     """Delete all schedules for a route within a date range. Blocks if any bookings exist for those schedules."""
@@ -1381,6 +1464,13 @@ async def admin_delete_schedules_range(
     if booking_count > 0:
         raise HTTPException(400, f"Cannot delete — {booking_count} booking(s) exist for these schedules")
     result = await db.schedules.delete_many({"id": {"$in": ids}})
+    await log_audit(user, "delete_range", "schedule", None, {
+        "from_terminal_id": from_terminal_id,
+        "to_terminal_id": to_terminal_id,
+        "start_date": start_date,
+        "end_date": end_date,
+        "deleted": result.deleted_count,
+    }, request)
     return {"deleted": result.deleted_count, "range": f"{start_date}..{end_date}"}
 
 
@@ -1653,6 +1743,8 @@ async def _ensure_indexes():
     )
     await db.payment_transactions.create_index([("session_id", ASCENDING)], unique=True)
     await db.promo_codes.create_index([("code", ASCENDING)], unique=True)
+    await db.audit_logs.create_index([("created_at", ASCENDING)])
+    await db.audit_logs.create_index([("resource", ASCENDING), ("action", ASCENDING)])
 
 
 @api.get("/")

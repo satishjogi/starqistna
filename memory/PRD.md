@@ -73,6 +73,16 @@ Build a complete online bus booking system where visitors can search departure t
   - **Route-time diversification migration**: seed previously used identical 4 time slots for every route so all countdowns were identical. New `_diversify_popular_schedules()` migration adds route-specific varied times (07:15/10:30/13:45/17:20/19:00 for KL→Melaka, etc.) for next 14 days — idempotent, preserves existing schedules & bookings.
 - **Testing**: iterations 3–9 all green.
 
+## Implemented (2026-04-20)
+- **Passenger form validation** — name fields enforce letters/spaces/hyphens/apostrophes/dots only (blocks digits & symbols on keystroke); phone enforces E.164 format (`+` + country code + 7–15 digits) with `type="tel"` for mobile numeric keypad, pattern check, and friendly error message.
+- **Admin audit log**
+  - New `audit_logs` collection (`actor_id`, `actor_email`, `action`, `resource`, `resource_id`, `details`, `ip`, `created_at`); indexed on `created_at` and `(resource, action)`.
+  - `log_audit()` helper writes entries without ever breaking the parent request (warnings-only failure mode).
+  - Instrumented endpoints: `POST/PATCH/DELETE /admin/promo-codes`, `POST/PATCH/DELETE /admin/terminals`, `POST /admin/schedules`, `POST /admin/schedules/bulk`, `DELETE /admin/schedules/range`.
+  - Captures real client IP via `X-Forwarded-For` fallback to `request.client.host`.
+  - `GET /api/admin/audit-logs` supports `resource`, `action`, `actor_email` filters + `limit` (max 1000).
+  - Admin UI: new "Audit log" tab with Resource / Action / Actor filters, refresh button, compact table (When / Actor + IP / Action pill / Resource + ID / JSON details).
+
 ## Backlog / next tasks
 ### P1
 - iPay88 integration (need merchant credentials: Merchant Code, Merchant Key, environment)
