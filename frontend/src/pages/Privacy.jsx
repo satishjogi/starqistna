@@ -18,7 +18,7 @@ export default function Privacy() {
           <ul className="list-disc pl-6 space-y-1">
             <li><b>Account data</b>: name, email, phone number, password (stored hashed).</li>
             <li><b>Booking data</b>: passenger names, IC/passport number (if provided), contact details, boarding history.</li>
-            <li><b>Payment data</b>: handled entirely by our payment processors (Stripe, and in future iPay88). We store only the transaction ID and status, never card numbers.</li>
+            <li><b>Payment data</b>: handled entirely by our payment processor (Stripe — Card, GrabPay, FPX). We store only the transaction ID and status, never card numbers or wallet credentials.</li>
             <li><b>Technical data</b>: IP address, browser type, device, and cookie identifiers for security and service analytics.</li>
           </ul>
         </section>
@@ -38,7 +38,7 @@ export default function Privacy() {
           <h2 className="text-xl font-black mt-6">4. Who we share with</h2>
           <p>We only share personal data with:</p>
           <ul className="list-disc pl-6 space-y-1">
-            <li>Payment processors (Stripe, iPay88) — strictly to settle payments.</li>
+            <li>Payment processor (Stripe — Card, GrabPay, FPX) — strictly to settle payments.</li>
             <li>Email delivery providers — to send confirmations and tickets.</li>
             <li>Regulatory authorities — where legally required.</li>
           </ul>

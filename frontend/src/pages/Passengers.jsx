@@ -33,15 +33,16 @@ export default function Passengers() {
   const [promoError, setPromoError] = useState("");
   const [promoLoading, setPromoLoading] = useState(false);
 
-  // Gateway selection — currency-aware
+  // Gateway selection — currency-aware, all via Stripe
   const scheduleCurrency = (flow?.schedule?.currency || "myr").toLowerCase();
-  const gatewayOptions = scheduleCurrency === "sgd"
-    ? [{ id: "stripe", name: "Credit / Debit Card", provider: "Stripe", methods: "Visa · Mastercard · Amex", available: true }]
-    : [
-        { id: "stripe", name: "Credit / Debit Card", provider: "Stripe", methods: "Visa · Mastercard · Amex", available: true },
-        { id: "ipay88", name: "FPX, Boost, GrabPay", provider: "iPay88", methods: "FPX · Boost · GrabPay · Local Cards", available: false, note: "Coming soon" },
-      ];
-  const [gateway, setGateway] = useState("stripe");
+  const gatewayOptions = [
+    { id: "card", name: "Credit / Debit Card", provider: "Stripe", methods: "Visa · Mastercard · Amex", available: true },
+    { id: "grabpay", name: "GrabPay", provider: "Stripe", methods: "GrabPay wallet", available: scheduleCurrency === "myr" || scheduleCurrency === "sgd" },
+    ...(scheduleCurrency === "myr"
+      ? [{ id: "fpx", name: "FPX Online Banking", provider: "Stripe", methods: "Maybank · CIMB · PBB · RHB · all MY banks", available: true }]
+      : []),
+  ];
+  const [gateway, setGateway] = useState("card");
 
   if (!flow?.schedule_id) {
     return <div className="p-10">Session expired. <a href="/" className="underline">Start over</a></div>;
@@ -298,9 +299,9 @@ export default function Passengers() {
             })()}
             {error && <div className="mt-4 text-xs font-bold text-red-600" data-testid="passengers-error">{error}</div>}
             <button className="te-btn-accent w-full mt-5 disabled:opacity-40" disabled={loading} data-testid="pay-now-btn">
-              {loading ? "Redirecting to payment…" : `Pay with ${gateway === "stripe" ? "Card" : "iPay88"} →`}
+              {loading ? "Redirecting to payment…" : `Pay with ${(gatewayOptions.find((g) => g.id === gateway)?.name) || "Card"} →`}
             </button>
-            <div className="text-[10px] font-mono text-zinc-500 mt-3 text-center">SECURE CHECKOUT · {gateway === "stripe" ? "STRIPE" : "IPAY88"}</div>
+            <div className="text-[10px] font-mono text-zinc-500 mt-3 text-center">SECURE CHECKOUT · STRIPE</div>
           </div>
         </div>
       </form>

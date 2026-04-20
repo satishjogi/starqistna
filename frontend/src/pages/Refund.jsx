@@ -54,7 +54,7 @@ export default function Refund() {
         <section>
           <h2 className="text-xl font-black mt-6">3. Refund processing</h2>
           <ul className="list-disc pl-6 space-y-1">
-            <li>Refunds are issued to the same payment method used at checkout (Stripe card / iPay88).</li>
+            <li>Refunds are issued to the same payment method used at checkout (Stripe — Card, GrabPay or FPX).</li>
             <li>Processing time: <b>5–10 business days</b> for card refunds, depending on your bank.</li>
             <li>Promo discounts applied are non-refundable (refund amount is calculated on the fare paid after discount).</li>
           </ul>

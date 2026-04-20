@@ -177,7 +177,7 @@ class CreateBookingBody(BaseModel):
 class CheckoutBody(BaseModel):
     booking_id: str
     origin_url: str
-    gateway: Literal["stripe", "ipay88"] = "stripe"
+    gateway: str = "card"  # stripe payment_method_types: card | grabpay | fpx
 
 
 class PromoValidateBody(BaseModel):
@@ -782,29 +782,40 @@ async def get_booking(booking_id: str, user: Optional[dict] = Depends(current_us
 
 # ---------- Payments (Stripe) ----------
 def _payment_options_for(currency: str) -> list:
-    """Return list of payment gateway options based on currency.
-    MYR bookings: Stripe available, iPay88 coming soon.
-    SGD bookings: Stripe only (single MY iPay88 account doesn't cover SG).
+    """Return list of payment method options based on currency.
+    All methods are processed through Stripe using the same merchant account.
+    Option `id` maps directly to Stripe `payment_method_types`.
+    - Card: universal (Visa/Mastercard/Amex) — all currencies
+    - GrabPay: MY + SG markets (MYR, SGD)
+    - FPX: MY online banking (MYR only)
     """
     c = (currency or "myr").lower()
     opts = [
         {
-            "id": "stripe",
+            "id": "card",
             "name": "Credit / Debit Card",
             "provider": "Stripe",
             "methods": ["Visa", "Mastercard", "Amex"],
             "available": True,
             "note": None,
-        }
+        },
+        {
+            "id": "grabpay",
+            "name": "GrabPay",
+            "provider": "Stripe",
+            "methods": ["GrabPay wallet"],
+            "available": c in ("myr", "sgd"),
+            "note": None if c in ("myr", "sgd") else "Not available for this currency",
+        },
     ]
     if c == "myr":
         opts.append({
-            "id": "ipay88",
-            "name": "FPX, Boost, GrabPay & Local Cards",
-            "provider": "iPay88",
-            "methods": ["FPX", "Boost", "GrabPay", "TouchNGo", "Local Cards"],
-            "available": False,
-            "note": "Coming soon",
+            "id": "fpx",
+            "name": "FPX Online Banking",
+            "provider": "Stripe",
+            "methods": ["Maybank", "CIMB", "Public Bank", "RHB", "+ all Malaysian banks"],
+            "available": True,
+            "note": None,
         })
     return opts
 
@@ -834,11 +845,7 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
     currency = booking["pricing"].get("currency", "myr")
     available_ids = {o["id"] for o in _payment_options_for(currency) if o["available"]}
     if body.gateway not in available_ids:
-        raise HTTPException(400, f"Payment gateway '{body.gateway}' is not available for {currency.upper()} bookings")
-
-    if body.gateway == "ipay88":
-        # placeholder for future — will raise until credentials are wired
-        raise HTTPException(501, "iPay88 integration coming soon")
+        raise HTTPException(400, f"Payment method '{body.gateway}' is not available for {currency.upper()} bookings")
 
     # SERVER-SIDE amount (never trust frontend)
     amount = float(booking["pricing"]["total"])
@@ -856,10 +863,12 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
         currency=currency,
         success_url=success_url,
         cancel_url=cancel_url,
+        payment_methods=[body.gateway],  # card | grabpay | fpx
         metadata={
             "booking_id": body.booking_id,
             "booking_reference": booking["reference"],
             "user_id": booking.get("user_id") or "guest",
+            "payment_method": body.gateway,
         },
     )
     session: CheckoutSessionResponse = await stripe_checkout.create_checkout_session(checkout_req)
@@ -871,11 +880,12 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
             "booking_id": body.booking_id,
             "amount": amount,
             "currency": currency,
+            "payment_method": body.gateway,
             "user_id": booking.get("user_id"),
             "user_email": booking["contact_email"],
             "payment_status": "initiated",
             "status": "initiated",
-            "metadata": {"booking_reference": booking["reference"]},
+            "metadata": {"booking_reference": booking["reference"], "payment_method": body.gateway},
             "created_at": utcnow().isoformat(),
             "updated_at": utcnow().isoformat(),
         }

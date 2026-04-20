@@ -30,7 +30,7 @@ export default function Footer() {
       </div>
       <div className="border-t border-black/10 px-4 md:px-6 lg:px-10 py-5 flex flex-col sm:flex-row justify-between text-xs font-mono text-zinc-500">
         <div>© {new Date().getFullYear()} STAR QISTNA · ALL RIGHTS RESERVED</div>
-        <div>PAYMENTS BY STRIPE · IPAY88 (COMING SOON)</div>
+        <div>PAYMENTS BY STRIPE · CARD · GRABPAY · FPX</div>
       </div>
     </footer>
   );
