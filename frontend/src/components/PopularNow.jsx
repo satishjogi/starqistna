@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "../lib/api";
 
@@ -35,18 +35,65 @@ function headline(item) {
   };
 }
 
+// Compute live seconds-until-departure from the absolute departure datetime string.
+function secondsUntil(dateStr, timeStr, now) {
+  try {
+    const dep = new Date(`${dateStr}T${timeStr}:00Z`);
+    return Math.max(0, Math.floor((dep.getTime() - now) / 1000));
+  } catch {
+    return null;
+  }
+}
+
+function pad(n) { return String(n).padStart(2, "0"); }
+
+function LiveCountdown({ secondsLeft, urgent }) {
+  const mm = Math.floor(secondsLeft / 60);
+  const ss = secondsLeft % 60;
+  const hh = Math.floor(mm / 60);
+  const mmMod = mm % 60;
+  const display = hh > 0 ? `${hh}h ${pad(mmMod)}m ${pad(ss)}s` : `${pad(mmMod)}:${pad(ss)}`;
+  return (
+    <span
+      className={`font-mono font-black tabular-nums ${urgent ? "text-[#B5121B] pulse-urgent" : "text-black"}`}
+      data-testid="popular-now-countdown"
+    >
+      {display}
+    </span>
+  );
+}
+
 export default function PopularNow() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [now, setNow] = useState(() => Date.now());
   const navigate = useNavigate();
 
-  useEffect(() => {
+  const load = () => {
     api
       .get("/popular/now?limit=6")
       .then(({ data }) => setItems(data.items || []))
       .catch(() => {})
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    load();
+    // Silent auto-refresh every 2 minutes
+    const refresh = setInterval(load, 120_000);
+    // Tick every second for live countdown
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => { clearInterval(refresh); clearInterval(tick); };
   }, []);
+
+  const enriched = useMemo(
+    () =>
+      items.map((it) => ({
+        ...it,
+        _seconds_left: secondsUntil(it.departure_date, it.departure_time, now),
+      })),
+    [items, now]
+  );
 
   const go = (it) => {
     const params = new URLSearchParams({
@@ -63,18 +110,18 @@ export default function PopularNow() {
 
   return (
     <section
-      className="px-4 md:px-6 lg:px-10 py-12 border-t border-black/10 bg-zinc-50"
+      className="px-4 md:px-6 lg:px-10 pt-6 pb-8 border-t border-black/10 bg-zinc-50"
       data-testid="popular-now-section"
     >
-      <div className="flex flex-wrap items-end justify-between gap-3 mb-6">
+      <div className="flex flex-wrap items-end justify-between gap-3 mb-5">
         <div>
-          <div className="te-overline mb-2 text-[#B5121B]">⚡ Popular right now</div>
-          <h2 className="text-2xl md:text-4xl font-black tracking-tight">
+          <div className="te-overline mb-1 text-[#B5121B]">⚡ Popular right now</div>
+          <h2 className="text-2xl md:text-3xl font-black tracking-tight">
             Next buses leaving soon.
           </h2>
         </div>
         <div className="font-mono text-[10px] text-zinc-500 tracking-wider">
-          TAP TO BOOK · LIVE DATA
+          TAP TO BOOK · AUTO-REFRESH · LIVE COUNTDOWN
         </div>
       </div>
 
@@ -82,12 +129,12 @@ export default function PopularNow() {
         <div className="font-mono text-xs text-zinc-500">LOADING…</div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-[1px] bg-black/10 border border-black/10">
-          {items.map((it) => {
+          {enriched.map((it) => {
             const h = headline(it);
-            const urgent =
-              it.is_today &&
-              it.minutes_until_departure != null &&
-              it.minutes_until_departure <= 120;
+            const secs = it._seconds_left;
+            // Urgent: leaving within 60 min AND today — pulsing red
+            const urgent = it.is_today && secs != null && secs <= 60 * 60 && secs > 0;
+            const imminent = it.is_today && secs != null && secs <= 10 * 60 && secs > 0;
             const almostFull = it.seats_available <= 10;
             return (
               <button
@@ -101,13 +148,13 @@ export default function PopularNow() {
                   <span
                     className={`text-[9px] font-mono font-bold tracking-[0.2em] px-2 py-1 uppercase ${
                       urgent
-                        ? "bg-[#B5121B] text-white"
+                        ? "bg-[#B5121B] text-white pulse-urgent"
                         : it.is_today
                         ? "bg-black text-white"
                         : "bg-zinc-200 text-zinc-700"
                     }`}
                   >
-                    {urgent ? "LEAVES SOON" : it.is_today ? "TODAY" : "UPCOMING"}
+                    {imminent ? "BOARDING NOW" : urgent ? "LEAVES SOON" : it.is_today ? "TODAY" : "UPCOMING"}
                   </span>
                   <span className="font-mono text-[10px] text-zinc-400">
                     {it.departure_time}
@@ -121,7 +168,15 @@ export default function PopularNow() {
                   {h.sub}
                 </p>
 
-                <div className="mt-5 flex items-end justify-between">
+                {/* Live countdown row — only on 'today' cards */}
+                {it.is_today && secs != null && (
+                  <div className="mt-3 flex items-baseline gap-2 text-xs">
+                    <span className="te-overline text-[9px] text-zinc-500">DEPARTS IN</span>
+                    <LiveCountdown secondsLeft={secs} urgent={urgent} />
+                  </div>
+                )}
+
+                <div className="mt-4 flex items-end justify-between">
                   <div>
                     <div className="te-overline text-[9px] text-zinc-500">FROM</div>
                     <div className="font-mono font-black text-lg">

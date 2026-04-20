@@ -143,7 +143,7 @@ export default function Home() {
         <div className="absolute inset-0 -z-20 overflow-hidden">
           <img src={HERO_BG} alt="" className="w-full h-full object-cover opacity-10" />
         </div>
-        <div className="px-4 md:px-6 lg:px-10 pt-16 pb-24">
+        <div className="px-4 md:px-6 lg:px-10 pt-12 pb-8">
           <div className="grid grid-cols-12 gap-4 items-end">
             <div className="col-span-12 lg:col-span-7">
               <div className="te-overline mb-4" data-testid="hero-overline">System 01 · Inter-city Buses</div>

@@ -239,3 +239,13 @@ h1, h2, h3, h4, h5 {
 .marquee {
     animation: marquee 40s linear infinite;
 }
+
+
+/* Pulsing "leaves soon" indicator on Popular Now cards */
+@keyframes pulse-urgent {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+}
+.pulse-urgent {
+    animation: pulse-urgent 1.1s ease-in-out infinite;
+}
