@@ -62,7 +62,8 @@ Build a complete online bus booking system where visitors can search departure t
 - **Tighter horizontal gutters** — `px-6 md:px-12 lg:px-20` → `px-4 md:px-6 lg:px-10` site-wide.
 - **Stripe webhook signature verification** — `STRIPE_WEBHOOK_SECRET` env flag; when set the webhook rejects unsigned / bad-signature requests.
 - **Admin Payments tab** — `GET /api/admin/payments` with status filter + aggregate summary; Admin UI has summary cards, filter pills, transaction table with Stripe Dashboard deep-links.
-- **Testing**: iterations 3–6 all green.
+- **Payment methods expanded + iPay88 removed** — all via single Stripe account. MYR: Card / GrabPay / FPX. SGD: Card / GrabPay. Backend passes `payment_methods=[body.gateway]` to Stripe Checkout; `payment_method` stored on each txn. GrabPay + FPX require one-time activation in Stripe Dashboard → Settings → Payment methods before live use.
+- **Testing**: iterations 3–7 all green (iteration 7 noted Stripe test-account doesn't have GrabPay/FPX activated — code is correct, user will activate in their own Stripe dashboard for production).
 
 ## Backlog / next tasks
 ### P1
