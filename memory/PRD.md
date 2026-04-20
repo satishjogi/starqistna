@@ -63,7 +63,8 @@ Build a complete online bus booking system where visitors can search departure t
 - **Stripe webhook signature verification** — `STRIPE_WEBHOOK_SECRET` env flag; when set the webhook rejects unsigned / bad-signature requests.
 - **Admin Payments tab** — `GET /api/admin/payments` with status filter + aggregate summary; Admin UI has summary cards, filter pills, transaction table with Stripe Dashboard deep-links.
 - **Payment methods expanded + iPay88 removed** — all via single Stripe account. MYR: Card / GrabPay / FPX. SGD: Card / GrabPay. Backend passes `payment_methods=[body.gateway]` to Stripe Checkout; `payment_method` stored on each txn. GrabPay + FPX require one-time activation in Stripe Dashboard → Settings → Payment methods before live use.
-- **Testing**: iterations 3–7 all green (iteration 7 noted Stripe test-account doesn't have GrabPay/FPX activated — code is correct, user will activate in their own Stripe dashboard for production).
+- **"Popular right now" live section** on Home page — `GET /api/popular/now` returns soonest upcoming schedule per popular city pair (KL→Melaka, KL→JB, KL→Penang, KL→SG, PEN→JB, SG→KL, JB→KL, PEN→KL). Frontend grid cards show "Next bus to …", "departs in Xh Ym · reach by HH:MM", fare + seats left; "LEAVES SOON" badge when <2h; click deep-links to `/search` with terminals + date pre-filled.
+- **Testing**: iterations 3–8 all green.
 
 ## Backlog / next tasks
 ### P1
