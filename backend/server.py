@@ -261,6 +261,114 @@ async def search_schedules(
     }
 
 
+# ---------- Popular Right Now ----------
+# Hand-picked time-aware suggestions: the soonest upcoming bus on each popular pair.
+POPULAR_PAIRS = [
+    ("Kuala Lumpur", "Melaka"),
+    ("Kuala Lumpur", "Johor Bahru"),
+    ("Kuala Lumpur", "Penang"),
+    ("Kuala Lumpur", "Singapore"),
+    ("Penang", "Johor Bahru"),
+    ("Singapore", "Kuala Lumpur"),
+    ("Johor Bahru", "Kuala Lumpur"),
+    ("Penang", "Kuala Lumpur"),
+]
+
+
+@api.get("/popular/now")
+async def popular_now(limit: int = 6):
+    """Return time-aware 'next bus' suggestions for popular city pairs.
+
+    For each pair we pick the soonest upcoming schedule (today or next few days),
+    enrich with terminals + seats-available + pricing.
+    """
+    now = datetime.now(timezone.utc)
+    today_iso = now.date().isoformat()
+    current_hhmm = now.strftime("%H:%M")
+
+    # Pre-load terminals indexed by city -> first terminal
+    all_terms = await db.terminals.find({}, {"_id": 0}).to_list(500)
+    city_to_term: dict = {}
+    for t in all_terms:
+        city_to_term.setdefault(t["city"], t)
+
+    suggestions = []
+    for from_city, to_city in POPULAR_PAIRS:
+        f = city_to_term.get(from_city)
+        t = city_to_term.get(to_city)
+        if not f or not t:
+            continue
+
+        # Find nearest upcoming schedule (today after now, or any day in next 7 days)
+        sched = await db.schedules.find_one(
+            {
+                "from_terminal_id": f["id"],
+                "to_terminal_id": t["id"],
+                "departure_date": today_iso,
+                "departure_time": {"$gte": current_hhmm},
+            },
+            {"_id": 0},
+            sort=[("departure_time", 1)],
+        )
+        if not sched:
+            # Fall back to the next 7 days
+            sched = await db.schedules.find_one(
+                {
+                    "from_terminal_id": f["id"],
+                    "to_terminal_id": t["id"],
+                    "departure_date": {"$gt": today_iso},
+                },
+                {"_id": 0},
+                sort=[("departure_date", 1), ("departure_time", 1)],
+            )
+        if not sched:
+            continue
+
+        # Seats remaining
+        booked_count = await db.seat_locks.count_documents(
+            {"schedule_id": sched["id"], "status": {"$in": ["locked", "booked"]}}
+        )
+        seats_available = sched["total_seats"] - booked_count
+
+        # How many minutes until departure (positive only)
+        try:
+            dep_dt = datetime.fromisoformat(
+                f"{sched['departure_date']}T{sched['departure_time']}:00+00:00"
+            )
+            mins_until = max(0, int((dep_dt - now).total_seconds() // 60))
+        except Exception:
+            mins_until = None
+
+        suggestions.append(
+            {
+                "from_city": from_city,
+                "to_city": to_city,
+                "from_terminal": f,
+                "to_terminal": t,
+                "schedule_id": sched["id"],
+                "departure_date": sched["departure_date"],
+                "departure_time": sched["departure_time"],
+                "arrival_time": sched.get("arrival_time"),
+                "is_today": sched["departure_date"] == today_iso,
+                "minutes_until_departure": mins_until,
+                "fare": sched.get("adult_fare"),
+                "currency": sched.get("currency", "myr"),
+                "seats_available": seats_available,
+                "bus_type": sched.get("bus_type"),
+                "operator": sched.get("bus_operator", "Star Qistna"),
+            }
+        )
+
+    # Sort: today's first, then by minutes_until_departure asc
+    suggestions.sort(
+        key=lambda x: (
+            0 if x["is_today"] else 1,
+            x.get("minutes_until_departure") if x.get("minutes_until_departure") is not None else 10**9,
+        )
+    )
+    return {"generated_at": now.isoformat(), "items": suggestions[: max(1, min(limit, 12))]}
+
+
 @api.get("/schedules/{schedule_id}")
 async def get_schedule(schedule_id: str):
     sched = await db.schedules.find_one({"id": schedule_id}, {"_id": 0})

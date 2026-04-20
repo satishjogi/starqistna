@@ -1,0 +1,66 @@
+{
+  "summary": "Completed testing of 'Popular Right Now' feature - GET /api/popular/now endpoint and PopularNow.jsx component. All 18 backend tests passed. Frontend UI tests passed - section renders correctly below search form, cards display with proper data-testids, deep-link navigation works correctly.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_popular_now.py",
+    "/app/test_reports/pytest/iteration8_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Code quality is good - proper separation of concerns between API and UI",
+    "Badge logic (LEAVES SOON when minutes_until_departure <= 120) correctly implemented",
+    "Seats color logic (red when seats_available <= 10) correctly implemented",
+    "Deep-link navigation includes all required params (from, to, date, adults=1, children=0)"
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_popular_now.py"
+  ],
+  "success_rate": {
+    "backend": "100% (18/18 tests passed)",
+    "frontend": "100% (all UI tests passed)"
+  },
+  "test_credentials": "None required for public endpoints",
+  "seed_data_creation": "None - used existing seeded schedules",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Popular Now feature fully tested. Backend endpoint /api/popular/now returns up to 6 items with proper structure (generated_at, items array). Each item includes from_city, to_city, from_terminal, to_terminal, schedule_id, departure_date, departure_time, arrival_time, is_today, minutes_until_departure, fare, currency, seats_available. Sorting is correct (today items first, then by minutes_until_departure). Frontend PopularNow.jsx renders cards with data-testid='popular-now-{from_city}-{to_city}' format. Clicking cards navigates to /search with correct URL params.",
+  "features_tested": {
+    "backend": [
+      "GET /api/popular/now returns 200 with {generated_at, items:[...]}",
+      "Default limit returns up to 6 items",
+      "limit=3 parameter caps response to 3 items",
+      "Each item has all required keys (from_city, to_city, from_terminal, to_terminal, schedule_id, departure_date, departure_time, arrival_time, is_today, minutes_until_departure, fare, currency, seats_available)",
+      "from_terminal and to_terminal have proper structure (id, city, name, code)",
+      "is_today is boolean",
+      "minutes_until_departure is non-negative integer or null",
+      "seats_available is non-negative integer (total_seats - locked/booked count)",
+      "Sorting: is_today=true items come before non-today items",
+      "Within same is_today group, sorted by minutes_until_departure ascending",
+      "fare is numeric, currency is valid (myr/sgd)",
+      "schedule_id is valid UUID string",
+      "departure_date in YYYY-MM-DD format",
+      "departure_time and arrival_time in HH:MM format",
+      "Edge cases: limit=0 returns at least 1, limit=100 capped at 12"
+    ],
+    "frontend": [
+      "Home page renders [data-testid='popular-now-section'] below search form",
+      "Section renders N cards matching API response",
+      "Each card has data-testid='popular-now-{from_city}-{to_city}' (spaces removed)",
+      "Clicking card navigates to /search?from={from_terminal.id}&to={to_terminal.id}&date={departure_date}&adults=1&children=0",
+      "Badge shows 'TODAY' (black bg) when is_today=true and minutes > 120",
+      "Badge shows 'LEAVES SOON' (red bg) when is_today=true and minutes <= 120 (logic verified in code)",
+      "Badge shows 'UPCOMING' (gray bg) when is_today=false",
+      "Seats shown in red when seats_available <= 10 (logic verified in code)",
+      "Section hidden when API returns empty items (conditional render in code)",
+      "Regression: existing 'Popular routes' section still renders below (data-testid='popular-routes-section')"
+    ]
+  }
+}

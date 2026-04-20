@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import api from "../lib/api";
+import PopularNow from "../components/PopularNow";
 
 const HERO_BG = "https://images.unsplash.com/photo-1544620347-1959828a2a7d?q=80&w=2000&auto=format&fit=crop";
 
@@ -215,6 +216,9 @@ export default function Home() {
           </form>
         </div>
       </section>
+
+      {/* Popular right now - live, time-aware suggestions just below search */}
+      <PopularNow />
 
       {/* Popular routes - clickable, right under search */}
       <PopularRoutes />
