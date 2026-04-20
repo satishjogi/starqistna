@@ -54,6 +54,23 @@ export default function Passengers() {
     setPassengers(copy);
   };
 
+  // Allow letters (incl. accents), spaces, hyphens, apostrophes, dots only
+  const sanitizeName = (v) => v.replace(/[^A-Za-zÀ-ÖØ-öø-ÿ\s'.-]/g, "");
+
+  // International phone: optional leading +, then digits only (max 15 per E.164)
+  const sanitizePhone = (v) => {
+    let cleaned = v.replace(/[^\d+]/g, "");
+    // Only allow '+' at position 0
+    if (cleaned.includes("+")) {
+      const hasLeadingPlus = cleaned.startsWith("+");
+      cleaned = (hasLeadingPlus ? "+" : "") + cleaned.replace(/\+/g, "");
+    }
+    // Limit to 16 chars (+ and up to 15 digits)
+    return cleaned.slice(0, 16);
+  };
+
+  const isValidPhone = (v) => /^\+[1-9]\d{6,14}$/.test(v);
+
   const applyPromo = async () => {
     setPromoError("");
     if (!promoInput.trim()) return;
@@ -84,8 +101,14 @@ export default function Passengers() {
     setError("");
     for (const p of passengers) {
       if (!p.name.trim()) return setError("All passenger names are required.");
+      if (!/^[A-Za-zÀ-ÖØ-öø-ÿ\s'.-]+$/.test(p.name.trim())) {
+        return setError("Passenger names must contain letters only.");
+      }
     }
     if (!email || !phone) return setError("Contact email and phone required.");
+    if (!isValidPhone(phone)) {
+      return setError("Phone must be in international format, e.g. +60123456789.");
+    }
     setLoading(true);
     try {
       const body = {
@@ -134,7 +157,14 @@ export default function Passengers() {
                     required
                     className="te-input"
                     value={p.name}
-                    onChange={(e) => updateP(i, "name", e.target.value)}
+                    onChange={(e) => updateP(i, "name", sanitizeName(e.target.value))}
+                    onKeyDown={(e) => {
+                      if (e.key.length === 1 && !/[A-Za-zÀ-ÖØ-öø-ÿ\s'.-]/.test(e.key) && !e.ctrlKey && !e.metaKey) {
+                        e.preventDefault();
+                      }
+                    }}
+                    placeholder="e.g. Ahmad bin Ali"
+                    autoComplete="name"
                     data-testid={`pax-name-${i}`}
                   />
                 </div>
@@ -160,7 +190,20 @@ export default function Passengers() {
               </div>
               <div>
                 <label className="te-label">Phone</label>
-                <input required className="te-input" value={phone} onChange={(e) => setPhone(e.target.value)} data-testid="contact-phone" />
+                <input
+                  required
+                  type="tel"
+                  inputMode="tel"
+                  className="te-input"
+                  value={phone}
+                  onChange={(e) => setPhone(sanitizePhone(e.target.value))}
+                  placeholder="+60123456789"
+                  pattern="^\+[1-9]\d{6,14}$"
+                  title="International format, e.g. +60123456789"
+                  autoComplete="tel"
+                  data-testid="contact-phone"
+                />
+                <div className="text-[10px] font-mono text-zinc-500 mt-1">Use international format starting with + and country code</div>
               </div>
             </div>
             {!user && (
