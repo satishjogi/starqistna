@@ -64,7 +64,14 @@ Build a complete online bus booking system where visitors can search departure t
 - **Admin Payments tab** — `GET /api/admin/payments` with status filter + aggregate summary; Admin UI has summary cards, filter pills, transaction table with Stripe Dashboard deep-links.
 - **Payment methods expanded + iPay88 removed** — all via single Stripe account. MYR: Card / GrabPay / FPX. SGD: Card / GrabPay. Backend passes `payment_methods=[body.gateway]` to Stripe Checkout; `payment_method` stored on each txn. GrabPay + FPX require one-time activation in Stripe Dashboard → Settings → Payment methods before live use.
 - **"Popular right now" live section** on Home page — `GET /api/popular/now` returns soonest upcoming schedule per popular city pair (KL→Melaka, KL→JB, KL→Penang, KL→SG, PEN→JB, SG→KL, JB→KL, PEN→KL). Frontend grid cards show "Next bus to …", "departs in Xh Ym · reach by HH:MM", fare + seats left; "LEAVES SOON" badge when <2h; click deep-links to `/search` with terminals + date pre-filled.
-- **Testing**: iterations 3–8 all green.
+- **Live pulsing countdown + urgency tiers + scarcity flash + tighter hero** (2026-04-20)
+  - Countdown ticks every second based on actual `departure_date + departure_time`
+  - `pulse-urgent` keyframes: ≤60min = "LEAVES SOON" pulsing red, ≤10min = "BOARDING NOW"
+  - 🔥 "Only N seats left" flash on any card with 1–3 seats remaining
+  - Auto-refresh every 2 minutes (silent)
+  - Hero padding `pt-16 pb-24` → `pt-12 pb-8` so Popular Now is visible above the fold on 1400×900
+  - **Route-time diversification migration**: seed previously used identical 4 time slots for every route so all countdowns were identical. New `_diversify_popular_schedules()` migration adds route-specific varied times (07:15/10:30/13:45/17:20/19:00 for KL→Melaka, etc.) for next 14 days — idempotent, preserves existing schedules & bookings.
+- **Testing**: iterations 3–9 all green.
 
 ## Backlog / next tasks
 ### P1
