@@ -1,0 +1,62 @@
+{
+  "summary": "Completed testing of Popular Now diversified schedules feature. All 10 backend tests passed. Frontend UI tests passed - live countdown ticks every second, badge states (BOARDING NOW, LEAVES SOON, TODAY) work correctly, scarcity flash badge appears when seats_available <= 3, hero section and Popular Now heading visible above fold on 1400x900 viewport.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_popular_now_diversified.py",
+    "/app/test_reports/pytest/iteration9_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Code quality is good - _diversify_popular_schedules migration is idempotent (checks for existing schedules before inserting)",
+    "ROUTE_TIMES dict provides genuinely varied departure times per route",
+    "Scarcity badge logic correctly shows only when 1 <= seats_available <= 3",
+    "LiveCountdown component ticks every second using setInterval",
+    "Badge tier logic: BOARDING NOW (<=10min), LEAVES SOON (<=60min), TODAY, UPCOMING"
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_popular_now_diversified.py"
+  ],
+  "success_rate": {
+    "backend": "100% (10/10 tests passed)",
+    "frontend": "100% (all UI tests passed)"
+  },
+  "test_credentials": "Admin: admin@starqistna.com / Admin@123",
+  "seed_data_creation": "Temporarily inserted 37 seat locks to test scarcity badge, then cleaned up",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Popular Now diversified schedules feature fully tested. Backend migration _diversify_popular_schedules adds ~500 schedule rows with varied times per route. GET /api/popular/now returns 6 items with 6 distinct departure times (verified: 15:40, 16:20, 17:20, 17:25, 17:50, 18:30). Sorting is correct (today-first, then by minutes_until_departure). Currency respected (SG-origin=sgd, MY-origin=myr). Frontend LiveCountdown ticks every second. Badge states: BOARDING NOW (red pulsing, <=10min), LEAVES SOON (red pulsing, <=60min), TODAY (black), UPCOMING (gray). Scarcity badge (🔥 Only N seats left) appears when 1<=seats<=3. Hero section has tighter padding (pt-12 pb-8). Popular Now section heading visible at y=689 on 1400x900 viewport (above fold).",
+  "features_tested": {
+    "backend": [
+      "GET /api/popular/now returns items with 6 distinct HH:MM values (no longer all same slot)",
+      "Items sorted today-first then by minutes_until_departure ascending",
+      "SG-origin routes return currency='sgd'",
+      "MY-origin routes return currency='myr'",
+      "All items have required fields (from_city, to_city, from_terminal, to_terminal, schedule_id, departure_date, departure_time, arrival_time, is_today, minutes_until_departure, fare, currency, seats_available)",
+      "seats_available is valid non-negative integer",
+      "Migration is idempotent - no duplicate schedules",
+      "Original seed times (08:00, 11:30, 14:00, 22:00) still exist",
+      "Search API still works for popular routes"
+    ],
+    "frontend": [
+      "Live countdown ticks every second (verified: 04:18 -> 04:16 in 2 seconds)",
+      "Badge shows 'BOARDING NOW' (red pulsing) when <=10min",
+      "Badge shows 'LEAVES SOON' (red pulsing) when <=60min",
+      "Badge shows 'TODAY' (black) when is_today=true and >60min",
+      "Badge shows 'UPCOMING' (gray) when is_today=false",
+      "Scarcity flash [data-testid='popular-now-scarcity'] appears when seats_available is 1, 2, or 3",
+      "Scarcity badge NOT shown when seats_available > 3 or = 0",
+      "Hero section has tighter padding (pt-12 pb-8)",
+      "Popular Now section heading visible on 1400x900 viewport without scrolling (y=689)",
+      "Card click navigates to /search?from=...&to=...&date=... with correct terminal ids",
+      "Popular Routes section renders below Popular Now"
+    ]
+  }
+}

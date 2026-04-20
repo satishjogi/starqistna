@@ -176,6 +176,16 @@ export default function PopularNow() {
                   </div>
                 )}
 
+                {/* Seats scarcity flash — only when 1..3 seats remain */}
+                {it.seats_available > 0 && it.seats_available <= 3 && (
+                  <div
+                    className="mt-2 inline-flex items-center gap-1 text-[10px] font-mono font-bold tracking-wider uppercase px-2 py-1 bg-[#B5121B] text-white pulse-urgent"
+                    data-testid="popular-now-scarcity"
+                  >
+                    🔥 Only {it.seats_available} seat{it.seats_available === 1 ? "" : "s"} left
+                  </div>
+                )}
+
                 <div className="mt-4 flex items-end justify-between">
                   <div>
                     <div className="te-overline text-[9px] text-zinc-500">FROM</div>

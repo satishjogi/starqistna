@@ -1504,6 +1504,82 @@ async def _migrate_operator_names():
         logger.info("Migrated %d schedules to Star Qistna operator", result.modified_count)
 
 
+async def _diversify_popular_schedules():
+    """For each popular city pair, ensure varied departure times over the next 14 days
+    so the 'Popular right now' section shows genuinely different countdowns per route
+    (not all landing on the same identical seed slot).
+
+    Safe & idempotent: only adds NEW schedule rows where none exist for that specific
+    (from, to, date, time) tuple. Existing schedules & bookings are never touched.
+    """
+    # Route-specific varied departure time sets — each pair gets its own mix of morning,
+    # afternoon, evening, and late-night slots. Times are (dep, arr, fare_myr).
+    ROUTE_TIMES: dict = {
+        ("Kuala Lumpur", "Melaka"):      [("07:15", "09:45", 25), ("10:30", "13:00", 25), ("13:45", "16:15", 25), ("17:20", "19:50", 28), ("19:00", "21:30", 25)],
+        ("Kuala Lumpur", "Johor Bahru"): [("06:45", "11:15", 45), ("09:30", "14:00", 45), ("12:15", "16:45", 45), ("15:40", "20:10", 49), ("19:45", "00:15", 52)],
+        ("Kuala Lumpur", "Penang"):      [("07:00", "11:30", 49), ("10:15", "14:45", 49), ("13:30", "18:00", 49), ("17:50", "22:20", 52), ("21:15", "01:45", 55)],
+        ("Kuala Lumpur", "Singapore"):   [("07:30", "13:00", 55), ("11:00", "16:30", 55), ("15:15", "20:45", 58), ("22:30", "04:00", 65)],
+        ("Kuala Lumpur", "Ipoh"):        [("08:20", "10:45", 35), ("12:10", "14:35", 35), ("16:05", "18:30", 35), ("20:40", "23:05", 38)],
+        ("Kuala Lumpur", "Kuantan"):     [("08:15", "12:15", 42), ("13:25", "17:25", 42), ("18:35", "22:35", 45)],
+        ("Penang", "Johor Bahru"):       [("06:30", "13:30", 75), ("10:00", "17:00", 75), ("20:00", "03:00", 80)],
+        ("Penang", "Kuala Lumpur"):      [("07:45", "12:15", 49), ("11:20", "15:50", 49), ("14:55", "19:25", 49), ("18:30", "23:00", 52)],
+        ("Singapore", "Kuala Lumpur"):   [("07:00", "12:30", 55), ("11:45", "17:15", 55), ("16:20", "21:50", 58), ("22:00", "03:30", 65)],
+        ("Johor Bahru", "Kuala Lumpur"): [("06:50", "11:20", 45), ("10:05", "14:35", 45), ("13:50", "18:20", 45), ("17:25", "21:55", 49), ("20:30", "01:00", 52)],
+        ("Melaka", "Singapore"):         [("07:50", "11:50", 55), ("12:30", "16:30", 55), ("18:10", "22:10", 58)],
+    }
+
+    # Pre-index terminals by city -> first matching terminal
+    all_terms = await db.terminals.find({}, {"_id": 0}).to_list(500)
+    city_to_term: dict = {}
+    for t in all_terms:
+        city_to_term.setdefault(t["city"], t)
+
+    today = datetime.now(timezone.utc).date()
+    added = 0
+    for (from_city, to_city), times in ROUTE_TIMES.items():
+        f = city_to_term.get(from_city)
+        t = city_to_term.get(to_city)
+        if not f or not t:
+            continue
+        # Derive currency from origin country (same rule as seed)
+        currency = COUNTRY_TO_CURRENCY.get(f.get("country"), "myr")
+        for day_offset in range(0, 14):
+            dep_date = (today + timedelta(days=day_offset)).isoformat()
+            for dep_time, arr_time, fare in times:
+                fare_val = fare if currency == "myr" else round(fare * 0.33)
+                exists = await db.schedules.find_one(
+                    {
+                        "from_terminal_id": f["id"],
+                        "to_terminal_id": t["id"],
+                        "departure_date": dep_date,
+                        "departure_time": dep_time,
+                    },
+                    {"_id": 0, "id": 1},
+                )
+                if exists:
+                    continue
+                await db.schedules.insert_one(
+                    {
+                        "id": new_id(),
+                        "from_terminal_id": f["id"],
+                        "to_terminal_id": t["id"],
+                        "departure_date": dep_date,
+                        "departure_time": dep_time,
+                        "arrival_time": arr_time,
+                        "bus_operator": "Star Qistna",
+                        "bus_type": "Executive",
+                        "adult_fare": fare_val,
+                        "rows": 10,
+                        "total_seats": 40,
+                        "currency": currency,
+                        "created_at": utcnow().isoformat(),
+                    }
+                )
+                added += 1
+    if added:
+        logger.info("Diversified popular-route schedules: +%d rows", added)
+
+
 async def _migrate_sg_schedules():
     """One-time migration: for schedules where the origin terminal is in Singapore,
     ensure currency is 'sgd' and fares are adjusted from MYR."""
@@ -1608,6 +1684,7 @@ async def on_start():
     await _seed_schedules()
     await _migrate_sg_schedules()
     await _migrate_operator_names()
+    await _diversify_popular_schedules()
     await _seed_promos()
     logger.info("Star Qistna startup complete")
 
