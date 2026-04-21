@@ -201,6 +201,52 @@ async def _clear_login_attempts(ip: str, email: str):
         logger.warning("clear_login_attempts failed: %s", e)
 
 
+# Generic throttle for other auth actions (register, 2FA). Uses `auth_throttle`
+# collection with per-document TTL via `expires_at`, so each scope can have its
+# own window without clashing with the login rate-limit collection.
+async def _check_auth_throttle(ip: str, scope: str, max_attempts: int, window_seconds: int,
+                               label: str, identifier: Optional[str] = None):
+    query: dict = {
+        "ip": ip,
+        "scope": scope,
+        "failed_at": {"$gte": utcnow() - timedelta(seconds=window_seconds)},
+    }
+    if identifier:
+        query["identifier"] = identifier
+    count = await db.auth_throttle.count_documents(query)
+    if count >= max_attempts:
+        raise HTTPException(
+            429,
+            detail=f"Too many {label} attempts. Please try again in {max(1, window_seconds // 60)} minutes.",
+            headers={"Retry-After": str(window_seconds)},
+        )
+
+
+async def _record_auth_failure(ip: str, scope: str, window_seconds: int,
+                               identifier: Optional[str] = None):
+    try:
+        now = utcnow()
+        await db.auth_throttle.insert_one({
+            "ip": ip,
+            "scope": scope,
+            "identifier": identifier,
+            "failed_at": now,
+            "expires_at": now + timedelta(seconds=window_seconds),
+        })
+    except Exception as e:
+        logger.warning("record_auth_failure failed: %s", e)
+
+
+async def _clear_auth_attempts(ip: str, scope: str, identifier: Optional[str] = None):
+    try:
+        q: dict = {"ip": ip, "scope": scope}
+        if identifier:
+            q["identifier"] = identifier
+        await db.auth_throttle.delete_many(q)
+    except Exception as e:
+        logger.warning("clear_auth_attempts failed: %s", e)
+
+
 # ---------- Models ----------
 class RegisterBody(BaseModel):
     email: EmailStr
@@ -509,7 +555,15 @@ async def get_schedule(schedule_id: str):
 
 # ---------- Auth ----------
 @api.post("/auth/register", response_model=TokenResponse)
-async def register(body: RegisterBody):
+async def register(body: RegisterBody, request: Request):
+    ip = _client_ip(request)
+    # Throttle signup spam: 10 registrations per hour per IP.
+    await _check_auth_throttle(ip, "register", max_attempts=10, window_seconds=3600,
+                                label="registration")
+    # Record the attempt before we know success; we do NOT clear on success so honest
+    # users on shared IPs (cafe/office) still have a generous quota.
+    await _record_auth_failure(ip, "register", window_seconds=3600)
+
     existing = await db.users.find_one({"email": body.email.lower()})
     if existing:
         raise HTTPException(400, "Email already registered")
@@ -563,7 +617,8 @@ async def login(body: LoginBody, request: Request):
 
 
 @api.post("/auth/2fa/verify")
-async def verify_2fa(body: TwoFAVerifyBody):
+async def verify_2fa(body: TwoFAVerifyBody, request: Request):
+    ip = _client_ip(request)
     try:
         payload = jwt.decode(body.challenge_token, JWT_SECRET, algorithms=[JWT_ALG])
     except jwt.ExpiredSignatureError:
@@ -573,14 +628,22 @@ async def verify_2fa(body: TwoFAVerifyBody):
     if payload.get("scope") != "2fa_challenge":
         raise HTTPException(401, "Invalid challenge scope")
 
+    # Throttle 2FA guessing: 5 attempts per 15 min per IP + user (sub).
+    throttle_id = f"{ip}:{payload['sub']}"
+    await _check_auth_throttle(ip, "2fa", max_attempts=5, window_seconds=15 * 60,
+                                label="2FA", identifier=throttle_id)
+
     user = await db.users.find_one({"id": payload["sub"]})
     if not user or not user.get("totp_enabled") or not user.get("totp_secret"):
         raise HTTPException(400, "2FA is not enabled for this account")
 
     totp = pyotp.TOTP(user["totp_secret"])
     if not totp.verify(body.code, valid_window=1):
+        await _record_auth_failure(ip, "2fa", window_seconds=15 * 60, identifier=throttle_id)
         raise HTTPException(401, "Invalid 2FA code")
 
+    # Success — clear the counter so the user can log in again later without punishment.
+    await _clear_auth_attempts(ip, "2fa", identifier=throttle_id)
     user_public = {k: v for k, v in user.items() if k not in ("password_hash", "_id", "totp_secret")}
     return TokenResponse(access_token=issue_jwt(user["id"], user["email"]), user=user_public)
 
@@ -1827,6 +1890,9 @@ async def _ensure_indexes():
     await db.login_attempts.create_index("failed_at", expireAfterSeconds=LOGIN_WINDOW_SECONDS)
     await db.login_attempts.create_index([("identifier", ASCENDING)])
     await db.login_attempts.create_index([("ip", ASCENDING)])
+    # Generic auth throttle (register / 2FA). TTL driven by per-doc `expires_at`.
+    await db.auth_throttle.create_index("expires_at", expireAfterSeconds=0)
+    await db.auth_throttle.create_index([("ip", ASCENDING), ("scope", ASCENDING)])
 
 
 @api.get("/")

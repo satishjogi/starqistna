@@ -93,6 +93,11 @@ Build a complete online bus booking system where visitors can search departure t
   - Response includes `Retry-After: 900` header + friendly message.
   - IP detection respects `X-Forwarded-For` (Kubernetes ingress / Nginx).
   - Verified end-to-end: attempt 6 correctly returns 429; successful login resets counter; header present.
+- **Extended rate limiting to register + 2FA**
+  - New `auth_throttle` collection with per-document TTL (`expires_at` field + `expireAfterSeconds=0`) so each scope can have its own window.
+  - Generic helpers: `_check_auth_throttle`, `_record_auth_failure`, `_clear_auth_attempts`.
+  - `POST /api/auth/register`: **10 signups / hour / IP** (prevents bot spam). Verified: 11th returns 429.
+  - `POST /api/auth/2fa/verify`: **5 wrong codes / 15 min / IP+user** (prevents TOTP guessing after password leak). Success clears the counter. Verified: 6th returns 429.
 
 ## Backlog / next tasks
 ### P1
