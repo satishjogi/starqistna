@@ -139,6 +139,68 @@ async def log_audit(
         logger.warning("audit log failed: %s", e)
 
 
+# ---------- Login rate limiting (brute-force protection) ----------
+LOGIN_MAX_ATTEMPTS_PER_IDENTIFIER = 5   # same IP + email within window
+LOGIN_MAX_ATTEMPTS_PER_IP = 20          # same IP across all emails within window
+LOGIN_WINDOW_SECONDS = 15 * 60          # 15 minutes
+
+
+def _client_ip(request: Optional[Request]) -> str:
+    if request is None:
+        return "unknown"
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+async def _check_login_rate_limit(ip: str, email: str):
+    """Raise 429 if this IP+email or this IP alone has exceeded failed-login thresholds."""
+    window_start = utcnow() - timedelta(seconds=LOGIN_WINDOW_SECONDS)
+    identifier = f"{ip}:{email.lower()}"
+
+    id_attempts = await db.login_attempts.count_documents({
+        "identifier": identifier,
+        "failed_at": {"$gte": window_start},
+    })
+    if id_attempts >= LOGIN_MAX_ATTEMPTS_PER_IDENTIFIER:
+        raise HTTPException(
+            429,
+            detail=f"Too many failed login attempts. Please try again in {LOGIN_WINDOW_SECONDS // 60} minutes.",
+            headers={"Retry-After": str(LOGIN_WINDOW_SECONDS)},
+        )
+
+    ip_attempts = await db.login_attempts.count_documents({
+        "ip": ip,
+        "failed_at": {"$gte": window_start},
+    })
+    if ip_attempts >= LOGIN_MAX_ATTEMPTS_PER_IP:
+        raise HTTPException(
+            429,
+            detail="Too many failed login attempts from this network. Please try again later.",
+            headers={"Retry-After": str(LOGIN_WINDOW_SECONDS)},
+        )
+
+
+async def _record_login_failure(ip: str, email: str):
+    try:
+        await db.login_attempts.insert_one({
+            "identifier": f"{ip}:{email.lower()}",
+            "ip": ip,
+            "email": email.lower(),
+            "failed_at": utcnow(),
+        })
+    except Exception as e:
+        logger.warning("record_login_failure failed: %s", e)
+
+
+async def _clear_login_attempts(ip: str, email: str):
+    try:
+        await db.login_attempts.delete_many({"identifier": f"{ip}:{email.lower()}"})
+    except Exception as e:
+        logger.warning("clear_login_attempts failed: %s", e)
+
+
 # ---------- Models ----------
 class RegisterBody(BaseModel):
     email: EmailStr
@@ -467,12 +529,21 @@ async def register(body: RegisterBody):
 
 
 @api.post("/auth/login")
-async def login(body: LoginBody):
-    user = await db.users.find_one({"email": body.email.lower()})
+async def login(body: LoginBody, request: Request):
+    ip = _client_ip(request)
+    email = body.email.lower()
+    await _check_login_rate_limit(ip, email)
+
+    user = await db.users.find_one({"email": email})
     if not user or not verify_password(body.password, user["password_hash"]):
+        await _record_login_failure(ip, email)
         raise HTTPException(401, "Invalid email or password")
 
-    # If 2FA is enabled, return a short-lived challenge instead of the JWT
+    # If 2FA is enabled, return a short-lived challenge instead of the JWT.
+    # We clear password-attempt counters here because the password was correct;
+    # the 2FA step has its own brute-force protection via the 5-minute challenge expiry.
+    await _clear_login_attempts(ip, email)
+
     if user.get("totp_enabled"):
         challenge = jwt.encode(
             {
@@ -1752,6 +1823,10 @@ async def _ensure_indexes():
     await db.promo_codes.create_index([("code", ASCENDING)], unique=True)
     await db.audit_logs.create_index([("created_at", ASCENDING)])
     await db.audit_logs.create_index([("resource", ASCENDING), ("action", ASCENDING)])
+    # Auto-expire login attempt records after the rate-limit window elapses
+    await db.login_attempts.create_index("failed_at", expireAfterSeconds=LOGIN_WINDOW_SECONDS)
+    await db.login_attempts.create_index([("identifier", ASCENDING)])
+    await db.login_attempts.create_index([("ip", ASCENDING)])
 
 
 @api.get("/")

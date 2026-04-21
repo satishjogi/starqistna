@@ -83,6 +83,17 @@ Build a complete online bus booking system where visitors can search departure t
   - `GET /api/admin/audit-logs` supports `resource`, `action`, `actor_email` filters + `limit` (max 1000).
   - Admin UI: new "Audit log" tab with Resource / Action / Actor filters, refresh button, compact table (When / Actor + IP / Action pill / Resource + ID / JSON details).
 
+## Implemented (2026-04-21)
+- **Hide past-time departures on same-day search** — `GET /api/search` now adds a `departure_time >= now` filter when `date` matches today in MY/SG local time (UTC+8), so users can't book a bus that has already left. Future dates are unaffected.
+- **Login brute-force protection** — MongoDB-backed rate limiter on `POST /api/auth/login`.
+  - Collection `login_attempts` (TTL index auto-expires rows after 15 min).
+  - Per identifier (`{ip}:{email}`): **5 failed attempts / 15 min** → HTTP 429.
+  - Per IP overall: **20 failed attempts / 15 min** → HTTP 429 (stops distributed account scans).
+  - Successful password verification clears the counter for that IP+email.
+  - Response includes `Retry-After: 900` header + friendly message.
+  - IP detection respects `X-Forwarded-For` (Kubernetes ingress / Nginx).
+  - Verified end-to-end: attempt 6 correctly returns 429; successful login resets counter; header present.
+
 ## Backlog / next tasks
 ### P1
 - iPay88 integration (need merchant credentials: Merchant Code, Merchant Key, environment)
