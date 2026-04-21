@@ -247,10 +247,50 @@ async def _clear_auth_attempts(ip: str, scope: str, identifier: Optional[str] = 
         logger.warning("clear_auth_attempts failed: %s", e)
 
 
+# ---------- Password strength ----------
+# Compact list of passwords banned outright — covers SecLists top-100 + common
+# local variants. Comparison is case-insensitive.
+COMMON_PASSWORDS = {
+    "123456", "123456789", "12345678", "12345", "1234567", "1234567890",
+    "password", "password1", "password123", "qwerty", "qwerty123", "qwertyuiop",
+    "abc123", "111111", "123123", "000000", "iloveyou", "admin", "admin123",
+    "administrator", "letmein", "welcome", "welcome1", "monkey", "dragon",
+    "master", "sunshine", "princess", "football", "baseball", "superman",
+    "batman", "trustno1", "starwars", "passw0rd", "1q2w3e4r", "1qaz2wsx",
+    "zaq12wsx", "qazwsx", "asdfgh", "asdfghjkl", "qwerty1", "qwertyu",
+    "pokemon", "hello", "hello123", "hello1", "charlie", "whatever",
+    "shadow", "ashley", "michael", "jennifer", "thomas", "jordan", "jessica",
+    "robert", "daniel", "andrew", "joshua", "matthew", "nicole", "amanda",
+    "taylor", "hunter", "buster", "soccer", "hockey", "killer", "george",
+    "sexy", "andrea", "michelle", "love", "login", "test", "test123",
+    "guest", "user", "root", "toor", "changeme", "qwer1234", "qwer123",
+    "p@ssw0rd", "p@ssword", "pa55word", "pass123", "pass1234", "pass12345",
+    "starqistna", "starqistna123", "bus123", "ticket123",
+    "malaysia", "malaysia123", "kuala", "singapore",
+}
+
+
+def _validate_password_strength(password: str) -> None:
+    """Raise HTTPException(400) with a user-friendly message if the password is
+    too weak. Enforced rules: min 8 chars, 1 upper, 1 lower, 1 digit, not on
+    the common-password blocklist."""
+    pw = password or ""
+    if len(pw) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters long.")
+    if not any(c.isupper() for c in pw):
+        raise HTTPException(400, "Password must contain at least one uppercase letter.")
+    if not any(c.islower() for c in pw):
+        raise HTTPException(400, "Password must contain at least one lowercase letter.")
+    if not any(c.isdigit() for c in pw):
+        raise HTTPException(400, "Password must contain at least one number.")
+    if pw.lower() in COMMON_PASSWORDS:
+        raise HTTPException(400, "This password is too common. Please pick something unique.")
+
+
 # ---------- Models ----------
 class RegisterBody(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=6)
+    password: str = Field(min_length=8)
     full_name: str = Field(min_length=1)
     phone: Optional[str] = None
 
@@ -563,6 +603,8 @@ async def register(body: RegisterBody, request: Request):
     # Record the attempt before we know success; we do NOT clear on success so honest
     # users on shared IPs (cafe/office) still have a generous quota.
     await _record_auth_failure(ip, "register", window_seconds=3600)
+
+    _validate_password_strength(body.password)
 
     existing = await db.users.find_one({"email": body.email.lower()})
     if existing:

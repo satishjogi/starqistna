@@ -98,6 +98,13 @@ Build a complete online bus booking system where visitors can search departure t
   - Generic helpers: `_check_auth_throttle`, `_record_auth_failure`, `_clear_auth_attempts`.
   - `POST /api/auth/register`: **10 signups / hour / IP** (prevents bot spam). Verified: 11th returns 429.
   - `POST /api/auth/2fa/verify`: **5 wrong codes / 15 min / IP+user** (prevents TOTP guessing after password leak). Success clears the counter. Verified: 6th returns 429.
+- **Password strength enforcement**
+  - Backend `_validate_password_strength()` + blocklist of ~100 common passwords (top-100 SecLists + local variants).
+  - Rules: min 8 chars, ≥1 uppercase, ≥1 lowercase, ≥1 digit, not in blocklist.
+  - `RegisterBody.password` min_length raised from 6 → 8.
+  - Returns HTTP 400 with specific reason (e.g. "Password must contain at least one uppercase letter.", "This password is too common. Please pick something unique.").
+  - Frontend Register page rewritten with live strength meter (5-segment bar: Weak/Fair/Good/Strong colors) + interactive checklist; submit button disabled until all 5 rules pass.
+  - Verified: 4 negative scenarios return 400, strong password succeeds. Screenshots confirm bar/checklist/button states.
 
 ## Backlog / next tasks
 ### P1
