@@ -484,11 +484,14 @@ async def popular_now(limit: int = 6):
     """Return time-aware 'next bus' suggestions for popular city pairs.
 
     For each pair we pick the soonest upcoming schedule (today or next few days),
-    enrich with terminals + seats-available + pricing.
+    enrich with terminals + seats-available + pricing. Uses local Malaysia/Singapore
+    time (UTC+8) because schedule `departure_time` is stored as local HH:MM.
     """
-    now = datetime.now(timezone.utc)
-    today_iso = now.date().isoformat()
-    current_hhmm = now.strftime("%H:%M")
+    local_tz = timezone(timedelta(hours=8))
+    now_local = datetime.now(local_tz)
+    now_utc = datetime.now(timezone.utc)
+    today_iso = now_local.date().isoformat()
+    current_hhmm = now_local.strftime("%H:%M")
 
     # Pre-load terminals indexed by city -> first terminal
     all_terms = await db.terminals.find({}, {"_id": 0}).to_list(500)
@@ -534,12 +537,12 @@ async def popular_now(limit: int = 6):
         )
         seats_available = sched["total_seats"] - booked_count
 
-        # How many minutes until departure (positive only)
+        # How many minutes until departure (positive only). Departure stored as local MY HH:MM.
         try:
             dep_dt = datetime.fromisoformat(
-                f"{sched['departure_date']}T{sched['departure_time']}:00+00:00"
+                f"{sched['departure_date']}T{sched['departure_time']}:00+08:00"
             )
-            mins_until = max(0, int((dep_dt - now).total_seconds() // 60))
+            mins_until = max(0, int((dep_dt - now_local).total_seconds() // 60))
         except Exception:
             mins_until = None
 
@@ -570,7 +573,7 @@ async def popular_now(limit: int = 6):
             x.get("minutes_until_departure") if x.get("minutes_until_departure") is not None else 10**9,
         )
     )
-    return {"generated_at": now.isoformat(), "items": suggestions[: max(1, min(limit, 12))]}
+    return {"generated_at": now_utc.isoformat(), "items": suggestions[: max(1, min(limit, 12))]}
 
 
 @api.get("/schedules/{schedule_id}")

@@ -35,10 +35,11 @@ function headline(item) {
   };
 }
 
-// Compute live seconds-until-departure from the absolute departure datetime string.
+// Compute live seconds-until-departure. Schedule departure_time is stored as
+// local Malaysia/Singapore time (UTC+8), so we build the datetime with that offset.
 function secondsUntil(dateStr, timeStr, now) {
   try {
-    const dep = new Date(`${dateStr}T${timeStr}:00Z`);
+    const dep = new Date(`${dateStr}T${timeStr}:00+08:00`);
     return Math.max(0, Math.floor((dep.getTime() - now) / 1000));
   } catch {
     return null;
