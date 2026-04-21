@@ -161,3 +161,53 @@ async def send_booking_confirmation(booking: dict, from_term: dict, to_term: dic
         logger.info("Sent booking email to %s ref=%s id=%s", to_email, booking.get("reference"), res.get("id"))
     except Exception as e:
         logger.exception("Failed to send booking email to %s: %s", to_email, e)
+
+
+def _render_password_reset_html(full_name: str, reset_link: str, ttl_minutes: int) -> str:
+    safe_name = (full_name or "there").split()[0]
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Reset your Star Qistna password</title></head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#09090b">
+  <div style="max-width:560px;margin:32px auto;background:#fff;border:1px solid #e4e4e7">
+    <div style="background:#002FA7;color:#fff;padding:22px 28px;font-weight:900;letter-spacing:-.5px;font-size:22px">
+      STAR QISTNA <span style="font-size:11px;letter-spacing:.2em;font-weight:600;opacity:.85;margin-left:10px">FIRST CLASS COACH</span>
+    </div>
+    <div style="padding:32px 28px">
+      <div style="text-transform:uppercase;letter-spacing:.22em;color:#002FA7;font-size:11px;font-weight:700">Account security</div>
+      <h1 style="margin:8px 0 12px;font-size:30px;letter-spacing:-.5px;font-weight:900">Reset your password</h1>
+      <p style="font-size:14px;color:#52525b;line-height:1.6;margin:0 0 18px">
+        Hi {safe_name}, we received a request to reset the password for your Star Qistna account.
+        Click the button below to choose a new one — the link expires in <b>{ttl_minutes} minutes</b>.
+      </p>
+      <p style="margin:24px 0">
+        <a href="{reset_link}" style="display:inline-block;background:#002FA7;color:#fff;padding:14px 28px;text-decoration:none;font-weight:700;letter-spacing:.05em">Reset password →</a>
+      </p>
+      <p style="font-size:12px;color:#71717a;line-height:1.6;margin:0 0 8px">
+        Or paste this link into your browser:
+      </p>
+      <p style="font-family:monospace;font-size:12px;background:#f4f4f5;padding:10px 12px;word-break:break-all;border:1px solid #e4e4e7">
+        {reset_link}
+      </p>
+      <p style="font-size:12px;color:#71717a;line-height:1.6;margin-top:22px">
+        Didn't request this? You can safely ignore this email — your password won't change until you create a new one.
+      </p>
+    </div>
+    <div style="background:#09090b;color:#a1a1aa;padding:16px 28px;font-family:monospace;font-size:10px;letter-spacing:.18em;text-transform:uppercase">
+      © STAR QISTNA · PREMIUM COACH · <a href="{PUBLIC_APP_URL}" style="color:#a1a1aa;text-decoration:none">STARQISTNA.COM</a>
+    </div>
+  </div>
+</body></html>"""
+
+
+async def send_password_reset(to_email: str, full_name: str, reset_link: str, ttl_minutes: int):
+    """Non-blocking; logs and swallows delivery errors."""
+    if not resend.api_key:
+        logger.warning("RESEND_API_KEY not set; skipping password-reset email to %s", to_email)
+        return
+    html = _render_password_reset_html(full_name, reset_link, ttl_minutes)
+    subject = "Star Qistna — Reset your password"
+    try:
+        res = await asyncio.to_thread(_send_sync, to_email, subject, html, None)
+        logger.info("Sent password-reset email to %s id=%s", to_email, res.get("id"))
+    except Exception as e:
+        logger.exception("Failed to send password-reset email to %s: %s", to_email, e)

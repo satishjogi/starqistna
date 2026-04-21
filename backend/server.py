@@ -13,6 +13,7 @@ import os
 import logging
 import uuid
 import asyncio
+import secrets
 import bcrypt
 import jwt
 import pyotp
@@ -27,7 +28,7 @@ from emergentintegrations.payments.stripe.checkout import (
     CheckoutSessionRequest,
 )
 import httpx
-from email_service import send_booking_confirmation
+from email_service import send_booking_confirmation, send_password_reset
 
 # ---------- Setup ----------
 ROOT_DIR = Path(__file__).parent
@@ -316,6 +317,15 @@ class TwoFADisableBody(BaseModel):
 class TwoFAVerifyBody(BaseModel):
     challenge_token: str
     code: str = Field(min_length=6, max_length=6)
+
+
+class ForgotPasswordBody(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordBody(BaseModel):
+    token: str = Field(min_length=16)
+    new_password: str = Field(min_length=8)
 
 
 class TokenResponse(BaseModel):
@@ -688,6 +698,101 @@ async def verify_2fa(body: TwoFAVerifyBody, request: Request):
     await _clear_auth_attempts(ip, "2fa", identifier=throttle_id)
     user_public = {k: v for k, v in user.items() if k not in ("password_hash", "_id", "totp_secret")}
     return TokenResponse(access_token=issue_jwt(user["id"], user["email"]), user=user_public)
+
+
+# ---------- Forgot / Reset password ----------
+RESET_TOKEN_TTL_SECONDS = 60 * 60  # 1 hour
+
+
+@api.post("/auth/forgot-password")
+async def forgot_password(body: ForgotPasswordBody, request: Request):
+    """Always returns 200 with the same generic message to avoid user enumeration.
+    If the email exists, we generate a one-time reset token and email it via Resend."""
+    ip = _client_ip(request)
+    # Throttle: 5 reset requests per hour per IP.
+    await _check_auth_throttle(ip, "forgot_pw", max_attempts=5, window_seconds=3600,
+                                label="password reset")
+    await _record_auth_failure(ip, "forgot_pw", window_seconds=3600)
+
+    email = body.email.lower().strip()
+    user = await db.users.find_one({"email": email})
+    if user and user.get("password_hash"):
+        # Invalidate any prior unused tokens for this user so only the newest works.
+        await db.password_reset_tokens.update_many(
+            {"user_id": user["id"], "used": False},
+            {"$set": {"used": True, "invalidated_at": utcnow()}},
+        )
+        raw_token = secrets.token_urlsafe(32)
+        token_hash = bcrypt.hashpw(raw_token.encode(), bcrypt.gensalt()).decode()
+        now = utcnow()
+        await db.password_reset_tokens.insert_one({
+            "id": new_id(),
+            "user_id": user["id"],
+            "email": email,
+            "token_hash": token_hash,
+            "used": False,
+            "created_at": now,
+            "expires_at": now + timedelta(seconds=RESET_TOKEN_TTL_SECONDS),
+            "requested_ip": ip,
+        })
+        public_url = os.environ.get("PUBLIC_APP_URL", "").rstrip("/") or "https://starqistna.com"
+        reset_link = f"{public_url}/reset-password?token={raw_token}"
+        try:
+            await send_password_reset(
+                to_email=email,
+                full_name=user.get("full_name") or "there",
+                reset_link=reset_link,
+                ttl_minutes=RESET_TOKEN_TTL_SECONDS // 60,
+            )
+        except Exception as e:
+            logger.warning("forgot-password email failed for %s: %s", email, e)
+    return {"ok": True, "message": "If an account exists with that email, we've sent a reset link."}
+
+
+@api.post("/auth/reset-password")
+async def reset_password(body: ResetPasswordBody, request: Request):
+    """Validate the reset token, apply the new password (strength-checked), mark token used."""
+    ip = _client_ip(request)
+    # Throttle token guessing: 10 per hour per IP.
+    await _check_auth_throttle(ip, "reset_pw", max_attempts=10, window_seconds=3600,
+                                label="password reset")
+
+    _validate_password_strength(body.new_password)
+
+    candidates = await db.password_reset_tokens.find(
+        {"used": False, "expires_at": {"$gte": utcnow()}},
+    ).to_list(500)
+
+    raw = body.token.encode()
+    matched = None
+    for c in candidates:
+        try:
+            if bcrypt.checkpw(raw, c["token_hash"].encode()):
+                matched = c
+                break
+        except Exception:
+            continue
+
+    if not matched:
+        await _record_auth_failure(ip, "reset_pw", window_seconds=3600)
+        raise HTTPException(400, "This reset link is invalid or has expired. Please request a new one.")
+
+    user = await db.users.find_one({"id": matched["user_id"]})
+    if not user:
+        raise HTTPException(400, "Account no longer exists.")
+
+    new_hash = hash_password(body.new_password)
+    await db.users.update_one({"id": user["id"]}, {"$set": {"password_hash": new_hash}})
+    await db.password_reset_tokens.update_one(
+        {"id": matched["id"]},
+        {"$set": {"used": True, "used_at": utcnow()}},
+    )
+    # Clear any lingering login-throttle lockouts so the user can sign in immediately.
+    try:
+        await db.login_attempts.delete_many({"email": user["email"]})
+    except Exception:
+        pass
+    return {"ok": True, "message": "Password updated. You can now sign in."}
 
 
 @api.post("/auth/2fa/setup")
@@ -1935,6 +2040,9 @@ async def _ensure_indexes():
     # Generic auth throttle (register / 2FA). TTL driven by per-doc `expires_at`.
     await db.auth_throttle.create_index("expires_at", expireAfterSeconds=0)
     await db.auth_throttle.create_index([("ip", ASCENDING), ("scope", ASCENDING)])
+    # Password reset tokens: auto-expire at `expires_at` (per-doc TTL)
+    await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
+    await db.password_reset_tokens.create_index([("user_id", ASCENDING)])
 
 
 @api.get("/")

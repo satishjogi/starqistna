@@ -106,6 +106,15 @@ Build a complete online bus booking system where visitors can search departure t
   - Frontend Register page rewritten with live strength meter (5-segment bar: Weak/Fair/Good/Strong colors) + interactive checklist; submit button disabled until all 5 rules pass.
   - Verified: 4 negative scenarios return 400, strong password succeeds. Screenshots confirm bar/checklist/button states.
 
+## Implemented (2026-04-21 · continued)
+- **Forgot / Reset password flow** (Resend-powered)
+  - `POST /api/auth/forgot-password` — always returns 200 with generic message (no user enumeration). Generates a bcrypt-hashed one-time token, stored in `password_reset_tokens` with per-doc TTL (`expires_at`, 1 hour). Invalidates any prior unused tokens for that user. Sends reset email via Resend. Throttled: 5/hour/IP.
+  - `POST /api/auth/reset-password` — bcrypt-checks the supplied raw token against active candidates, enforces the full password-strength policy on the new password, marks token used (single-use), clears any active login lockouts so the user can sign in immediately. Throttled: 10/hour/IP.
+  - New Resend template `send_password_reset()` — Swiss/brutalist layout matching the ticket email, single CTA button, plain-text fallback link.
+  - Frontend pages: `/forgot-password` (generic "check your inbox" confirmation), `/reset-password?token=…` (new password + confirm, reuses 5-segment strength meter + 5-check list from Register, blocks submit until strength + match both pass). Added "Forgot password?" link under the Login password field.
+  - Extracted shared strength util to `/app/frontend/src/lib/password-strength.js` and reused on both Register and Reset pages.
+  - Verified end-to-end: register → forgot → reset with valid token (200) → token reuse blocked (400) → old password fails (401) → new password works (200). Bad tokens, weak passwords, and enumeration probes all handled correctly.
+
 ## Backlog / next tasks
 ### P1
 - iPay88 integration (need merchant credentials: Merchant Code, Merchant Key, environment)

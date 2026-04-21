@@ -73,6 +73,11 @@ export default function Login() {
               <div>
                 <label className="te-label">Password</label>
                 <input className="te-input" type="password" required value={password} onChange={(e) => setPassword(e.target.value)} data-testid="login-password" />
+                <div className="text-right mt-1">
+                  <Link to="/forgot-password" className="text-[11px] font-bold text-zinc-600 hover:text-black underline" data-testid="forgot-password-link">
+                    Forgot password?
+                  </Link>
+                </div>
               </div>
               {error && <div className="text-xs font-bold text-red-600" data-testid="login-error">{error}</div>}
               <button disabled={loading} className="te-btn-primary w-full" data-testid="login-submit-btn">
