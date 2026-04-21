@@ -114,6 +114,10 @@ Build a complete online bus booking system where visitors can search departure t
   - Frontend pages: `/forgot-password` (generic "check your inbox" confirmation), `/reset-password?token=…` (new password + confirm, reuses 5-segment strength meter + 5-check list from Register, blocks submit until strength + match both pass). Added "Forgot password?" link under the Login password field.
   - Extracted shared strength util to `/app/frontend/src/lib/password-strength.js` and reused on both Register and Reset pages.
   - Verified end-to-end: register → forgot → reset with valid token (200) → token reuse blocked (400) → old password fails (401) → new password works (200). Bad tokens, weak passwords, and enumeration probes all handled correctly.
+- **Bus seat map redesign + 2+1 layout support**
+  - Backend: `CreateScheduleBody`/`BulkScheduleBody` replaced `rows` with `total_seats` (12–60). New `_layout_for_bus_type()` maps bus class → layout config: **VIP → 2+1**, Standard/Executive → 2+2. Schedules persist `layout_config`. `GET /schedules/{id}` now emits `layout` + `layout_config` + `seats_per_row`; supports partial last rows cleanly (e.g. 27-seat VIP = 9 rows of 3).
+  - Frontend (`SeatSelection.jsx` + `index.css`): new bus-shell aesthetic — rounded windshield arc, driver steering-wheel icon, headrest-notched seat pills, aisle gap, EXIT door, "REAR · ENGINE" footer, hover-lift animation. Category-aware fill (adult = red, child = teal) so travellers see their mix at a glance. Supports 2+2 and 2+1 in one component.
+  - Admin form replaced "Rows" input with "Total seats (capacity)" + inline hint explaining the layout mapping.
 
 ## Backlog / next tasks
 ### P1

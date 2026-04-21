@@ -103,6 +103,14 @@ async def require_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(b
     return user
 
 
+def _layout_for_bus_type(bus_type: str) -> str:
+    """Map a bus class name to a seat-column layout. VIP = luxury 2+1, everything else = 2+2."""
+    bt = (bus_type or "").strip().lower()
+    if "vip" in bt:
+        return "2+1"
+    return "2+2"
+
+
 async def require_admin(user: dict = Depends(require_user)) -> dict:
     if not user.get("is_admin"):
         raise HTTPException(403, "Admin access required")
@@ -580,27 +588,64 @@ async def get_schedule(schedule_id: str):
     ).to_list(500)
     booked_seats = {lk["seat_number"]: lk["status"] for lk in locks}
 
-    # Build seat layout: 2 columns + aisle + 2 columns, N rows
-    rows = sched.get("rows", 10)
+    # Derive seat layout. Supports 2+2 (A,B | C,D = 4/row) and 2+1 (A,B | C = 3/row).
+    # `layout_config` persisted on schedule overrides `bus_type` mapping.
+    layout_config = sched.get("layout_config") or _layout_for_bus_type(sched.get("bus_type", "Standard"))
+    cols_left, cols_right = (("A", "B"), ("C", "D")) if layout_config == "2+2" else (("A", "B"), ("C",))
+    per_row = len(cols_left) + len(cols_right)
+
+    total_seats = int(sched.get("total_seats") or (sched.get("rows", 10) * 4))
+    # Last row may be partial when total_seats is not a clean multiple of per_row.
+    full_rows = total_seats // per_row
+    remainder = total_seats - full_rows * per_row
+
     layout = []
-    seat_idx = 0
-    for r in range(1, rows + 1):
+    seats_emitted = 0
+
+    def seat_cell(sn: str):
+        return {"seat_number": sn, "status": booked_seats.get(sn, "available")}
+
+    for r in range(1, full_rows + 1):
         row_seats = []
-        for col in ["A", "B", "_", "C", "D"]:
-            if col == "_":
-                row_seats.append({"seat_number": None, "aisle": True})
-            else:
-                sn = f"{r}{col}"
-                seat_idx += 1
-                row_seats.append(
-                    {
-                        "seat_number": sn,
-                        "status": booked_seats.get(sn, "available"),
-                    }
-                )
+        for col in cols_left:
+            row_seats.append(seat_cell(f"{r}{col}"))
+            seats_emitted += 1
+        row_seats.append({"seat_number": None, "aisle": True})
+        for col in cols_right:
+            row_seats.append(seat_cell(f"{r}{col}"))
+            seats_emitted += 1
         layout.append(row_seats)
 
-    return {"schedule": sched, "from": from_term, "to": to_term, "layout": layout}
+    # Partial last row (e.g. 27-seater 2+1 → 9 full rows; or 2+2 with 39 seats → last row 3 seats)
+    if remainder > 0:
+        r = full_rows + 1
+        row_seats = []
+        remaining = remainder
+        for col in cols_left:
+            if remaining <= 0:
+                row_seats.append({"seat_number": None, "empty": True})
+                continue
+            row_seats.append(seat_cell(f"{r}{col}"))
+            remaining -= 1
+            seats_emitted += 1
+        row_seats.append({"seat_number": None, "aisle": True})
+        for col in cols_right:
+            if remaining <= 0:
+                row_seats.append({"seat_number": None, "empty": True})
+                continue
+            row_seats.append(seat_cell(f"{r}{col}"))
+            remaining -= 1
+            seats_emitted += 1
+        layout.append(row_seats)
+
+    return {
+        "schedule": sched,
+        "from": from_term,
+        "to": to_term,
+        "layout": layout,
+        "layout_config": layout_config,
+        "seats_per_row": per_row,
+    }
 
 
 # ---------- Auth ----------
@@ -1523,7 +1568,7 @@ class CreateScheduleBody(BaseModel):
     bus_operator: str = "Star Qistna"
     bus_type: Literal["VIP 27", "Executive", "Standard"] = "Standard"
     adult_fare: float
-    rows: int = 10
+    total_seats: int = Field(ge=12, le=60, default=40)
     currency: str = "myr"
 
 
@@ -1537,7 +1582,7 @@ class BulkScheduleBody(BaseModel):
     arrival_time: str
     bus_type: Literal["VIP 27", "Executive", "Standard"] = "Standard"
     adult_fare: float
-    rows: int = 10
+    total_seats: int = Field(ge=12, le=60, default=40)
 
 
 class TerminalCreateBody(BaseModel):
@@ -1632,7 +1677,7 @@ async def admin_create_schedule(body: CreateScheduleBody, request: Request, user
     doc = body.model_dump()
     doc["currency"] = derived_currency
     doc["id"] = new_id()
-    doc["total_seats"] = doc["rows"] * 4
+    doc["layout_config"] = _layout_for_bus_type(doc.get("bus_type", "Standard"))
     doc["created_at"] = utcnow().isoformat()
     await db.schedules.insert_one(doc)
     doc.pop("_id", None)
@@ -1642,6 +1687,8 @@ async def admin_create_schedule(body: CreateScheduleBody, request: Request, user
         "departure_date": doc.get("departure_date"),
         "departure_time": doc.get("departure_time"),
         "adult_fare": doc.get("adult_fare"),
+        "total_seats": doc.get("total_seats"),
+        "layout_config": doc.get("layout_config"),
         "currency": derived_currency,
     }, request)
     return doc
@@ -1698,8 +1745,8 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
                     "bus_operator": "Star Qistna",
                     "bus_type": body.bus_type,
                     "adult_fare": body.adult_fare,
-                    "rows": body.rows,
-                    "total_seats": body.rows * 4,
+                    "total_seats": body.total_seats,
+                    "layout_config": _layout_for_bus_type(body.bus_type),
                     "currency": derived_currency,
                     "created_at": utcnow().isoformat(),
                 })

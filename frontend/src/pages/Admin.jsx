@@ -23,7 +23,7 @@ export default function Admin() {
     start_date: "", end_date: "",
     days_of_week: [0, 1, 2, 3, 4, 5, 6],
     departure_time: "08:00", arrival_time: "12:00",
-    bus_type: "Standard", adult_fare: 50, rows: 10,
+    bus_type: "Standard", adult_fare: 50, total_seats: 40,
   });
   const [promoForm, setPromoForm] = useState({
     code: "", type: "percent", value: 10, currency: "myr", max_uses: "", valid_until: "", description: "",
@@ -104,7 +104,7 @@ export default function Admin() {
       const { data } = await api.post("/admin/schedules/bulk", {
         ...form,
         adult_fare: parseFloat(form.adult_fare),
-        rows: parseInt(form.rows),
+        total_seats: parseInt(form.total_seats, 10),
       });
       setMsg(`Created ${data.created} schedule(s)${data.skipped_duplicates ? ` · ${data.skipped_duplicates} skipped (duplicates)` : ""} · billed in ${data.currency.toUpperCase()}.`);
       loadAll();
@@ -450,12 +450,24 @@ export default function Admin() {
             <input type="time" className="te-input" value={form.arrival_time} onChange={(e) => setForm({ ...form, arrival_time: e.target.value })} />
           </div>
           <div>
-            <label className="te-label">Rows (seats = rows × 4)</label>
-            <input type="number" className="te-input" value={form.rows} onChange={(e) => setForm({ ...form, rows: e.target.value })} />
+            <label className="te-label">Total seats (capacity)</label>
+            <input
+              type="number"
+              min="12"
+              max="60"
+              className="te-input"
+              value={form.total_seats}
+              onChange={(e) => setForm({ ...form, total_seats: e.target.value })}
+              data-testid="add-sched-total-seats"
+            />
+            <div className="text-[10px] font-mono text-zinc-500 mt-1">
+              VIP → 2+1 layout (~27 seats) · Standard/Executive → 2+2 layout (~40 seats)
+            </div>
           </div>
           <div className="md:col-span-2 text-[10px] font-mono text-zinc-500 leading-relaxed border-l-2 border-[#002FA7] pl-3 py-1">
             OPERATOR · STAR QISTNA (single operator)<br/>
             CURRENCY · AUTO-DERIVED FROM ORIGIN TERMINAL COUNTRY (SG → SGD, MY → MYR)<br/>
+            LAYOUT · BUS TYPE DETERMINES 2+1 (VIP) OR 2+2 (STANDARD/EXECUTIVE)<br/>
             BULK MODE · CREATES ONE SCHEDULE PER SELECTED WEEKDAY BETWEEN START & END DATES · MAX 180 DAYS
           </div>
           <div className="md:col-span-2 flex items-center gap-4">

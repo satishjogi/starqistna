@@ -127,41 +127,66 @@ export default function SeatSelection() {
         {/* Seat map */}
         <div className="lg:col-span-8">
           <div className="te-card p-6 md:p-10">
-            <div className="flex justify-center mb-6">
-              <div className="w-20 h-10 border-2 border-black/30 rounded-t-full flex items-center justify-center text-[10px] font-mono tracking-wider text-zinc-500">DRIVER</div>
+            <div className="flex items-center justify-between mb-4 text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+              <span>Front of bus</span>
+              <span>{data.schedule.bus_type} · {data.layout_config === "2+1" ? "2+1 layout" : "2+2 layout"}</span>
             </div>
-            <div className="flex flex-col items-center gap-2">
-              {data.layout.map((row, rIdx) => (
-                <div key={rIdx} className="flex items-center gap-2">
-                  <div className="w-5 text-[10px] font-mono text-zinc-400 text-right">{rIdx + 1}</div>
-                  {row.map((cell, i) => {
-                    if (cell.aisle) return <div key={i} className="seat-aisle" />;
-                    const isSelected = selected.find((s) => s.seat_number === cell.seat_number);
-                    const cls = isSelected
-                      ? "seat-selected"
-                      : cell.status === "available"
-                      ? "seat-available"
-                      : "seat-booked";
-                    return (
-                      <button
-                        key={i}
-                        type="button"
-                        className={`seat ${cls}`}
-                        onClick={() => toggleSeat(cell.seat_number, cell.status)}
-                        data-testid={`seat-btn-${cell.seat_number}`}
-                      >
-                        {cell.seat_number}
-                      </button>
-                    );
-                  })}
+            <div className="bus-shell" data-testid="bus-shell">
+              <div className="flex items-center justify-between mb-6 px-2">
+                <div className="bus-driver" title="Driver" aria-label="Driver">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"></circle><circle cx="12" cy="12" r="2"></circle><line x1="12" y1="3" x2="12" y2="10"></line><line x1="12" y1="14" x2="12" y2="21"></line><line x1="3" y1="12" x2="10" y2="12"></line><line x1="14" y1="12" x2="21" y2="12"></line></svg>
                 </div>
-              ))}
+                <div className="text-[9px] font-mono uppercase tracking-[0.22em] text-zinc-400">Driver</div>
+              </div>
+
+              <div className="flex flex-col items-center gap-2">
+                {data.layout.map((row, rIdx) => (
+                  <div key={rIdx} className="flex items-center gap-2">
+                    <div className="w-5 text-[10px] font-mono text-zinc-400 text-right">{rIdx + 1}</div>
+                    {row.map((cell, i) => {
+                      if (cell.aisle) return <div key={i} className="seat-aisle" />;
+                      if (cell.empty) return <div key={i} className="seat-empty" />;
+                      const selectedSeat = selected.find((s) => s.seat_number === cell.seat_number);
+                      const isSelected = !!selectedSeat;
+                      const isChild = selectedSeat?.category === "child";
+                      const cls = isSelected
+                        ? `seat-selected ${isChild ? "seat-child" : ""}`
+                        : cell.status === "available"
+                        ? "seat-available"
+                        : "seat-booked";
+                      return (
+                        <button
+                          key={i}
+                          type="button"
+                          className={`seat ${cls}`}
+                          onClick={() => toggleSeat(cell.seat_number, cell.status)}
+                          title={
+                            cell.status === "booked" || cell.status === "locked"
+                              ? `Seat ${cell.seat_number} — unavailable`
+                              : isSelected
+                              ? `Seat ${cell.seat_number} — ${selectedSeat.category} (click to deselect)`
+                              : `Seat ${cell.seat_number} — available`
+                          }
+                          data-testid={`seat-btn-${cell.seat_number}`}
+                        >
+                          {cell.seat_number}
+                        </button>
+                      );
+                    })}
+                    <div className="w-5 text-[10px] font-mono text-zinc-400">{rIdx + 1}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="bus-door" />
+              <div className="bus-rear-label">REAR · ENGINE</div>
             </div>
 
-            <div className="mt-8 flex flex-wrap gap-6 justify-center text-xs font-mono">
-              <div className="flex items-center gap-2"><div className="seat seat-available !w-5 !h-5" /> Available</div>
-              <div className="flex items-center gap-2"><div className="seat seat-selected !w-5 !h-5" /> Selected</div>
-              <div className="flex items-center gap-2"><div className="seat seat-booked !w-5 !h-5" /> Booked</div>
+            <div className="mt-8 flex flex-wrap gap-5 justify-center text-xs font-mono">
+              <div className="flex items-center gap-2"><div className="seat seat-available !w-5 !h-6" /> Available</div>
+              <div className="flex items-center gap-2"><div className="seat seat-selected !w-5 !h-6" /> Adult</div>
+              <div className="flex items-center gap-2"><div className="seat seat-selected seat-child !w-5 !h-6" /> Child</div>
+              <div className="flex items-center gap-2"><div className="seat seat-booked !w-5 !h-6" /> Booked</div>
             </div>
           </div>
         </div>
