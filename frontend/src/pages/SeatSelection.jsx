@@ -132,17 +132,34 @@ export default function SeatSelection() {
               <span>{data.schedule.bus_type} · {data.layout_config === "2+1" ? "2+1 layout" : "2+2 layout"}</span>
             </div>
             <div className="bus-shell" data-testid="bus-shell">
-              <div className="flex items-center justify-between mb-6 px-2">
-                <div className="bus-driver" title="Driver" aria-label="Driver">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"></circle><circle cx="12" cy="12" r="2"></circle><line x1="12" y1="3" x2="12" y2="10"></line><line x1="12" y1="14" x2="12" y2="21"></line><line x1="3" y1="12" x2="10" y2="12"></line><line x1="14" y1="12" x2="21" y2="12"></line></svg>
+              {/* Wheel arches at front & rear axles */}
+              <span className="bus-wheel wheel-fl" aria-hidden="true" />
+              <span className="bus-wheel wheel-fr" aria-hidden="true" />
+              <span className="bus-wheel wheel-rl" aria-hidden="true" />
+              <span className="bus-wheel wheel-rr" aria-hidden="true" />
+
+              {/* Cabin: right-hand drive — entry on LEFT, driver seat + steering on RIGHT */}
+              <div className="bus-cabin">
+                <div className="bus-door" aria-label="Passenger entry" />
+                <div className="bus-driver-seat" aria-label="Driver">
+                  <svg className="bus-steering" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="9" />
+                    <circle cx="12" cy="12" r="2" fill="currentColor" />
+                    <path d="M12 3 L12 10" />
+                    <path d="M3 12 L10 12" />
+                    <path d="M14 12 L21 12" />
+                    <path d="M5.6 18.4 L10 14" />
+                    <path d="M14 14 L18.4 18.4" />
+                  </svg>
                 </div>
-                <div className="text-[9px] font-mono uppercase tracking-[0.22em] text-zinc-400">Driver</div>
+                <div className="bus-cabin-label">Front · Driver</div>
               </div>
 
-              <div className="flex flex-col items-center gap-2">
+              {/* Seat rows */}
+              <div className="bus-rows">
                 {data.layout.map((row, rIdx) => (
-                  <div key={rIdx} className="flex items-center gap-2">
-                    <div className="w-5 text-[10px] font-mono text-zinc-400 text-right">{rIdx + 1}</div>
+                  <div key={rIdx} className="bus-row">
+                    <div className="bus-row-number">{rIdx + 1}</div>
                     {row.map((cell, i) => {
                       if (cell.aisle) return <div key={i} className="seat-aisle" />;
                       if (cell.empty) return <div key={i} className="seat-empty" />;
@@ -173,13 +190,11 @@ export default function SeatSelection() {
                         </button>
                       );
                     })}
-                    <div className="w-5 text-[10px] font-mono text-zinc-400">{rIdx + 1}</div>
+                    <div className="bus-row-number">{rIdx + 1}</div>
                   </div>
                 ))}
               </div>
-
-              <div className="bus-door" />
-              <div className="bus-rear-label">REAR · ENGINE</div>
+              <div className="bus-rear-label">Rear</div>
             </div>
 
             <div className="mt-8 flex flex-wrap gap-5 justify-center text-xs font-mono">

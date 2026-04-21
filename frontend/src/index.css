@@ -181,167 +181,221 @@ h1, h2, h3, h4, h5 {
     border-radius: 2px;
 }
 
-/* Seat map — realistic bus aesthetic */
+/* Seat map — top-down floor plan aesthetic, portrait orientation, right-hand drive */
 .bus-shell {
     position: relative;
-    max-width: 420px;
+    max-width: 360px;
     margin: 0 auto;
-    padding: 32px 24px 26px;
-    background: linear-gradient(180deg, #fafafa 0%, #f4f4f5 100%);
-    border: 2px solid rgba(9, 9, 11, 0.12);
-    border-radius: 120px 120px 16px 16px;
-    box-shadow:
-        inset 0 2px 0 rgba(255, 255, 255, 0.9),
-        0 20px 40px -20px rgba(9, 9, 11, 0.25);
+    padding: 0;
+    background: #ffffff;
+    border: 3px solid #1f2937;
+    border-radius: 52px 52px 52px 52px;
+    box-shadow: 0 24px 48px -24px rgba(9, 9, 11, 0.25);
 }
-.bus-shell::before {
-    /* Windshield arc */
-    content: '';
+/* Wheel arches — black rectangles poking out of the shell at front & rear axles */
+.bus-wheel {
     position: absolute;
-    top: 12px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 72%;
-    height: 40px;
-    background: linear-gradient(180deg, rgba(59, 130, 246, 0.18), rgba(59, 130, 246, 0.04));
-    border: 1px solid rgba(59, 130, 246, 0.35);
-    border-radius: 90px 90px 6px 6px;
+    width: 14px;
+    height: 26px;
+    background: #111827;
+    border-radius: 3px;
+    z-index: 0;
 }
-.bus-driver {
+.bus-wheel.wheel-fl { top: 72px;  left: -14px; }
+.bus-wheel.wheel-fr { top: 72px;  right: -14px; }
+.bus-wheel.wheel-rl { bottom: 72px; left: -14px; }
+.bus-wheel.wheel-rr { bottom: 72px; right: -14px; }
+
+.bus-cabin {
     position: relative;
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    border: 2px solid rgba(9, 9, 11, 0.35);
-    background: white;
+    padding: 28px 18px 10px;
+    border-bottom: 1px dashed rgba(9, 9, 11, 0.2);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    min-height: 92px;
+}
+/* Right-hand drive: steering wheel + driver seat on the RIGHT */
+.bus-driver-seat {
+    width: 54px;
+    height: 62px;
+    background: #F59E0B;
+    border: 2px solid #B45309;
+    border-radius: 12px 12px 8px 8px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 14px;
-    z-index: 2;
+    position: relative;
+    order: 2;
+}
+.bus-driver-seat::after {
+    content: '';
+    position: absolute;
+    bottom: -7px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 70%;
+    height: 6px;
+    background: #F59E0B;
+    border: 2px solid #B45309;
+    border-top: 0;
+    border-radius: 0 0 6px 6px;
+}
+.bus-steering {
+    color: #1f2937;
 }
 .bus-door {
-    position: absolute;
-    bottom: -2px;
-    right: 24px;
-    width: 22px;
-    height: 56px;
-    background: #09090b;
-    border-radius: 4px 4px 0 0;
-    box-shadow: 0 -1px 0 rgba(255, 255, 255, 0.15) inset;
+    width: 54px;
+    height: 62px;
+    background: #F59E0B;
+    border: 2px solid #B45309;
+    border-radius: 10px;
+    position: relative;
+    order: 1;
 }
-.bus-door::after {
-    content: 'EXIT';
+.bus-door::before {
+    content: 'ENTRY';
     position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%) rotate(-90deg);
-    color: #fafafa;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     font-family: 'JetBrains Mono', monospace;
     font-size: 8px;
     letter-spacing: 0.15em;
     font-weight: 700;
+    color: #78350F;
+}
+.bus-cabin-label {
+    position: absolute;
+    bottom: 6px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.28em;
+    font-weight: 700;
+    color: rgba(9, 9, 11, 0.35);
+    text-transform: uppercase;
     white-space: nowrap;
+}
+.bus-rows {
+    position: relative;
+    padding: 18px 14px 26px;
+}
+.bus-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+.bus-row:last-child { margin-bottom: 0; }
+.bus-row-number {
+    width: 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    color: rgba(9, 9, 11, 0.35);
+    text-align: center;
+    font-weight: 700;
 }
 .bus-rear-label {
     font-family: 'JetBrains Mono', monospace;
     font-size: 9px;
-    letter-spacing: 0.25em;
-    color: rgba(9, 9, 11, 0.4);
+    letter-spacing: 0.28em;
+    color: rgba(9, 9, 11, 0.35);
     text-align: center;
-    margin-top: 14px;
-    padding-top: 10px;
-    border-top: 1px dashed rgba(9, 9, 11, 0.18);
+    padding: 10px 0 18px;
+    font-weight: 700;
 }
 
 .seat {
     position: relative;
-    width: 2.75rem;
-    height: 3rem;
+    width: 36px;
+    height: 44px;
     display: flex;
     align-items: center;
     justify-content: center;
     font-family: 'JetBrains Mono', monospace;
-    font-size: 0.7rem;
+    font-size: 10px;
     font-weight: 700;
-    border-radius: 10px 10px 6px 6px;
+    border-radius: 8px 8px 4px 4px;
     transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease, border-color 160ms ease;
     user-select: none;
 }
-.seat::before {
-    /* Headrest notch */
+/* Armrest pegs on both sides — gives the floor-plan look */
+.seat::after {
     content: '';
     position: absolute;
-    top: -4px;
+    bottom: -4px;
     left: 50%;
     transform: translateX(-50%);
-    width: 55%;
-    height: 6px;
+    width: 72%;
+    height: 4px;
     background: inherit;
-    border-top: 1px solid inherit;
-    border-left: 1px solid inherit;
-    border-right: 1px solid inherit;
+    border: 1.5px solid;
     border-color: inherit;
-    border-radius: 6px 6px 0 0;
+    border-top: 0;
+    border-radius: 0 0 3px 3px;
 }
 .seat-available {
     background: #ffffff;
-    border: 1.5px solid rgba(9, 9, 11, 0.18);
-    color: var(--text-primary);
+    border: 1.5px solid var(--brand-primary);
+    color: var(--brand-primary);
     cursor: pointer;
-    box-shadow: 0 1px 0 rgba(9, 9, 11, 0.04);
+    box-shadow: 0 1px 0 rgba(0, 47, 167, 0.08);
 }
-.seat-available::before {
+.seat-available::after {
     background: #ffffff;
-    border-color: rgba(9, 9, 11, 0.18);
+    border-color: var(--brand-primary);
 }
 .seat-available:hover {
-    border-color: var(--brand-primary);
-    color: var(--brand-primary);
+    background: rgba(0, 47, 167, 0.08);
     transform: translateY(-2px);
-    box-shadow: 0 6px 14px -6px rgba(0, 47, 167, 0.35);
+    box-shadow: 0 6px 14px -6px rgba(0, 47, 167, 0.4);
 }
-.seat-available:hover::before {
-    border-color: var(--brand-primary);
+.seat-available:hover::after {
+    background: rgba(0, 47, 167, 0.08);
 }
 .seat-selected {
     background: var(--brand-accent);
     color: white;
-    border: 1.5px solid var(--brand-accent);
+    border: 1.5px solid #8B0D14;
     cursor: pointer;
-    box-shadow: 0 6px 18px -6px rgba(181, 18, 27, 0.55), 0 0 0 2px rgba(181, 18, 27, 0.2);
+    box-shadow: 0 6px 18px -6px rgba(181, 18, 27, 0.55);
     transform: translateY(-1px);
 }
-.seat-selected::before {
+.seat-selected::after {
     background: var(--brand-accent);
-    border-color: var(--brand-accent);
+    border-color: #8B0D14;
 }
 .seat-selected.seat-child {
     background: #0f766e;
-    border-color: #0f766e;
-    box-shadow: 0 6px 18px -6px rgba(15, 118, 110, 0.55), 0 0 0 2px rgba(15, 118, 110, 0.2);
+    border-color: #0B5E57;
+    box-shadow: 0 6px 18px -6px rgba(15, 118, 110, 0.55);
 }
-.seat-selected.seat-child::before {
+.seat-selected.seat-child::after {
     background: #0f766e;
-    border-color: #0f766e;
+    border-color: #0B5E57;
 }
 .seat-booked {
-    background: repeating-linear-gradient(45deg, #e4e4e7, #e4e4e7 4px, #d4d4d8 4px, #d4d4d8 8px);
-    color: #71717a;
-    border: 1.5px solid rgba(9, 9, 11, 0.08);
+    background: #1f2937;
+    color: #9CA3AF;
+    border: 1.5px solid #111827;
     cursor: not-allowed;
     text-decoration: line-through;
+    opacity: 0.85;
 }
-.seat-booked::before {
-    background: #d4d4d8;
-    border-color: rgba(9, 9, 11, 0.08);
+.seat-booked::after {
+    background: #1f2937;
+    border-color: #111827;
 }
 .seat-aisle {
-    width: 1.25rem;
+    width: 18px;
 }
 .seat-empty {
-    width: 2.75rem;
-    height: 3rem;
+    width: 36px;
+    height: 44px;
 }
 
 /* Hero grid */
