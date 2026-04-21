@@ -264,14 +264,21 @@ async def search_schedules(
     date: str,  # YYYY-MM-DD
 ):
     # Find schedules matching date or recurring (we store schedules with `departure_date` field)
-    schedules = await db.schedules.find(
-        {
-            "from_terminal_id": from_terminal_id,
-            "to_terminal_id": to_terminal_id,
-            "departure_date": date,
-        },
-        {"_id": 0},
-    ).sort("departure_time", 1).to_list(200)
+    query = {
+        "from_terminal_id": from_terminal_id,
+        "to_terminal_id": to_terminal_id,
+        "departure_date": date,
+    }
+
+    # If searching for "today" in local Malaysia/Singapore time (UTC+8 — same offset for both),
+    # hide buses whose departure time has already passed so users don't book a departed trip.
+    local_tz = timezone(timedelta(hours=8))
+    now_local = datetime.now(local_tz)
+    today_local_iso = now_local.date().isoformat()
+    if date == today_local_iso:
+        query["departure_time"] = {"$gte": now_local.strftime("%H:%M")}
+
+    schedules = await db.schedules.find(query, {"_id": 0}).sort("departure_time", 1).to_list(200)
 
     # Enrich with terminal names
     from_term = await db.terminals.find_one({"id": from_terminal_id}, {"_id": 0})
