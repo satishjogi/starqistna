@@ -261,7 +261,8 @@ const POPULAR_ROUTES = [
 function PopularRoutes() {
   const navigate = useNavigate();
   const [cityMap, setCityMap] = useState({});
-  const today = new Date().toISOString().slice(0, 10);
+  // Use Malaysia/Singapore local date (UTC+8) — schedule departure_time is stored as local.
+  const today = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
   useEffect(() => {
     api.get("/terminals").then(({ data }) => {

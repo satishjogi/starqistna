@@ -82,9 +82,36 @@ export default function SearchResults() {
         <div>
           <div className="te-overline mb-3">{data.schedules.length} Departures available</div>
           {data.schedules.length === 0 ? (
-            <div className="te-card p-10 text-center">
-              <div className="font-black text-2xl">No buses for this date.</div>
-              <p className="text-sm text-zinc-600 mt-2">Try a different date or nearby terminal.</p>
+            <div className="te-card p-10 text-center" data-testid="search-empty">
+              {(() => {
+                // Did we land here because we filtered out today's past-time buses?
+                const todayLocal = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+                const isToday = date === todayLocal;
+                const tomorrow = (() => {
+                  const d = new Date(Date.now() + 8 * 60 * 60 * 1000 + 24 * 60 * 60 * 1000);
+                  return d.toISOString().slice(0, 10);
+                })();
+                if (isToday) {
+                  const nextDayLink = `/search?from=${from}&to=${to}&date=${tomorrow}&adults=${adults}&children=${children}`;
+                  return (
+                    <>
+                      <div className="font-black text-2xl">No more buses today.</div>
+                      <p className="text-sm text-zinc-600 mt-2">
+                        It looks like today's departures have already left. Tomorrow's schedule is ready.
+                      </p>
+                      <Link to={nextDayLink} className="te-btn-primary inline-flex mt-5" data-testid="try-tomorrow-btn">
+                        See buses tomorrow ({tomorrow}) →
+                      </Link>
+                    </>
+                  );
+                }
+                return (
+                  <>
+                    <div className="font-black text-2xl">No buses for this date.</div>
+                    <p className="text-sm text-zinc-600 mt-2">Try a different date or nearby terminal.</p>
+                  </>
+                );
+              })()}
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-3">
