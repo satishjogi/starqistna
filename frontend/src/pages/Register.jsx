@@ -25,9 +25,25 @@ export default function Register() {
   const upd = (k) => (e) => setForm({ ...form, [k]: e.target.value });
   const strength = useMemo(() => analyzePassword(form.password), [form.password]);
 
+  // International phone: optional leading +, digits only, max 15 digits (E.164).
+  const sanitizePhone = (v) => {
+    let cleaned = v.replace(/[^\d+]/g, "");
+    if (cleaned.includes("+")) {
+      const hasLeadingPlus = cleaned.startsWith("+");
+      cleaned = (hasLeadingPlus ? "+" : "") + cleaned.replace(/\+/g, "");
+    }
+    return cleaned.slice(0, 16);
+  };
+  const isValidPhone = (v) => /^\+[1-9]\d{6,14}$/.test(v);
+  const updPhone = (e) => setForm({ ...form, phone: sanitizePhone(e.target.value) });
+
   const submit = async (e) => {
     e.preventDefault();
     setError("");
+    if (form.phone && !isValidPhone(form.phone)) {
+      setError("Phone must be in international format, e.g. +60123456789.");
+      return;
+    }
     if (!strength.allPassed) {
       setError("Please satisfy all password requirements below.");
       return;
@@ -68,7 +84,21 @@ export default function Register() {
           </div>
           <div>
             <label className="te-label">Phone</label>
-            <input className="te-input" value={form.phone} onChange={upd("phone")} data-testid="register-phone" />
+            <input
+              className="te-input"
+              type="tel"
+              inputMode="tel"
+              value={form.phone}
+              onChange={updPhone}
+              placeholder="+60123456789"
+              pattern="^\+[1-9]\d{6,14}$"
+              title="International format, e.g. +60123456789"
+              autoComplete="tel"
+              data-testid="register-phone"
+            />
+            <div className="text-[10px] font-mono text-zinc-500 mt-1">
+              International format starting with + and country code
+            </div>
           </div>
           <div>
             <label className="te-label">Password</label>
