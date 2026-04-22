@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Brand-red five-point star, slightly tilted, with a darker inner facet for dimension -->
+  <defs>
+    <linearGradient id="starGrad" x1="0" y1="0" x2="0" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#D4161E"/>
+      <stop offset="1" stop-color="#8B0D14"/>
+    </linearGradient>
+  </defs>
+  <!-- Main star -->
+  <path
+    d="M32 4 L39.3 23.7 L60 24.8 L43.6 37.9 L49.3 58 L32 46.6 L14.7 58 L20.4 37.9 L4 24.8 L24.7 23.7 Z"
+    fill="url(#starGrad)"
+    stroke="#6B0A10"
+    stroke-width="1.5"
+    stroke-linejoin="round"
+  />
+  <!-- Inner facet (the left-half highlight to give the Star Qistna "shooting star" feel) -->
+  <path
+    d="M32 4 L32 46.6 L14.7 58 L20.4 37.9 L4 24.8 L24.7 23.7 Z"
+    fill="#B5121B"
+    fill-opacity="0.55"
+  />
+</svg>
