@@ -28,7 +28,7 @@ from emergentintegrations.payments.stripe.checkout import (
     CheckoutSessionRequest,
 )
 import httpx
-from email_service import send_booking_confirmation, send_password_reset
+from email_service import send_booking_confirmation, send_password_reset, send_admin_invite
 
 # ---------- Setup ----------
 ROOT_DIR = Path(__file__).parent
@@ -100,6 +100,8 @@ async def require_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(b
     user = await current_user(creds)
     if not user:
         raise HTTPException(401, "Authentication required")
+    if user.get("is_active") is False:
+        raise HTTPException(403, "This account has been deactivated")
     return user
 
 
@@ -114,6 +116,13 @@ def _layout_for_bus_type(bus_type: str) -> str:
 async def require_admin(user: dict = Depends(require_user)) -> dict:
     if not user.get("is_admin"):
         raise HTTPException(403, "Admin access required")
+    return user
+
+
+async def require_super_admin(user: dict = Depends(require_admin)) -> dict:
+    """Super-admins manage other admins. Regular admins cannot."""
+    if user.get("role") != "super_admin":
+        raise HTTPException(403, "Super-admin access required")
     return user
 
 
@@ -334,6 +343,25 @@ class ForgotPasswordBody(BaseModel):
 class ResetPasswordBody(BaseModel):
     token: str = Field(min_length=16)
     new_password: str = Field(min_length=8)
+
+
+class AdminInviteBody(BaseModel):
+    email: EmailStr
+    full_name: str = Field(min_length=1, max_length=120)
+    role: Literal["admin", "super_admin"] = "admin"
+
+
+class AdminAcceptInviteBody(BaseModel):
+    token: str = Field(min_length=16)
+    password: str = Field(min_length=8)
+
+
+class AdminRoleUpdateBody(BaseModel):
+    role: Literal["admin", "super_admin"]
+
+
+class AdminActiveUpdateBody(BaseModel):
+    is_active: bool
 
 
 class TokenResponse(BaseModel):
@@ -697,6 +725,7 @@ async def login(body: LoginBody, request: Request):
     # We clear password-attempt counters here because the password was correct;
     # the 2FA step has its own brute-force protection via the 5-minute challenge expiry.
     await _clear_login_attempts(ip, email)
+    await db.users.update_one({"id": user["id"]}, {"$set": {"last_login_at": utcnow().isoformat()}})
 
     if user.get("totp_enabled"):
         challenge = jwt.encode(
@@ -1556,6 +1585,242 @@ async def admin_audit_logs(
     return {"total": len(items), "items": items}
 
 
+# ---------- Admin management ----------
+ADMIN_INVITE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
+
+
+def _admin_public(u: dict) -> dict:
+    """Strip secrets before returning an admin record."""
+    return {
+        "id": u.get("id"),
+        "email": u.get("email"),
+        "full_name": u.get("full_name"),
+        "role": u.get("role") or ("super_admin" if u.get("email") == "admin@starqistna.com" else "admin"),
+        "is_active": u.get("is_active", True),
+        "created_at": u.get("created_at"),
+        "last_login_at": u.get("last_login_at"),
+    }
+
+
+@api.get("/admin/admins")
+async def list_admins(user: dict = Depends(require_admin)):
+    """Any admin may view the admin roster."""
+    users = await db.users.find({"is_admin": True}, {"_id": 0}).sort("created_at", 1).to_list(200)
+    invites = await db.admin_invites.find(
+        {"accepted_at": None, "revoked_at": None, "expires_at": {"$gte": utcnow()}},
+        {"_id": 0, "token_hash": 0},
+    ).sort("created_at", -1).to_list(100)
+    return {
+        "admins": [_admin_public(u) for u in users],
+        "pending_invites": invites,
+    }
+
+
+@api.post("/admin/admins/invite")
+async def invite_admin(body: AdminInviteBody, request: Request, user: dict = Depends(require_super_admin)):
+    email = body.email.lower().strip()
+    existing = await db.users.find_one({"email": email})
+    if existing and existing.get("is_admin") and existing.get("is_active", True):
+        raise HTTPException(400, "This user is already an active admin")
+
+    # Expire any prior open invites for this email
+    await db.admin_invites.update_many(
+        {"email": email, "accepted_at": None, "revoked_at": None},
+        {"$set": {"revoked_at": utcnow()}},
+    )
+
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = bcrypt.hashpw(raw_token.encode(), bcrypt.gensalt()).decode()
+    now = utcnow()
+    invite_id = new_id()
+    await db.admin_invites.insert_one({
+        "id": invite_id,
+        "email": email,
+        "full_name": body.full_name.strip(),
+        "role": body.role,
+        "token_hash": token_hash,
+        "invited_by_id": user["id"],
+        "invited_by_email": user["email"],
+        "created_at": now,
+        "expires_at": now + timedelta(seconds=ADMIN_INVITE_TTL_SECONDS),
+        "accepted_at": None,
+        "revoked_at": None,
+    })
+
+    public_url = os.environ.get("PUBLIC_APP_URL", "").rstrip("/") or "https://starqistna.com"
+    accept_link = f"{public_url}/admin-invite?token={raw_token}"
+    try:
+        await send_admin_invite(
+            to_email=email,
+            full_name=body.full_name,
+            inviter_name=user.get("full_name") or user.get("email"),
+            role=body.role,
+            accept_link=accept_link,
+            ttl_days=ADMIN_INVITE_TTL_SECONDS // 86400,
+        )
+    except Exception as e:
+        logger.warning("admin invite email failed for %s: %s", email, e)
+
+    await log_audit(user, "invite", "admin", invite_id,
+                    {"email": email, "role": body.role}, request)
+    return {"ok": True, "invite_id": invite_id, "expires_in_days": ADMIN_INVITE_TTL_SECONDS // 86400}
+
+
+@api.post("/admin/admins/accept-invite")
+async def accept_admin_invite(body: AdminAcceptInviteBody, request: Request):
+    """Public endpoint. Bcrypt-compare token, upsert the user as admin, set password."""
+    ip = _client_ip(request)
+    await _check_auth_throttle(ip, "admin_invite_accept", max_attempts=10, window_seconds=3600,
+                                label="admin invite acceptance")
+
+    _validate_password_strength(body.password)
+
+    candidates = await db.admin_invites.find(
+        {"accepted_at": None, "revoked_at": None, "expires_at": {"$gte": utcnow()}},
+    ).to_list(500)
+    raw = body.token.encode()
+    matched = None
+    for c in candidates:
+        try:
+            if bcrypt.checkpw(raw, c["token_hash"].encode()):
+                matched = c
+                break
+        except Exception:
+            continue
+    if not matched:
+        await _record_auth_failure(ip, "admin_invite_accept", window_seconds=3600)
+        raise HTTPException(400, "Invite link is invalid, already used, or expired.")
+
+    email = matched["email"]
+    pw_hash = hash_password(body.password)
+    now = utcnow()
+    existing = await db.users.find_one({"email": email})
+    if existing:
+        await db.users.update_one(
+            {"id": existing["id"]},
+            {"$set": {
+                "password_hash": pw_hash,
+                "is_admin": True,
+                "role": matched["role"],
+                "is_active": True,
+                "full_name": existing.get("full_name") or matched["full_name"],
+            }},
+        )
+        user_id = existing["id"]
+    else:
+        user_id = new_id()
+        await db.users.insert_one({
+            "id": user_id,
+            "email": email,
+            "full_name": matched["full_name"],
+            "phone": None,
+            "password_hash": pw_hash,
+            "is_admin": True,
+            "role": matched["role"],
+            "is_active": True,
+            "created_at": now.isoformat(),
+        })
+
+    await db.admin_invites.update_one(
+        {"id": matched["id"]},
+        {"$set": {"accepted_at": now, "accepted_user_id": user_id}},
+    )
+    # Audit this as a system action (no authenticated actor at this point).
+    await log_audit({"id": user_id, "email": email}, "accept_invite", "admin", user_id,
+                    {"role": matched["role"], "invited_by": matched.get("invited_by_email")}, request)
+
+    return {"ok": True, "email": email}
+
+
+@api.patch("/admin/admins/{admin_id}/role")
+async def update_admin_role(admin_id: str, body: AdminRoleUpdateBody, request: Request,
+                             user: dict = Depends(require_super_admin)):
+    target = await db.users.find_one({"id": admin_id, "is_admin": True})
+    if not target:
+        raise HTTPException(404, "Admin not found")
+
+    if target["id"] == user["id"] and body.role != "super_admin":
+        raise HTTPException(400, "You cannot demote yourself — ask another super-admin.")
+
+    # Prevent demoting the last super-admin
+    if body.role != "super_admin" and target.get("role") == "super_admin":
+        remaining = await db.users.count_documents({
+            "is_admin": True, "role": "super_admin", "is_active": {"$ne": False},
+            "id": {"$ne": admin_id},
+        })
+        if remaining == 0:
+            raise HTTPException(400, "Cannot demote the last super-admin.")
+
+    await db.users.update_one({"id": admin_id}, {"$set": {"role": body.role}})
+    await log_audit(user, "update_role", "admin", admin_id,
+                    {"email": target["email"], "new_role": body.role}, request)
+    return {"ok": True}
+
+
+@api.patch("/admin/admins/{admin_id}/active")
+async def update_admin_active(admin_id: str, body: AdminActiveUpdateBody, request: Request,
+                               user: dict = Depends(require_super_admin)):
+    target = await db.users.find_one({"id": admin_id, "is_admin": True})
+    if not target:
+        raise HTTPException(404, "Admin not found")
+
+    if target["id"] == user["id"] and not body.is_active:
+        raise HTTPException(400, "You cannot deactivate yourself.")
+
+    # Prevent deactivating the last active super-admin
+    if not body.is_active and target.get("role") == "super_admin":
+        remaining = await db.users.count_documents({
+            "is_admin": True, "role": "super_admin",
+            "is_active": {"$ne": False},
+            "id": {"$ne": admin_id},
+        })
+        if remaining == 0:
+            raise HTTPException(400, "Cannot deactivate the last active super-admin.")
+
+    await db.users.update_one({"id": admin_id}, {"$set": {"is_active": body.is_active}})
+    await log_audit(user, "deactivate" if not body.is_active else "reactivate",
+                    "admin", admin_id, {"email": target["email"]}, request)
+    return {"ok": True}
+
+
+@api.delete("/admin/admins/{admin_id}")
+async def revoke_admin(admin_id: str, request: Request, user: dict = Depends(require_super_admin)):
+    """Revoke admin rights (keeps the user account, flips is_admin to False)."""
+    target = await db.users.find_one({"id": admin_id, "is_admin": True})
+    if not target:
+        raise HTTPException(404, "Admin not found")
+
+    if target["id"] == user["id"]:
+        raise HTTPException(400, "You cannot revoke your own admin access.")
+
+    if target.get("role") == "super_admin":
+        remaining = await db.users.count_documents({
+            "is_admin": True, "role": "super_admin",
+            "is_active": {"$ne": False},
+            "id": {"$ne": admin_id},
+        })
+        if remaining == 0:
+            raise HTTPException(400, "Cannot revoke the last super-admin.")
+
+    await db.users.update_one({"id": admin_id}, {"$set": {"is_admin": False, "role": None}})
+    await log_audit(user, "revoke", "admin", admin_id, {"email": target["email"]}, request)
+    return {"ok": True}
+
+
+@api.delete("/admin/admins/invites/{invite_id}")
+async def cancel_admin_invite(invite_id: str, request: Request, user: dict = Depends(require_super_admin)):
+    result = await db.admin_invites.update_one(
+        {"id": invite_id, "accepted_at": None, "revoked_at": None},
+        {"$set": {"revoked_at": utcnow()}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(404, "Invite not found or already handled")
+    await log_audit(user, "cancel_invite", "admin", invite_id, {}, request)
+    return {"ok": True}
+
+
+
+
 @api.get("/admin/schedules")
 async def admin_schedules(user: dict = Depends(require_admin)):
     items = await db.schedules.find({}, {"_id": 0}).sort("departure_date", 1).to_list(500)
@@ -2029,7 +2294,16 @@ async def _migrate_sg_schedules():
 
 
 async def _seed_admin():
-    if await db.users.find_one({"email": "admin@starqistna.com"}):
+    existing = await db.users.find_one({"email": "admin@starqistna.com"})
+    if existing:
+        # Migrate: ensure the bootstrap admin is a super_admin and active.
+        updates: dict = {}
+        if existing.get("role") != "super_admin":
+            updates["role"] = "super_admin"
+        if existing.get("is_active") is None:
+            updates["is_active"] = True
+        if updates:
+            await db.users.update_one({"id": existing["id"]}, {"$set": updates})
         return
     await db.users.insert_one(
         {
@@ -2039,10 +2313,12 @@ async def _seed_admin():
             "phone": "+60123456789",
             "password_hash": hash_password("Admin@123"),
             "is_admin": True,
+            "role": "super_admin",
+            "is_active": True,
             "created_at": utcnow().isoformat(),
         }
     )
-    logger.info("Seeded admin user admin@starqistna.com / Admin@123")
+    logger.info("Seeded bootstrap super-admin admin@starqistna.com / Admin@123")
 
 
 async def _seed_promos():
@@ -2093,6 +2369,9 @@ async def _ensure_indexes():
     # Password reset tokens: auto-expire at `expires_at` (per-doc TTL)
     await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
     await db.password_reset_tokens.create_index([("user_id", ASCENDING)])
+    # Admin invites: auto-expire at `expires_at`
+    await db.admin_invites.create_index("expires_at", expireAfterSeconds=0)
+    await db.admin_invites.create_index([("email", ASCENDING)])
 
 
 @api.get("/")

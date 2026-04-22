@@ -211,3 +211,53 @@ async def send_password_reset(to_email: str, full_name: str, reset_link: str, tt
         logger.info("Sent password-reset email to %s id=%s", to_email, res.get("id"))
     except Exception as e:
         logger.exception("Failed to send password-reset email to %s: %s", to_email, e)
+
+
+def _render_admin_invite_html(full_name: str, inviter_name: str, role: str, accept_link: str, ttl_days: int) -> str:
+    safe_name = (full_name or "there").split()[0]
+    role_label = "Super-admin" if role == "super_admin" else "Admin"
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>You've been invited to Star Qistna admin</title></head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#09090b">
+  <div style="max-width:560px;margin:32px auto;background:#fff;border:1px solid #e4e4e7">
+    <div style="background:#002FA7;color:#fff;padding:22px 28px;font-weight:900;letter-spacing:-.5px;font-size:22px">
+      STAR QISTNA <span style="font-size:11px;letter-spacing:.2em;font-weight:600;opacity:.85;margin-left:10px">ADMIN ACCESS</span>
+    </div>
+    <div style="padding:32px 28px">
+      <div style="text-transform:uppercase;letter-spacing:.22em;color:#002FA7;font-size:11px;font-weight:700">You're invited</div>
+      <h1 style="margin:8px 0 12px;font-size:30px;letter-spacing:-.5px;font-weight:900">Join as {role_label}</h1>
+      <p style="font-size:14px;color:#52525b;line-height:1.6;margin:0 0 18px">
+        Hi {safe_name}, <b>{inviter_name}</b> has invited you to join the Star Qistna admin team as <b>{role_label}</b>.
+        Click below to set your password and accept the invite. This link is valid for {ttl_days} days.
+      </p>
+      <p style="margin:24px 0">
+        <a href="{accept_link}" style="display:inline-block;background:#002FA7;color:#fff;padding:14px 28px;text-decoration:none;font-weight:700;letter-spacing:.05em">Accept invite →</a>
+      </p>
+      <p style="font-size:12px;color:#71717a;line-height:1.6;margin:0 0 8px">
+        Or paste this link into your browser:
+      </p>
+      <p style="font-family:monospace;font-size:12px;background:#f4f4f5;padding:10px 12px;word-break:break-all;border:1px solid #e4e4e7">
+        {accept_link}
+      </p>
+      <p style="font-size:12px;color:#71717a;line-height:1.6;margin-top:22px">
+        Didn't expect this invite? You can safely ignore this email — no account will be created until the link is used.
+      </p>
+    </div>
+    <div style="background:#09090b;color:#a1a1aa;padding:16px 28px;font-family:monospace;font-size:10px;letter-spacing:.18em;text-transform:uppercase">
+      © STAR QISTNA · ADMIN CONSOLE · <a href="{PUBLIC_APP_URL}" style="color:#a1a1aa;text-decoration:none">STARQISTNA.COM</a>
+    </div>
+  </div>
+</body></html>"""
+
+
+async def send_admin_invite(to_email: str, full_name: str, inviter_name: str, role: str, accept_link: str, ttl_days: int):
+    if not resend.api_key:
+        logger.warning("RESEND_API_KEY not set; skipping admin-invite email to %s", to_email)
+        return
+    html = _render_admin_invite_html(full_name, inviter_name, role, accept_link, ttl_days)
+    subject = f"Star Qistna — You're invited as {'Super-admin' if role == 'super_admin' else 'Admin'}"
+    try:
+        res = await asyncio.to_thread(_send_sync, to_email, subject, html, None)
+        logger.info("Sent admin-invite email to %s id=%s", to_email, res.get("id"))
+    except Exception as e:
+        logger.exception("Failed to send admin-invite email to %s: %s", to_email, e)
