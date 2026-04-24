@@ -261,3 +261,105 @@ async def send_admin_invite(to_email: str, full_name: str, inviter_name: str, ro
         logger.info("Sent admin-invite email to %s id=%s", to_email, res.get("id"))
     except Exception as e:
         logger.exception("Failed to send admin-invite email to %s: %s", to_email, e)
+
+
+_CATEGORY_LABELS = {
+    "general": "General",
+    "booking_issue": "Booking issue",
+    "complaint": "Complaint",
+    "suggestion": "Suggestion",
+    "praise": "Praise",
+}
+
+
+def _render_feedback_user_html(name: str, reference: str, category: str, message: str) -> str:
+    safe_name = (name or "there").split()[0]
+    cat_label = _CATEGORY_LABELS.get(category, category.title())
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>We received your feedback</title></head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#09090b">
+  <div style="max-width:560px;margin:32px auto;background:#fff;border:1px solid #e4e4e7">
+    <div style="background:#002FA7;color:#fff;padding:22px 28px;font-weight:900;letter-spacing:-.5px;font-size:22px">
+      STAR QISTNA <span style="font-size:11px;letter-spacing:.2em;font-weight:600;opacity:.85;margin-left:10px">CUSTOMER SUPPORT</span>
+    </div>
+    <div style="padding:32px 28px">
+      <div style="text-transform:uppercase;letter-spacing:.22em;color:#002FA7;font-size:11px;font-weight:700">Feedback received</div>
+      <h1 style="margin:8px 0 12px;font-size:28px;letter-spacing:-.5px;font-weight:900">Thanks, {safe_name}.</h1>
+      <p style="font-size:14px;color:#52525b;line-height:1.6;margin:0 0 18px">
+        We've got your message and a human from our support team will read it. Expect a reply within 24 hours on working days.
+      </p>
+      <div style="background:#f4f4f5;border:1px solid #e4e4e7;padding:14px 16px;margin:18px 0;font-family:monospace;font-size:12px">
+        <div><b>Reference:</b> {reference}</div>
+        <div><b>Category:</b> {cat_label}</div>
+      </div>
+      <div style="font-size:11px;font-family:monospace;color:#71717a;letter-spacing:.1em;text-transform:uppercase;margin-top:16px">Your message</div>
+      <blockquote style="font-size:14px;color:#27272a;border-left:3px solid #002FA7;padding:8px 14px;margin:8px 0 0;white-space:pre-wrap">{message}</blockquote>
+      <p style="font-size:12px;color:#71717a;line-height:1.6;margin-top:22px">
+        Please quote reference <b>{reference}</b> if you reach out again on the same matter.
+      </p>
+    </div>
+    <div style="background:#09090b;color:#a1a1aa;padding:16px 28px;font-family:monospace;font-size:10px;letter-spacing:.18em;text-transform:uppercase">
+      © STAR QISTNA · <a href="{PUBLIC_APP_URL}" style="color:#a1a1aa;text-decoration:none">STARQISTNA.COM</a>
+    </div>
+  </div>
+</body></html>"""
+
+
+def _render_feedback_admin_html(fb: dict) -> str:
+    cat_label = _CATEGORY_LABELS.get(fb.get("category", ""), fb.get("category", "").title())
+    rating = fb.get("rating")
+    rating_row = f"<div><b>Rating:</b> {'★' * rating}{'☆' * (5 - rating)}</div>" if rating else ""
+    ref_row = f"<div><b>Booking ref:</b> {fb['booking_reference']}</div>" if fb.get("booking_reference") else ""
+    name_row = f"<div><b>Name:</b> {fb['name']}</div>" if fb.get("name") else ""
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>New customer feedback</title></head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#09090b">
+  <div style="max-width:620px;margin:32px auto;background:#fff;border:1px solid #e4e4e7">
+    <div style="background:#B5121B;color:#fff;padding:18px 28px;font-weight:900;letter-spacing:-.5px;font-size:18px">
+      NEW FEEDBACK · {fb['reference']}
+      <span style="float:right;font-size:10px;letter-spacing:.2em;font-weight:700;opacity:.85">{cat_label.upper()}</span>
+    </div>
+    <div style="padding:24px 28px">
+      <div style="font-family:monospace;font-size:12px;line-height:1.8;color:#27272a">
+        {name_row}
+        <div><b>Email:</b> <a href="mailto:{fb['email']}" style="color:#002FA7">{fb['email']}</a></div>
+        {ref_row}
+        {rating_row}
+        <div><b>Submitted:</b> {fb['created_at']}</div>
+        <div><b>IP:</b> {fb.get('ip') or '—'}</div>
+      </div>
+      <div style="font-size:11px;font-family:monospace;color:#71717a;letter-spacing:.1em;text-transform:uppercase;margin-top:20px">Message</div>
+      <blockquote style="font-size:14px;color:#09090b;border-left:3px solid #B5121B;padding:10px 16px;margin:6px 0 0;background:#fafafa;white-space:pre-wrap">{fb['message']}</blockquote>
+      <p style="margin-top:22px">
+        <a href="{PUBLIC_APP_URL}/admin" style="display:inline-block;background:#002FA7;color:#fff;padding:10px 18px;text-decoration:none;font-weight:700;font-size:13px;letter-spacing:.05em">Open admin panel →</a>
+      </p>
+    </div>
+  </div>
+</body></html>"""
+
+
+async def send_feedback_confirmation(to_email: str, name: str, reference: str, category: str, message: str):
+    if not resend.api_key:
+        logger.warning("RESEND_API_KEY not set; skipping feedback-confirm email to %s", to_email)
+        return
+    html = _render_feedback_user_html(name, reference, category, message)
+    subject = f"Star Qistna — We received your feedback ({reference})"
+    try:
+        res = await asyncio.to_thread(_send_sync, to_email, subject, html, None)
+        logger.info("Sent feedback confirmation to %s id=%s", to_email, res.get("id"))
+    except Exception as e:
+        logger.exception("Failed to send feedback confirmation to %s: %s", to_email, e)
+
+
+async def send_feedback_admin_notification(admin_email: str, feedback: dict):
+    if not resend.api_key:
+        logger.warning("RESEND_API_KEY not set; skipping feedback admin notification")
+        return
+    html = _render_feedback_admin_html(feedback)
+    cat = _CATEGORY_LABELS.get(feedback.get("category", ""), feedback.get("category", ""))
+    subject = f"[Feedback · {cat}] {feedback['reference']} from {feedback['email']}"
+    try:
+        res = await asyncio.to_thread(_send_sync, admin_email, subject, html, None)
+        logger.info("Sent feedback admin notification to %s id=%s", admin_email, res.get("id"))
+    except Exception as e:
+        logger.exception("Failed to send feedback admin notification: %s", e)

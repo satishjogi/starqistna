@@ -18,6 +18,7 @@ export default function Header() {
 
         <nav className="hidden md:flex items-center gap-8 text-sm font-semibold">
           <Link to="/" className="hover:text-[#002FA7] transition" data-testid="nav-search">Search</Link>
+          <Link to="/feedback" className="hover:text-[#002FA7] transition" data-testid="nav-feedback">Feedback</Link>
           {user && <Link to="/dashboard" className="hover:text-[#002FA7] transition" data-testid="nav-dashboard">My Bookings</Link>}
           {user && <Link to="/security" className="hover:text-[#002FA7] transition" data-testid="nav-security">Security</Link>}
           {user?.is_admin && <Link to="/admin" className="hover:text-[#002FA7] transition" data-testid="nav-admin">Admin</Link>}
