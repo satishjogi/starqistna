@@ -146,7 +146,7 @@ export default function Home() {
         <div className="px-4 md:px-6 lg:px-10 pt-12 pb-8">
           <div className="grid grid-cols-12 gap-4 items-end">
             <div className="col-span-12 lg:col-span-7">
-              <div className="te-overline mb-4" data-testid="hero-overline">System 01 · Inter-city Buses</div>
+              <div className="te-overline mb-4" data-testid="hero-overline">Express · Inter-city Buses</div>
               <h1 className="text-5xl sm:text-6xl lg:text-7xl font-black tracking-tighter leading-[0.9]">
                 Arrive rested.<br/>
                 <span className="text-[#B5121B]">First class coach.</span>
