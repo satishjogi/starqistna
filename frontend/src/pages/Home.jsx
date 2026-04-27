@@ -207,7 +207,7 @@ export default function Home() {
               </div>
             </div>
             <div className="bg-white p-4 flex items-center justify-between flex-wrap gap-3">
-              <div className="text-xs font-mono text-zinc-500">CHILD FARE · 50% OF ADULT · AUTO-CALCULATED</div>
+              <div className="text-xs font-mono text-zinc-500">CHILD FARE · SET PER TRIP · SHOWN AT CHECKOUT</div>
               {error && <div className="text-xs font-bold text-red-600" data-testid="search-error">{error}</div>}
               <button type="submit" className="te-btn-accent" data-testid="search-submit-btn">
                 Search Buses →
