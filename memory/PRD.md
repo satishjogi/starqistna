@@ -120,7 +120,15 @@ Build a complete online bus booking system where visitors can search departure t
   - Admin form replaced "Rows" input with "Total seats (capacity)" + inline hint explaining the layout mapping.
 
 ## Implemented (2026-04-27)
-- **Admin.jsx refactor** — split the 1,137-line monolith into a slim 87-line shell + 9 self-contained tab components under `/app/frontend/src/pages/admin/tabs/` (`BookingsTab`, `PaymentsTab`, `SchedulesTab`, `AddScheduleTab`, `TerminalsTab`, `PromoCodesTab`, `FeedbackTab`, `AuditLogTab`, `AdminsTab`). Each tab owns its own data fetching, local form state, and event handlers — no prop-drilling beyond the `user` object passed to `AdminsTab` for super-admin gating. All `data-testid` attributes preserved verbatim. Verified all 9 tabs render their unique panels via Playwright automation; lint clean.
+- **Admin.jsx refactor + lazy loading** — split the 1,137-line monolith into a slim shell + 9 self-contained tab components under `/app/frontend/src/pages/admin/tabs/` (`BookingsTab`, `PaymentsTab`, `SchedulesTab`, `AddScheduleTab`, `TerminalsTab`, `PromoCodesTab`, `FeedbackTab`, `AuditLogTab`, `AdminsTab`). Each tab owns its own data fetching, local form state, and event handlers. Now wrapped in `React.lazy` + `Suspense` so each tab's JS chunk only downloads when its tab is clicked — initial admin bundle is much smaller. All `data-testid` attributes preserved.
+- **Cancel Booking** — new flow on the booking detail page.
+  - Policy: cancel ≥24h before departure → full Stripe refund · cancel <24h → ticket burned (no refund).
+  - Backend: `GET /api/bookings/{id}/cancellation-quote` (preview) and `POST /api/bookings/{id}/cancel` (commit). Owner-or-admin only. `_hours_to_departure` computes against MY/SG TZ (UTC+8).
+  - Refund path: looks up the latest paid `payment_transactions` for the booking, retrieves the PaymentIntent via `stripe.checkout.Session.retrieve`, then `stripe.Refund.create(...)` with `idempotency_key=refund:{booking_id}`. Updates txn → `payment_status='refunded'`. Booking status → `cancelled_refunded`. Free promo bookings (total=0) skip Stripe and still resolve to `cancelled_refunded` for clean UX.
+  - Burn path: no Stripe call. Booking status → `cancelled_burned`.
+  - Both paths: delete `seat_locks` so seats are freed for re-sale, write an audit log entry, fire-and-forget cancellation email via Resend (`send_booking_cancelled` + `_render_cancelled_html`).
+  - Frontend: `<CancelBookingButton/>` modal shows the live time-to-departure, refund threshold, and either a green "RM X refunded" panel or a red "ticket burned" warning. Booking detail page shows green/red banner + updated status badge after cancellation. Dashboard list and detail page status badges support the new `cancelled_refunded` / `cancelled_burned` states.
+  - Verified: 12/12 backend pytest cases pass (auth gates, owner check, ≥24h vs <24h logic, fake-Stripe rollback safety, seat_lock cleanup, free-booking edge case). Admin lazy-loaded tabs all render their unique panels.
 
 ## Backlog / next tasks
 ### P1

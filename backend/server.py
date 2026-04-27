@@ -1428,6 +1428,10 @@ async def cancel_booking(booking_id: str, user: dict = Depends(require_user)):
         except Exception as e:
             logger.exception("Stripe refund failed for booking %s: %s", booking_id, e)
             raise HTTPException(502, f"Refund failed: {e}")
+    elif eligible and total == 0:
+        # Free booking (e.g. 100% promo): no money to refund, but cancellation is still
+        # "eligible" — treat as a clean cancellation, not a burn.
+        refund_info = {"refunded": True, "amount": 0.0, "currency": currency.upper(), "stripe_refund_id": None}
 
     # Free up the seats so they can be re-sold
     await db.seat_locks.delete_many({"booking_id": booking_id})
