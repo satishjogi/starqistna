@@ -120,6 +120,7 @@ Build a complete online bus booking system where visitors can search departure t
   - Admin form replaced "Rows" input with "Total seats (capacity)" + inline hint explaining the layout mapping.
 
 ## Implemented (2026-04-27)
+- **Dashboard "My cancellations" filter** — Dashboard now separates bookings into three tabs: **Upcoming · Past · Cancelled**, each with its own count badge. Cancelled bookings (status `cancelled_refunded` or `cancelled_burned`) are pulled out of the date-based upcoming/past split so they don't clutter live trips. Stats row updated to 4 cards (Upcoming / Past / Cancelled in signal-red / "Plan a trip" CTA). Verified via Playwright: all 3 tabs switch and render their respective list panels.
 - **Admin.jsx refactor + lazy loading** — split the 1,137-line monolith into a slim shell + 9 self-contained tab components under `/app/frontend/src/pages/admin/tabs/` (`BookingsTab`, `PaymentsTab`, `SchedulesTab`, `AddScheduleTab`, `TerminalsTab`, `PromoCodesTab`, `FeedbackTab`, `AuditLogTab`, `AdminsTab`). Each tab owns its own data fetching, local form state, and event handlers. Now wrapped in `React.lazy` + `Suspense` so each tab's JS chunk only downloads when its tab is clicked — initial admin bundle is much smaller. All `data-testid` attributes preserved.
 - **Cancel Booking** — new flow on the booking detail page.
   - Policy: cancel ≥24h before departure → full Stripe refund · cancel <24h → ticket burned (no refund).
