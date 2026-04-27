@@ -119,6 +119,9 @@ Build a complete online bus booking system where visitors can search departure t
   - Frontend (`SeatSelection.jsx` + `index.css`): new bus-shell aesthetic — rounded windshield arc, driver steering-wheel icon, headrest-notched seat pills, aisle gap, EXIT door, "REAR · ENGINE" footer, hover-lift animation. Category-aware fill (adult = red, child = teal) so travellers see their mix at a glance. Supports 2+2 and 2+1 in one component.
   - Admin form replaced "Rows" input with "Total seats (capacity)" + inline hint explaining the layout mapping.
 
+## Implemented (2026-04-27)
+- **Admin.jsx refactor** — split the 1,137-line monolith into a slim 87-line shell + 9 self-contained tab components under `/app/frontend/src/pages/admin/tabs/` (`BookingsTab`, `PaymentsTab`, `SchedulesTab`, `AddScheduleTab`, `TerminalsTab`, `PromoCodesTab`, `FeedbackTab`, `AuditLogTab`, `AdminsTab`). Each tab owns its own data fetching, local form state, and event handlers — no prop-drilling beyond the `user` object passed to `AdminsTab` for super-admin gating. All `data-testid` attributes preserved verbatim. Verified all 9 tabs render their unique panels via Playwright automation; lint clean.
+
 ## Backlog / next tasks
 ### P1
 - iPay88 integration (need merchant credentials: Merchant Code, Merchant Key, environment)
