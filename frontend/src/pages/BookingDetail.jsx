@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { QRCodeSVG } from "qrcode.react";
 import api from "../lib/api";
+import CancelBookingButton from "../components/CancelBookingButton";
 
 function fmtPrice(v, ccy = "myr") {
   const map = { myr: "RM", sgd: "S$", usd: "$" };
@@ -16,6 +17,10 @@ export default function BookingDetail() {
   useEffect(() => {
     api.get(`/bookings/${id}`).then(({ data }) => setB(data)).catch((e) => setErr(e?.response?.data?.detail || "Failed to load booking"));
   }, [id]);
+
+  const reload = () => {
+    api.get(`/bookings/${id}`).then(({ data }) => setB(data)).catch(() => {});
+  };
 
   if (err) return <div className="p-10 text-red-600">{err}</div>;
   if (!b) return <div className="p-10 font-mono text-zinc-500">LOADING…</div>;
@@ -40,8 +45,14 @@ export default function BookingDetail() {
               <QRCodeSVG value={b.reference} size={112} level="M" />
             </div>
           )}
-          <div className={`text-xs font-mono font-black uppercase px-3 py-2 ${b.status === "confirmed" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
-            {b.status.replace("_", " ")}
+          <div className={`text-xs font-mono font-black uppercase px-3 py-2 ${
+            b.status === "confirmed"
+              ? "bg-emerald-100 text-emerald-700"
+              : b.status === "cancelled_refunded" || b.status === "cancelled_burned"
+              ? "bg-red-100 text-red-700"
+              : "bg-amber-100 text-amber-700"
+          }`} data-testid="detail-status">
+            {b.status.replace(/_/g, " ")}
           </div>
         </div>
       </div>
@@ -96,6 +107,40 @@ export default function BookingDetail() {
           )}
           <div className="flex justify-between font-black text-lg mt-2"><span>TOTAL</span><span className="font-mono">{fmtPrice(b.pricing.total, b.pricing.currency)}</span></div>
         </div>
+
+        {b.status === "confirmed" && (
+          <div className="te-divider-dashed my-6" />
+        )}
+        {b.status === "confirmed" && (
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3" data-testid="cancel-section">
+            <div className="text-[11px] font-mono text-zinc-500 leading-relaxed">
+              REFUND POLICY · CANCEL ≥24H BEFORE DEPARTURE → FULL REFUND<br/>
+              CANCEL &lt;24H BEFORE DEPARTURE → TICKET BURNED · NO REFUND
+            </div>
+            <CancelBookingButton booking={b} onCancelled={reload} />
+          </div>
+        )}
+        {(b.status === "cancelled_refunded" || b.status === "cancelled_burned") && (
+          <div className="te-divider-dashed my-6" />
+        )}
+        {b.status === "cancelled_refunded" && (
+          <div className="bg-emerald-50 border border-emerald-200 p-4 text-sm" data-testid="cancelled-refunded-banner">
+            <div className="te-overline text-[10px] text-emerald-700 mb-1">Cancelled · Full refund issued</div>
+            <div className="text-emerald-800">
+              Refund of <b>{fmtPrice(b.cancellation_refund?.amount || 0, (b.cancellation_refund?.currency || "myr").toLowerCase())}</b> sent to your original payment method.
+              {b.cancelled_at && <> Cancelled on {new Date(b.cancelled_at).toLocaleString()}.</>}
+            </div>
+          </div>
+        )}
+        {b.status === "cancelled_burned" && (
+          <div className="bg-red-50 border border-red-200 p-4 text-sm" data-testid="cancelled-burned-banner">
+            <div className="te-overline text-[10px] text-red-700 mb-1">Cancelled · No refund</div>
+            <div className="text-red-800">
+              Cancellation was made within 24 hours of departure, so the ticket was burned per our refund policy.
+              {b.cancelled_at && <> Cancelled on {new Date(b.cancelled_at).toLocaleString()}.</>}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

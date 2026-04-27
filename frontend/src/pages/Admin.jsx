@@ -1,21 +1,32 @@
-import React, { useEffect, useState } from "react";
+import React, { lazy, Suspense, useEffect, useState } from "react";
 import api from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useNavigate } from "react-router-dom";
-import BookingsTab from "./admin/tabs/BookingsTab";
-import PaymentsTab from "./admin/tabs/PaymentsTab";
-import SchedulesTab from "./admin/tabs/SchedulesTab";
-import AddScheduleTab from "./admin/tabs/AddScheduleTab";
-import TerminalsTab from "./admin/tabs/TerminalsTab";
-import PromoCodesTab from "./admin/tabs/PromoCodesTab";
-import FeedbackTab from "./admin/tabs/FeedbackTab";
-import AuditLogTab from "./admin/tabs/AuditLogTab";
-import AdminsTab from "./admin/tabs/AdminsTab";
+
+// Lazy-load each tab — keeps the initial admin bundle small.
+// Each chunk is fetched only when the user clicks its tab.
+const BookingsTab = lazy(() => import("./admin/tabs/BookingsTab"));
+const PaymentsTab = lazy(() => import("./admin/tabs/PaymentsTab"));
+const SchedulesTab = lazy(() => import("./admin/tabs/SchedulesTab"));
+const AddScheduleTab = lazy(() => import("./admin/tabs/AddScheduleTab"));
+const TerminalsTab = lazy(() => import("./admin/tabs/TerminalsTab"));
+const PromoCodesTab = lazy(() => import("./admin/tabs/PromoCodesTab"));
+const FeedbackTab = lazy(() => import("./admin/tabs/FeedbackTab"));
+const AuditLogTab = lazy(() => import("./admin/tabs/AuditLogTab"));
+const AdminsTab = lazy(() => import("./admin/tabs/AdminsTab"));
 
 const TABS = [
   "bookings", "payments", "schedules", "add-schedule",
   "terminals", "promo-codes", "feedback", "audit-log", "admins",
 ];
+
+function TabFallback() {
+  return (
+    <div className="mt-6 font-mono text-xs text-zinc-500" data-testid="admin-tab-loading">
+      LOADING TAB…
+    </div>
+  );
+}
 
 export default function Admin() {
   const { user, loading } = useAuth();
@@ -68,15 +79,17 @@ export default function Admin() {
         ))}
       </div>
 
-      {tab === "bookings" && <BookingsTab />}
-      {tab === "payments" && <PaymentsTab />}
-      {tab === "schedules" && <SchedulesTab />}
-      {tab === "add-schedule" && <AddScheduleTab />}
-      {tab === "terminals" && <TerminalsTab />}
-      {tab === "promo-codes" && <PromoCodesTab />}
-      {tab === "feedback" && <FeedbackTab />}
-      {tab === "audit-log" && <AuditLogTab />}
-      {tab === "admins" && <AdminsTab user={user} />}
+      <Suspense fallback={<TabFallback />}>
+        {tab === "bookings" && <BookingsTab />}
+        {tab === "payments" && <PaymentsTab />}
+        {tab === "schedules" && <SchedulesTab />}
+        {tab === "add-schedule" && <AddScheduleTab />}
+        {tab === "terminals" && <TerminalsTab />}
+        {tab === "promo-codes" && <PromoCodesTab />}
+        {tab === "feedback" && <FeedbackTab />}
+        {tab === "audit-log" && <AuditLogTab />}
+        {tab === "admins" && <AdminsTab user={user} />}
+      </Suspense>
     </div>
   );
 }

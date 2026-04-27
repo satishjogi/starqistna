@@ -102,8 +102,14 @@ export default function Dashboard() {
           <div className="font-mono font-bold">{b.seats.join(", ")}</div>
         </div>
         <div className="col-span-6 md:col-span-1 text-right">
-          <div className={`text-[10px] font-mono font-bold uppercase px-2 py-1 inline-block ${b.status === "confirmed" ? "bg-emerald-100 text-emerald-700" : "bg-zinc-100 text-zinc-600"}`}>
-            {b.status}
+          <div className={`text-[10px] font-mono font-bold uppercase px-2 py-1 inline-block ${
+            b.status === "confirmed"
+              ? "bg-emerald-100 text-emerald-700"
+              : b.status === "cancelled_refunded" || b.status === "cancelled_burned"
+              ? "bg-red-100 text-red-700"
+              : "bg-zinc-100 text-zinc-600"
+          }`}>
+            {b.status.replace(/_/g, " ")}
           </div>
           <div className="font-mono text-sm font-black mt-1">{fmtPrice(b.pricing.total, b.pricing.currency)}</div>
         </div>

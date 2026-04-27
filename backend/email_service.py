@@ -360,3 +360,55 @@ async def send_feedback_admin_notification(admin_email: str, feedback: dict):
         logger.info("Sent feedback admin notification to %s id=%s", admin_email, res.get("id"))
     except Exception as e:
         logger.exception("Failed to send feedback admin notification: %s", e)
+
+
+
+def _render_cancelled_html(booking: dict, from_term: dict, to_term: dict, refunded: bool, amount: float, currency: str) -> str:
+    ref = booking.get("reference", "")
+    ccy_sym = _currency_symbol(currency)
+    route = f"{(from_term or {}).get('city', '')} → {(to_term or {}).get('city', '')}"
+    dep = f"{booking.get('departure_date', '')} · {booking.get('departure_time', '')}"
+    if refunded:
+        headline = "Refund issued"
+        sub = f"Your booking <b>{ref}</b> has been cancelled and a full refund of <b>{ccy_sym} {amount:.2f}</b> has been issued."
+        body_extra = "Refunds typically appear on your card or wallet within 5–10 business days, depending on your bank."
+        accent = "#0E8C5C"
+    else:
+        headline = "Booking cancelled"
+        sub = f"Your booking <b>{ref}</b> has been cancelled."
+        body_extra = "Because the cancellation was made within 24 hours of departure, this ticket is non-refundable as per our policy."
+        accent = "#B5121B"
+    return f"""<!doctype html>
+<html><body style="margin:0;padding:0;background:#fafafa;font-family:Arial,Helvetica,sans-serif;color:#111;">
+  <div style="max-width:560px;margin:0 auto;background:#fff;padding:32px 28px;border:1px solid #eee;">
+    <div style="font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-bottom:8px;">Star Qistna · Cancellation</div>
+    <h1 style="font-size:26px;margin:0 0 14px 0;color:{accent};">{headline}</h1>
+    <p style="font-size:15px;line-height:1.5;margin:0 0 14px 0;">{sub}</p>
+    <table style="width:100%;border-collapse:collapse;margin:18px 0;">
+      <tr><td style="padding:6px 0;font-size:12px;color:#666;width:120px;">Reference</td><td style="padding:6px 0;font-size:13px;font-family:monospace;font-weight:bold;">{ref}</td></tr>
+      <tr><td style="padding:6px 0;font-size:12px;color:#666;">Route</td><td style="padding:6px 0;font-size:13px;">{route}</td></tr>
+      <tr><td style="padding:6px 0;font-size:12px;color:#666;">Departure</td><td style="padding:6px 0;font-size:13px;font-family:monospace;">{dep}</td></tr>
+    </table>
+    <p style="font-size:13px;line-height:1.6;color:#555;margin:0 0 18px 0;">{body_extra}</p>
+    <div style="border-top:1px solid #eee;padding-top:16px;font-size:11px;color:#999;line-height:1.6;">
+      Need help? Reply to this email and our team will get back to you.<br/>
+      Star Qistna · First Class Massage Coach
+    </div>
+  </div>
+</body></html>"""
+
+
+async def send_booking_cancelled(booking: dict, from_term: dict, to_term: dict, refunded: bool, amount: float, currency: str):
+    if not resend.api_key:
+        logger.warning("RESEND_API_KEY not set; skipping cancellation email")
+        return
+    to_email = booking.get("contact_email")
+    if not to_email:
+        return
+    html = _render_cancelled_html(booking, from_term, to_term, refunded, amount, currency)
+    subject = f"Star Qistna — Booking cancelled · {booking.get('reference', '')}"
+    try:
+        res = await asyncio.to_thread(_send_sync, to_email, subject, html, None)
+        logger.info("Sent cancellation email to %s ref=%s id=%s", to_email, booking.get("reference"), res.get("id"))
+    except Exception as e:
+        logger.exception("Failed to send cancellation email to %s: %s", to_email, e)

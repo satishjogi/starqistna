@@ -1317,6 +1317,160 @@ async def get_booking(booking_id: str, user: Optional[dict] = Depends(current_us
     return b
 
 
+# ---------- Cancellation ----------
+# Policy (confirmed by ops): cancel ≥24h before departure → full refund.
+#                           cancel <24h before departure → ticket burned (no refund).
+CANCEL_REFUND_THRESHOLD_HOURS = 24
+
+
+def _hours_to_departure(booking: dict) -> float:
+    """Hours between now and the booking's departure (MY/SG local time, UTC+8)."""
+    try:
+        dep_local = datetime.fromisoformat(f"{booking['departure_date']}T{booking['departure_time']}:00")
+        dep_utc = dep_local.replace(tzinfo=timezone(timedelta(hours=8))).astimezone(timezone.utc)
+        return (dep_utc - utcnow()).total_seconds() / 3600.0
+    except Exception:
+        return 0.0
+
+
+@api.get("/bookings/{booking_id}/cancellation-quote")
+async def cancellation_quote(booking_id: str, user: dict = Depends(require_user)):
+    """Tell the user, before they confirm, exactly what cancelling now will do."""
+    b = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    if not b:
+        raise HTTPException(404, "Booking not found")
+    if b.get("user_id") != user["id"] and not user.get("is_admin"):
+        raise HTTPException(403, "Not your booking")
+    if b.get("status") != "confirmed":
+        raise HTTPException(400, f"Cannot cancel a booking in status '{b.get('status')}'")
+    hours = _hours_to_departure(b)
+    eligible = hours >= CANCEL_REFUND_THRESHOLD_HOURS
+    pricing = b.get("pricing", {})
+    return {
+        "booking_id": b["id"],
+        "reference": b.get("reference"),
+        "hours_to_departure": round(hours, 2),
+        "threshold_hours": CANCEL_REFUND_THRESHOLD_HOURS,
+        "refund_eligible": eligible,
+        "refund_amount": float(pricing.get("total", 0)) if eligible else 0.0,
+        "currency": (pricing.get("currency") or "myr").upper(),
+        "outcome": "full_refund" if eligible else "ticket_burned",
+        "policy": "Free cancellation up to 24 hours before departure. Within 24 hours, the ticket is non-refundable.",
+    }
+
+
+def _stripe_refund_sync(payment_intent_id: str, amount_minor_units: int, idem_key: str) -> dict:
+    """Run the blocking Stripe refund call inside a worker thread."""
+    import stripe as stripe_sdk
+    stripe_sdk.api_key = STRIPE_API_KEY
+    return stripe_sdk.Refund.create(
+        payment_intent=payment_intent_id,
+        amount=amount_minor_units,
+        reason="requested_by_customer",
+        idempotency_key=idem_key,
+    )
+
+
+def _stripe_get_payment_intent_sync(session_id: str) -> Optional[str]:
+    import stripe as stripe_sdk
+    stripe_sdk.api_key = STRIPE_API_KEY
+    sess = stripe_sdk.checkout.Session.retrieve(session_id)
+    pi = sess.get("payment_intent") if isinstance(sess, dict) else getattr(sess, "payment_intent", None)
+    return pi if isinstance(pi, str) else None
+
+
+@api.post("/bookings/{booking_id}/cancel")
+async def cancel_booking(booking_id: str, user: dict = Depends(require_user)):
+    b = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    if not b:
+        raise HTTPException(404, "Booking not found")
+    if b.get("user_id") != user["id"] and not user.get("is_admin"):
+        raise HTTPException(403, "Not your booking")
+    if b.get("status") != "confirmed":
+        raise HTTPException(400, f"Cannot cancel a booking in status '{b.get('status')}'")
+
+    hours = _hours_to_departure(b)
+    eligible = hours >= CANCEL_REFUND_THRESHOLD_HOURS
+    pricing = b.get("pricing", {})
+    currency = (pricing.get("currency") or "myr").lower()
+    total = float(pricing.get("total", 0))
+    refund_info = {"refunded": False, "amount": 0.0, "currency": currency.upper(), "stripe_refund_id": None}
+
+    if eligible and total > 0:
+        # Pull the most recent paid txn for this booking
+        txn = await db.payment_transactions.find_one(
+            {"booking_id": booking_id, "payment_status": "paid"},
+            sort=[("created_at", -1)],
+        )
+        if not txn or not txn.get("session_id"):
+            raise HTTPException(400, "No paid Stripe session found for this booking; cannot refund automatically.")
+        try:
+            pi = await asyncio.to_thread(_stripe_get_payment_intent_sync, txn["session_id"])
+            if not pi:
+                raise HTTPException(400, "Stripe session has no payment_intent yet.")
+            # Stripe expects amounts in minor units (cents/sen)
+            amount_minor = int(round(total * 100))
+            idem_key = f"refund:{booking_id}"
+            refund = await asyncio.to_thread(_stripe_refund_sync, pi, amount_minor, idem_key)
+            refund_info = {
+                "refunded": True,
+                "amount": total,
+                "currency": currency.upper(),
+                "stripe_refund_id": refund.get("id") if isinstance(refund, dict) else getattr(refund, "id", None),
+            }
+            await db.payment_transactions.update_one(
+                {"session_id": txn["session_id"]},
+                {"$set": {"payment_status": "refunded", "refunded_at": utcnow().isoformat(),
+                          "refund_amount": total, "refund_id": refund_info["stripe_refund_id"]}},
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Stripe refund failed for booking %s: %s", booking_id, e)
+            raise HTTPException(502, f"Refund failed: {e}")
+
+    # Free up the seats so they can be re-sold
+    await db.seat_locks.delete_many({"booking_id": booking_id})
+
+    new_status = "cancelled_refunded" if refund_info["refunded"] else "cancelled_burned"
+    await db.bookings.update_one(
+        {"id": booking_id},
+        {"$set": {
+            "status": new_status,
+            "cancelled_at": utcnow().isoformat(),
+            "cancelled_by_user_id": user["id"],
+            "cancellation_outcome": "full_refund" if refund_info["refunded"] else "ticket_burned",
+            "cancellation_refund": refund_info,
+        }},
+    )
+
+    # Best-effort email
+    try:
+        from_term = await db.terminals.find_one({"id": b["from_terminal_id"]}, {"_id": 0})
+        to_term = await db.terminals.find_one({"id": b["to_terminal_id"]}, {"_id": 0})
+        from email_service import send_booking_cancelled
+        asyncio.create_task(send_booking_cancelled(b, from_term, to_term, refund_info["refunded"], refund_info["amount"], refund_info["currency"]))
+    except Exception as e:
+        logger.warning("Cancellation email queue failed: %s", e)
+
+    log_audit_task = log_audit(user, "cancel", "booking", booking_id, {
+        "outcome": "full_refund" if refund_info["refunded"] else "ticket_burned",
+        "hours_to_departure": round(hours, 2),
+        "amount": refund_info["amount"],
+        "currency": refund_info["currency"],
+    })
+    asyncio.create_task(log_audit_task)
+
+    return {
+        "ok": True,
+        "booking_id": booking_id,
+        "status": new_status,
+        "outcome": "full_refund" if refund_info["refunded"] else "ticket_burned",
+        "refund": refund_info,
+        "hours_to_departure": round(hours, 2),
+    }
+
+
 # ---------- Payments (Stripe) ----------
 def _payment_options_for(currency: str) -> list:
     """Return list of payment method options based on currency.
