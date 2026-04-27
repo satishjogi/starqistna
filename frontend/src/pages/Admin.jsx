@@ -23,7 +23,7 @@ export default function Admin() {
     start_date: "", end_date: "",
     days_of_week: [0, 1, 2, 3, 4, 5, 6],
     departure_time: "08:00", arrival_time: "12:00",
-    bus_type: "Standard", adult_fare: 50, total_seats: 40,
+    bus_type: "Standard", adult_fare: 50, child_fare: 25, total_seats: 40,
   });
   const [promoForm, setPromoForm] = useState({
     code: "", type: "percent", value: 10, currency: "myr", max_uses: "", valid_until: "", description: "",
@@ -40,6 +40,28 @@ export default function Admin() {
   const isSuperAdmin = user?.role === "super_admin";
   const [feedback, setFeedback] = useState({ summary: null, items: [] });
   const [feedbackFilter, setFeedbackFilter] = useState({ status: "all", category: "all" });
+  const [fxRate, setFxRate] = useState(3.5);
+  const [fxRateInput, setFxRateInput] = useState("3.5");
+  const [fxMsg, setFxMsg] = useState("");
+
+  const loadSettings = () =>
+    api.get("/settings").then(({ data }) => {
+      setFxRate(data.sgd_to_myr_rate);
+      setFxRateInput(String(data.sgd_to_myr_rate));
+    }).catch(() => {});
+
+  const saveFxRate = async () => {
+    setFxMsg("");
+    const rate = parseFloat(fxRateInput);
+    if (!rate || rate <= 0) { setFxMsg("Enter a valid rate."); return; }
+    try {
+      await api.patch("/admin/settings", { sgd_to_myr_rate: rate });
+      setFxRate(rate);
+      setFxMsg(`Saved · 1 SGD ≈ MYR ${rate.toFixed(2)}`);
+    } catch (e) {
+      setFxMsg(e?.response?.data?.detail || "Could not save");
+    }
+  };
 
   const loadAdmins = () =>
     api.get("/admin/admins").then(({ data }) => setAdmins(data)).catch(() => {});
@@ -93,6 +115,7 @@ export default function Admin() {
     if (user?.is_admin && tab === "audit-log") loadAuditLogs(auditFilter);
     if (user?.is_admin && tab === "admins") loadAdmins();
     if (user?.is_admin && tab === "feedback") loadFeedback(feedbackFilter);
+    if (user?.is_admin && tab === "add-schedule") loadSettings();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, auditFilter.resource, auditFilter.action, feedbackFilter.status, feedbackFilter.category, user]);
 
@@ -124,6 +147,7 @@ export default function Admin() {
       const { data } = await api.post("/admin/schedules/bulk", {
         ...form,
         adult_fare: parseFloat(form.adult_fare),
+        child_fare: parseFloat(form.child_fare),
         total_seats: parseInt(form.total_seats, 10),
       });
       setMsg(`Created ${data.created} schedule(s)${data.skipped_duplicates ? ` · ${data.skipped_duplicates} skipped (duplicates)` : ""} · billed in ${data.currency.toUpperCase()}.`);
@@ -391,7 +415,32 @@ export default function Admin() {
       )}
 
       {tab === "add-schedule" && (
-        <form onSubmit={createSched} className="te-card p-6 mt-6 grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl" data-testid="add-sched-form">
+        <>
+          <div className="te-card p-5 mt-6 max-w-4xl" data-testid="fx-rate-panel">
+            <div className="te-overline mb-3">Currency display · SGD → MYR approx</div>
+            <div className="flex flex-col md:flex-row md:items-end gap-3">
+              <div className="flex-1">
+                <label className="te-label">1 SGD = MYR</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  className="te-input"
+                  value={fxRateInput}
+                  onChange={(e) => setFxRateInput(e.target.value)}
+                  data-testid="fx-rate-input"
+                />
+                <div className="text-[10px] font-mono text-zinc-500 mt-1">
+                  Used for the bracketed MYR approx shown on Singapore-priced trips during search & checkout. Update whenever the rate drifts.
+                </div>
+              </div>
+              <button type="button" onClick={saveFxRate} className="te-btn-primary" data-testid="fx-rate-save">
+                Save rate
+              </button>
+            </div>
+            {fxMsg && <div className="text-xs font-bold mt-2" data-testid="fx-rate-msg">{fxMsg}</div>}
+          </div>
+          <form onSubmit={createSched} className="te-card p-6 mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl" data-testid="add-sched-form">
           <div>
             <label className="te-label">From Terminal</label>
             <select className="te-input" required value={form.from_terminal_id} onChange={(e) => setForm({ ...form, from_terminal_id: e.target.value })}>
@@ -459,7 +508,11 @@ export default function Admin() {
           </div>
           <div>
             <label className="te-label">Adult fare</label>
-            <input type="number" step="0.01" className="te-input" value={form.adult_fare} onChange={(e) => setForm({ ...form, adult_fare: e.target.value })} />
+            <input type="number" step="0.01" className="te-input" value={form.adult_fare} onChange={(e) => setForm({ ...form, adult_fare: e.target.value })} data-testid="add-sched-adult-fare" />
+          </div>
+          <div>
+            <label className="te-label">Child fare</label>
+            <input type="number" step="0.01" className="te-input" value={form.child_fare} onChange={(e) => setForm({ ...form, child_fare: e.target.value })} data-testid="add-sched-child-fare" />
           </div>
           <div>
             <label className="te-label">Departure time</label>
@@ -495,6 +548,7 @@ export default function Admin() {
             {msg && <div className="text-xs font-bold" data-testid="sched-msg">{msg}</div>}
           </div>
         </form>
+        </>
       )}
 
       {tab === "terminals" && (

@@ -1078,7 +1078,8 @@ async def release_seats(lock_token: str):
 # ---------- Bookings ----------
 def _calc_pricing(sched: dict, passengers: List[dict], promo: Optional[dict] = None) -> dict:
     adult_fare = float(sched["adult_fare"])
-    child_fare = round(adult_fare * 0.5, 2)
+    # Prefer per-schedule child fare; fallback to half of adult for legacy schedules.
+    child_fare = float(sched["child_fare"]) if sched.get("child_fare") is not None else round(adult_fare * 0.5, 2)
     adults = sum(1 for p in passengers if p["category"] == "adult")
     children = sum(1 for p in passengers if p["category"] == "child")
     subtotal = round(adults * adult_fare + children * child_fare, 2)
@@ -1838,6 +1839,47 @@ async def cancel_admin_invite(invite_id: str, request: Request, user: dict = Dep
     return {"ok": True}
 
 
+
+# ---------- App settings (currency rate, etc.) ----------
+DEFAULT_SGD_TO_MYR = 3.50
+
+
+class AppSettingsBody(BaseModel):
+    sgd_to_myr_rate: float = Field(gt=0, le=20)
+
+
+async def _get_settings() -> dict:
+    doc = await db.app_settings.find_one({"id": "global"}, {"_id": 0})
+    if not doc:
+        doc = {
+            "id": "global",
+            "sgd_to_myr_rate": DEFAULT_SGD_TO_MYR,
+            "updated_at": utcnow().isoformat(),
+        }
+        await db.app_settings.insert_one(doc)
+    return doc
+
+
+@api.get("/settings")
+async def public_settings():
+    """Public — used by the frontend to compute the bracketed MYR approx for SGD trips."""
+    s = await _get_settings()
+    return {"sgd_to_myr_rate": s.get("sgd_to_myr_rate", DEFAULT_SGD_TO_MYR)}
+
+
+@api.patch("/admin/settings")
+async def update_settings(body: AppSettingsBody, request: Request, user: dict = Depends(require_admin)):
+    await db.app_settings.update_one(
+        {"id": "global"},
+        {"$set": {"sgd_to_myr_rate": body.sgd_to_myr_rate, "updated_at": utcnow().isoformat()}},
+        upsert=True,
+    )
+    await log_audit(user, "update", "settings", "global",
+                    {"sgd_to_myr_rate": body.sgd_to_myr_rate}, request)
+    return {"ok": True, "sgd_to_myr_rate": body.sgd_to_myr_rate}
+
+
+
 # ---------- Customer feedback ----------
 FEEDBACK_ADMIN_EMAIL = "admin@starqistna.com"
 
@@ -1964,6 +2006,7 @@ class CreateScheduleBody(BaseModel):
     bus_operator: str = "Star Qistna"
     bus_type: Literal["VIP 27", "Executive", "Standard"] = "Standard"
     adult_fare: float
+    child_fare: float
     total_seats: int = Field(ge=12, le=60, default=40)
     currency: str = "myr"
 
@@ -1978,7 +2021,11 @@ class BulkScheduleBody(BaseModel):
     arrival_time: str
     bus_type: Literal["VIP 27", "Executive", "Standard"] = "Standard"
     adult_fare: float
+    child_fare: float
     total_seats: int = Field(ge=12, le=60, default=40)
+
+
+# (AppSettingsBody is defined alongside the settings endpoints earlier in the file.)
 
 
 class TerminalCreateBody(BaseModel):
@@ -2141,6 +2188,7 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
                     "bus_operator": "Star Qistna",
                     "bus_type": body.bus_type,
                     "adult_fare": body.adult_fare,
+                    "child_fare": body.child_fare,
                     "total_seats": body.total_seats,
                     "layout_config": _layout_for_bus_type(body.bus_type),
                     "currency": derived_currency,
@@ -2502,6 +2550,14 @@ async def _ensure_indexes():
     await db.admin_invites.create_index([("email", ASCENDING)])
     await db.feedback.create_index([("created_at", ASCENDING)])
     await db.feedback.create_index([("status", ASCENDING)])
+    # Backfill child_fare on legacy schedules (defaults to half adult fare)
+    try:
+        await db.schedules.update_many(
+            {"child_fare": {"$exists": False}},
+            [{"$set": {"child_fare": {"$round": [{"$multiply": ["$adult_fare", 0.5]}, 2]}}}],
+        )
+    except Exception as e:
+        logger.warning("child_fare backfill skipped: %s", e)
 
 
 @api.get("/")

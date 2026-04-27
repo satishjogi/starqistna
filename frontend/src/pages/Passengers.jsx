@@ -1,18 +1,24 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "../lib/api";
 import { getFlow, setFlow } from "../lib/booking-store";
 import { useAuth } from "../lib/auth";
+import { formatPrice, formatPriceWithMyr } from "../lib/price";
 
+// Local fmtPrice keeps backward-compatible callsites that don't need MYR approx.
 function fmtPrice(v, ccy = "myr") {
-  const map = { myr: "RM", sgd: "S$", usd: "$" };
-  return `${map[ccy] || ccy.toUpperCase()} ${Number(v).toFixed(2)}`;
+  return formatPrice(v, ccy);
 }
 
 export default function Passengers() {
   const navigate = useNavigate();
   const flow = getFlow();
   const { user } = useAuth();
+  const [fxRate, setFxRate] = useState(null);
+
+  useEffect(() => {
+    api.get("/settings").then(({ data }) => setFxRate(data.sgd_to_myr_rate)).catch(() => {});
+  }, []);
 
   const [passengers, setPassengers] = useState(
     (flow?.selected_seats || []).map((s) => ({
@@ -315,7 +321,7 @@ export default function Passengers() {
               {passengers.map((p) => (
                 <div key={p.seat_number} className="flex justify-between">
                   <span><span className="font-mono">{p.seat_number}</span> {p.category === "adult" ? "Adult" : "Child"}</span>
-                  <span className="font-mono">{fmtPrice(p.category === "adult" ? s.adult_fare : s.adult_fare * 0.5, s.currency)}</span>
+                  <span className="font-mono">{formatPriceWithMyr(p.category === "adult" ? s.adult_fare : (s.child_fare ?? s.adult_fare * 0.5), s.currency, fxRate)}</span>
                 </div>
               ))}
             </div>
@@ -335,7 +341,7 @@ export default function Passengers() {
                   )}
                   <div className="flex justify-between font-black text-xl mt-3">
                     <span>TOTAL</span>
-                    <span className="font-mono" data-testid="passengers-total">{fmtPrice(total, s.currency)}</span>
+                    <span className="font-mono" data-testid="passengers-total">{formatPriceWithMyr(total, s.currency, fxRate)}</span>
                   </div>
                 </>
               );

@@ -2,11 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import api from "../lib/api";
 import { setFlow } from "../lib/booking-store";
-
-function fmtPrice(v, ccy = "myr") {
-  const map = { myr: "RM", sgd: "S$", usd: "$" };
-  return `${map[ccy] || ccy.toUpperCase()} ${Number(v).toFixed(2)}`;
-}
+import { formatPriceWithMyr } from "../lib/price";
 
 export default function SearchResults() {
   const [params] = useSearchParams();
@@ -20,6 +16,11 @@ export default function SearchResults() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [fxRate, setFxRate] = useState(null);
+
+  useEffect(() => {
+    api.get("/settings").then(({ data }) => setFxRate(data.sgd_to_myr_rate)).catch(() => {});
+  }, []);
 
   useEffect(() => {
     setLoading(true);
@@ -150,7 +151,12 @@ export default function SearchResults() {
                     <div className="col-span-12 md:col-span-3 flex items-center justify-between md:justify-end gap-4">
                       <div className="text-right">
                         <div className="text-[10px] font-mono text-zinc-500">FROM</div>
-                        <div className="text-2xl font-black font-mono">{fmtPrice(s.adult_fare, s.currency)}</div>
+                        <div className="text-2xl font-black font-mono">{formatPriceWithMyr(s.adult_fare, s.currency, fxRate)}</div>
+                        {s.child_fare != null && (
+                          <div className="text-[10px] font-mono text-zinc-500 mt-1">
+                            Child {formatPriceWithMyr(s.child_fare, s.currency, fxRate)}
+                          </div>
+                        )}
                       </div>
                       <button
                         disabled={soldOut}
