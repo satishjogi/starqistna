@@ -75,7 +75,7 @@ class TestAdminPaymentsAuth:
             headers={"Authorization": f"Bearer {token}"}
         )
         assert response.status_code == 200
-        print(f"✅ Admin user: 200 OK")
+        print("✅ Admin user: 200 OK")
 
 
 class TestAdminPaymentsResponse:
@@ -103,7 +103,7 @@ class TestAdminPaymentsResponse:
         
         assert "summary" in data, "Response missing 'summary' key"
         assert "items" in data, "Response missing 'items' key"
-        print(f"✅ Response has summary and items keys")
+        print("✅ Response has summary and items keys")
     
     def test_summary_has_required_keys(self, admin_token):
         """Summary should have total/paid/initiated/failed/refunded/gross_myr/gross_sgd"""

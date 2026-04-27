@@ -5,7 +5,6 @@ import logging
 import asyncio
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import quote
 
 from dotenv import load_dotenv
 
@@ -53,8 +52,6 @@ def _render_ticket_html(booking: dict, from_term: dict, to_term: dict) -> str:
     # CID inline reference — resolved from the PNG attachment added in send_booking_confirmation.
     # Gmail, Outlook, Apple Mail all render CID-referenced attachments inline.
     qr_src = "cid:qrcode"
-    # Public fallback URL for clients that don't resolve CIDs.
-    qr_fallback = f"https://quickchart.io/qr?text={quote(ref)}&size=220&margin=2"
 
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Your Star Qistna ticket</title></head>

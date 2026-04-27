@@ -94,7 +94,7 @@ class TestPopularNowEndpoint:
         for i, item in enumerate(data["items"]):
             assert isinstance(item["is_today"], bool), f"Item {i} is_today should be boolean, got {type(item['is_today'])}"
         
-        print(f"✓ is_today is boolean for all items")
+        print("✓ is_today is boolean for all items")
     
     def test_popular_now_minutes_until_departure_non_negative(self):
         """minutes_until_departure is non-negative integer or null"""
@@ -108,7 +108,7 @@ class TestPopularNowEndpoint:
                 assert isinstance(mins, int), f"Item {i} minutes_until_departure should be int, got {type(mins)}"
                 assert mins >= 0, f"Item {i} minutes_until_departure should be non-negative, got {mins}"
         
-        print(f"✓ minutes_until_departure is non-negative int or null for all items")
+        print("✓ minutes_until_departure is non-negative int or null for all items")
     
     def test_popular_now_seats_available_calculation(self):
         """seats_available is a non-negative integer"""
@@ -121,7 +121,7 @@ class TestPopularNowEndpoint:
             assert isinstance(seats, int), f"Item {i} seats_available should be int, got {type(seats)}"
             assert seats >= 0, f"Item {i} seats_available should be non-negative, got {seats}"
         
-        print(f"✓ seats_available is non-negative int for all items")
+        print("✓ seats_available is non-negative int for all items")
     
     def test_popular_now_sorting_today_first(self):
         """Items with is_today=true come before is_today=false"""
@@ -145,7 +145,7 @@ class TestPopularNowEndpoint:
             for i in range(first_non_today_idx, len(items)):
                 assert not items[i]["is_today"], f"Item {i} is_today=true after non-today item at index {first_non_today_idx}"
         
-        print(f"✓ Sorting correct: today items come first")
+        print("✓ Sorting correct: today items come first")
     
     def test_popular_now_sorting_by_minutes(self):
         """Within same is_today group, sorted by minutes_until_departure ascending"""
@@ -162,7 +162,7 @@ class TestPopularNowEndpoint:
             curr_mins = today_items[i].get("minutes_until_departure") or float('inf')
             assert prev_mins <= curr_mins, f"Today items not sorted by minutes: {prev_mins} > {curr_mins}"
         
-        print(f"✓ Today items sorted by minutes_until_departure ascending")
+        print("✓ Today items sorted by minutes_until_departure ascending")
     
     def test_popular_now_fare_and_currency(self):
         """fare is numeric and currency is valid"""
@@ -180,7 +180,7 @@ class TestPopularNowEndpoint:
             assert fare >= 0, f"Item {i} fare should be non-negative, got {fare}"
             assert currency.lower() in valid_currencies, f"Item {i} currency '{currency}' not in {valid_currencies}"
         
-        print(f"✓ fare and currency valid for all items")
+        print("✓ fare and currency valid for all items")
     
     def test_popular_now_schedule_id_format(self):
         """schedule_id is a non-empty string (UUID format)"""
@@ -193,7 +193,7 @@ class TestPopularNowEndpoint:
             assert isinstance(schedule_id, str), f"Item {i} schedule_id should be string"
             assert len(schedule_id) > 0, f"Item {i} schedule_id should not be empty"
         
-        print(f"✓ schedule_id is valid string for all items")
+        print("✓ schedule_id is valid string for all items")
     
     def test_popular_now_departure_date_format(self):
         """departure_date is in YYYY-MM-DD format"""
@@ -208,7 +208,7 @@ class TestPopularNowEndpoint:
             dep_date = item["departure_date"]
             assert date_pattern.match(dep_date), f"Item {i} departure_date '{dep_date}' not in YYYY-MM-DD format"
         
-        print(f"✓ departure_date format valid for all items")
+        print("✓ departure_date format valid for all items")
     
     def test_popular_now_time_format(self):
         """departure_time and arrival_time are in HH:MM format"""
@@ -227,7 +227,7 @@ class TestPopularNowEndpoint:
             if arr_time is not None:
                 assert time_pattern.match(arr_time), f"Item {i} arrival_time '{arr_time}' not in HH:MM format"
         
-        print(f"✓ Time formats valid for all items")
+        print("✓ Time formats valid for all items")
 
 
 class TestPopularNowEdgeCases:

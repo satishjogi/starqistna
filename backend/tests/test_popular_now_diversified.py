@@ -92,7 +92,7 @@ class TestPopularNowDiversified:
                         if schedules:
                             for s in schedules[:3]:
                                 assert s.get('currency') == 'sgd', f"SG-origin schedule should have currency='sgd', got {s.get('currency')}"
-                            print(f"PASS: SG-origin schedules have currency='sgd'")
+                            print("PASS: SG-origin schedules have currency='sgd'")
                             return
             pytest.skip("No Singapore-origin routes available for testing")
         
@@ -146,7 +146,7 @@ class TestPopularNowDiversified:
             assert isinstance(seats, int), f"seats_available should be int, got {type(seats)}"
             assert seats >= 0, f"seats_available should be non-negative, got {seats}"
         
-        print(f"PASS: All items have valid seats_available values")
+        print("PASS: All items have valid seats_available values")
 
 
 class TestMigrationIdempotency:

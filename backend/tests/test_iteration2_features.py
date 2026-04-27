@@ -103,7 +103,7 @@ class TestPromoValidation:
         assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
         data = response.json()
         
-        assert data["valid"] == True
+        assert data["valid"]
         assert "promo" in data
         assert data["promo"]["code"] == "WELCOME10"
         assert data["promo"]["type"] == "percent"
@@ -132,13 +132,13 @@ class TestPromoValidation:
         assert response.status_code == 200
         data = response.json()
         
-        assert data["valid"] == True
+        assert data["valid"]
         assert data["promo"]["code"] == "RAYA5"
         assert data["promo"]["type"] == "flat"
         assert data["promo"]["value"] == 5
         assert data["promo"]["discount_amount"] == 5.0
         
-        print(f"RAYA5 validated: flat RM5 discount applied")
+        print("RAYA5 validated: flat RM5 discount applied")
     
     def test_validate_promo_nonexistent_code_returns_404(self, api_client, schedule_data):
         """POST /api/promo/validate with non-existent code returns 404"""
@@ -223,7 +223,7 @@ class TestPromoAdminCRUD:
         assert data["code"] == new_code.upper()
         assert data["type"] == "percent"
         assert data["value"] == 15
-        assert data["active"] == True
+        assert data["active"]
         assert data["used_count"] == 0
         assert "id" in data
         
@@ -264,14 +264,14 @@ class TestPromoAdminCRUD:
         # Toggle off
         toggle_resp = api_client.patch(f"{API_URL}/admin/promo-codes/{code_id}?active=false", headers=headers)
         assert toggle_resp.status_code == 200
-        assert toggle_resp.json()["updated"] == True
+        assert toggle_resp.json()["updated"]
         
         # Verify it's off
         list_resp = api_client.get(f"{API_URL}/admin/promo-codes", headers=headers)
         codes = list_resp.json()
         toggled = next((c for c in codes if c["id"] == code_id), None)
         assert toggled is not None
-        assert toggled["active"] == False
+        assert not toggled["active"]
         
         print(f"Promo code {new_code} toggled off successfully")
         return code_id
@@ -296,7 +296,7 @@ class TestPromoAdminCRUD:
         # Delete
         delete_resp = api_client.delete(f"{API_URL}/admin/promo-codes/{code_id}", headers=headers)
         assert delete_resp.status_code == 200
-        assert delete_resp.json()["deleted"] == True
+        assert delete_resp.json()["deleted"]
         
         # Verify it's gone
         list_resp = api_client.get(f"{API_URL}/admin/promo-codes", headers=headers)
@@ -477,7 +477,7 @@ class TestBoardingValidation:
         assert response.status_code == 200  # Returns 200 with valid:false
         data = response.json()
         
-        assert data["valid"] == False
+        assert not data["valid"]
         assert data["reason"] == "not_found"
         
         print("Unknown reference correctly returns valid:false, reason:not_found")
@@ -533,7 +533,7 @@ class TestBoardingValidation:
         assert validate_resp.status_code == 200
         data = validate_resp.json()
         
-        assert data["valid"] == False
+        assert not data["valid"]
         assert data["reason"] == "not_confirmed"
         assert data["status"] == "pending_payment"
         
@@ -586,7 +586,7 @@ class TestBoardingValidation:
         # Force-confirm the booking via MongoDB
         import subprocess
         mongo_cmd = f'''python3 -c "from pymongo import MongoClient; MongoClient('mongodb://localhost:27017')['test_database'].bookings.update_one({{'reference': '{reference}'}}, {{'\\$set': {{'status':'confirmed','payment_status':'paid'}}}})"'''
-        result = subprocess.run(mongo_cmd, shell=True, capture_output=True, text=True)
+        subprocess.run(mongo_cmd, shell=True, capture_output=True, text=True)
         
         # Validate boarding
         validate_resp = api_client.post(f"{API_URL}/boarding/validate", json={
@@ -598,12 +598,12 @@ class TestBoardingValidation:
         assert validate_resp.status_code == 200
         data = validate_resp.json()
         
-        assert data["valid"] == True
+        assert data["valid"]
         assert data["reference"] == reference
         assert "passengers" in data
         assert "seats" in data
         assert "schedule" in data
-        assert data["already_boarded"] == False
+        assert not data["already_boarded"]
         assert "boarded_at" in data
         
         # Verify passenger info
@@ -670,8 +670,8 @@ class TestBoardingValidation:
         })
         assert first_resp.status_code == 200
         first_data = first_resp.json()
-        assert first_data["valid"] == True
-        assert first_data["already_boarded"] == False
+        assert first_data["valid"]
+        assert not first_data["already_boarded"]
         
         # Second validation (should be idempotent)
         second_resp = api_client.post(f"{API_URL}/boarding/validate", json={
@@ -682,10 +682,10 @@ class TestBoardingValidation:
         assert second_resp.status_code == 200
         second_data = second_resp.json()
         
-        assert second_data["valid"] == True
-        assert second_data["already_boarded"] == True
+        assert second_data["valid"]
+        assert second_data["already_boarded"]
         
-        print(f"Boarding validation is idempotent - second call returns already_boarded:true")
+        print("Boarding validation is idempotent - second call returns already_boarded:true")
 
 
 # ============ PROMO INACTIVE CODE TEST ============

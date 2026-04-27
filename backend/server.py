@@ -13,6 +13,7 @@ import os
 import logging
 import uuid
 import asyncio
+import hashlib
 import secrets
 import bcrypt
 import jwt
@@ -69,6 +70,16 @@ def new_id() -> str:
 
 def hash_password(plain: str) -> str:
     return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _fingerprint(token: str) -> str:
+    """Fast deterministic SHA256 hex digest for indexed token lookup.
+
+    We still bcrypt-verify the candidate for constant-time defence in depth, but the
+    fingerprint lets us O(1)-locate the row instead of scanning + bcrypt-checking
+    every active token (which would be O(N × bcrypt_cost) and slow at scale).
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def verify_password(plain: str, hashed: str) -> bool:
@@ -826,6 +837,7 @@ async def forgot_password(body: ForgotPasswordBody, request: Request):
             "user_id": user["id"],
             "email": email,
             "token_hash": token_hash,
+            "token_fp": _fingerprint(raw_token),
             "used": False,
             "created_at": now,
             "expires_at": now + timedelta(seconds=RESET_TOKEN_TTL_SECONDS),
@@ -855,19 +867,14 @@ async def reset_password(body: ResetPasswordBody, request: Request):
 
     _validate_password_strength(body.new_password)
 
-    candidates = await db.password_reset_tokens.find(
-        {"used": False, "expires_at": {"$gte": utcnow()}},
-    ).to_list(500)
-
-    raw = body.token.encode()
-    matched = None
-    for c in candidates:
-        try:
-            if bcrypt.checkpw(raw, c["token_hash"].encode()):
-                matched = c
-                break
-        except Exception:
-            continue
+    # O(1) lookup by fingerprint, then bcrypt-verify the single candidate (defence in depth).
+    fp = _fingerprint(body.token)
+    matched = await db.password_reset_tokens.find_one(
+        {"token_fp": fp, "used": False, "expires_at": {"$gte": utcnow()}},
+        {"_id": 0},
+    )
+    if matched and not bcrypt.checkpw(body.token.encode(), matched["token_hash"].encode()):
+        matched = None  # fingerprint collision (vanishingly unlikely) → reject
 
     if not matched:
         await _record_auth_failure(ip, "reset_pw", window_seconds=3600)
@@ -1659,6 +1666,7 @@ async def invite_admin(body: AdminInviteBody, request: Request, user: dict = Dep
         "full_name": body.full_name.strip(),
         "role": body.role,
         "token_hash": token_hash,
+        "token_fp": _fingerprint(raw_token),
         "invited_by_id": user["id"],
         "invited_by_email": user["email"],
         "created_at": now,
@@ -1695,18 +1703,14 @@ async def accept_admin_invite(body: AdminAcceptInviteBody, request: Request):
 
     _validate_password_strength(body.password)
 
-    candidates = await db.admin_invites.find(
-        {"accepted_at": None, "revoked_at": None, "expires_at": {"$gte": utcnow()}},
-    ).to_list(500)
-    raw = body.token.encode()
-    matched = None
-    for c in candidates:
-        try:
-            if bcrypt.checkpw(raw, c["token_hash"].encode()):
-                matched = c
-                break
-        except Exception:
-            continue
+    fp = _fingerprint(body.token)
+    matched = await db.admin_invites.find_one(
+        {"token_fp": fp, "accepted_at": None, "revoked_at": None,
+         "expires_at": {"$gte": utcnow()}},
+        {"_id": 0},
+    )
+    if matched and not bcrypt.checkpw(body.token.encode(), matched["token_hash"].encode()):
+        matched = None  # fingerprint collision → reject
     if not matched:
         await _record_auth_failure(ip, "admin_invite_accept", window_seconds=3600)
         raise HTTPException(400, "Invite link is invalid, already used, or expired.")
@@ -2545,9 +2549,11 @@ async def _ensure_indexes():
     # Password reset tokens: auto-expire at `expires_at` (per-doc TTL)
     await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
     await db.password_reset_tokens.create_index([("user_id", ASCENDING)])
+    await db.password_reset_tokens.create_index([("token_fp", ASCENDING)])
     # Admin invites: auto-expire at `expires_at`
     await db.admin_invites.create_index("expires_at", expireAfterSeconds=0)
     await db.admin_invites.create_index([("email", ASCENDING)])
+    await db.admin_invites.create_index([("token_fp", ASCENDING)])
     await db.feedback.create_index([("created_at", ASCENDING)])
     await db.feedback.create_index([("status", ASCENDING)])
     # Backfill child_fare on legacy schedules (defaults to half adult fare)

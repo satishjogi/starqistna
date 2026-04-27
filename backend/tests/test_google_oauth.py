@@ -77,7 +77,7 @@ class TestExistingEmailPasswordAuth:
         assert "access_token" in data, f"Expected access_token in response, got: {data.keys()}"
         assert "user" in data, "Expected user object in response"
         assert data["user"]["email"] == "admin@starqistna.com"
-        assert data["user"]["is_admin"] == True
+        assert data["user"]["is_admin"]
         print("PASS: Admin login with email/password returns JWT and user object")
         return data["access_token"]
     
@@ -132,7 +132,7 @@ class TestExistingEmailPasswordAuth:
         assert me_resp.status_code == 200, f"GET /auth/me failed: {me_resp.status_code}"
         data = me_resp.json()
         assert data["email"] == "admin@starqistna.com"
-        assert data["is_admin"] == True
+        assert data["is_admin"]
         print("PASS: GET /api/auth/me returns user with valid JWT")
     
     def test_auth_me_without_token_returns_401(self):

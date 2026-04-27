@@ -166,7 +166,7 @@ class TestPaymentOptionsMYR:
         
         # All should be available
         for opt in options:
-            assert opt["available"] == True, f"{opt['id']} should be available for MYR"
+            assert opt["available"], f"{opt['id']} should be available for MYR"
     
     def test_myr_options_have_correct_structure(self, api_client, terminals):
         """Each option should have id, name, provider, methods, available, note"""
@@ -222,7 +222,7 @@ class TestPaymentOptionsSGD:
         # card and grabpay should be available
         for opt in options:
             if opt["id"] in ["card", "grabpay"]:
-                assert opt["available"] == True, f"{opt['id']} should be available for SGD"
+                assert opt["available"], f"{opt['id']} should be available for SGD"
 
 
 # ============ CHECKOUT TESTS ============

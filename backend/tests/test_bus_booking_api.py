@@ -138,7 +138,7 @@ class TestAuth:
         assert "user" in data
         assert data["token_type"] == "bearer"
         assert data["user"]["email"] == ADMIN_EMAIL.lower()
-        assert data["user"]["is_admin"] == True
+        assert data["user"]["is_admin"]
         print(f"Admin login successful: {data['user']['email']}")
     
     def test_login_invalid_credentials(self, api_client):
@@ -160,7 +160,7 @@ class TestAuth:
         assert "user" in data
         assert data["user"]["email"] == test_user_data["email"].lower()
         assert data["user"]["full_name"] == test_user_data["full_name"]
-        assert data["user"]["is_admin"] == False
+        assert not data["user"]["is_admin"]
         print(f"User registered: {data['user']['email']}")
         
         # Store token for later tests
@@ -536,7 +536,7 @@ class TestBookingsAndPayments:
         """POST /api/payments/checkout creates Stripe session, returns url+session_id"""
         # First create a booking
         schedule = booking_setup["schedule"]
-        seats = booking_setup["seats"]
+        booking_setup["seats"]
         
         # Lock new seats for this test
         sched_resp = api_client.get(f"{API_URL}/schedules/{schedule['id']}")
