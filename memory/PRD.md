@@ -119,6 +119,13 @@ Build a complete online bus booking system where visitors can search departure t
   - Frontend (`SeatSelection.jsx` + `index.css`): new bus-shell aesthetic — rounded windshield arc, driver steering-wheel icon, headrest-notched seat pills, aisle gap, EXIT door, "REAR · ENGINE" footer, hover-lift animation. Category-aware fill (adult = red, child = teal) so travellers see their mix at a glance. Supports 2+2 and 2+1 in one component.
   - Admin form replaced "Rows" input with "Total seats (capacity)" + inline hint explaining the layout mapping.
 
+## Implemented (2026-04-29) — New Header (Option A · Minimal + Avatar Dropdown)
+- Public nav trimmed from 6 items to **2** (Search · Feedback). All account actions consolidated into a single avatar pill on the top-right.
+- Avatar pill shows initials in a coloured circle (blue for passenger, red for admin) + first name + small ADMIN role tag for admins.
+- Click pill → dropdown menu: full name + email, then My Bookings · Security · 2FA · Change password, then Admin console (red, only for admins), then Log out. Click-outside and Escape close the menu. Fully keyboard accessible (`role=menu`, `aria-expanded`, `aria-haspopup`).
+- Mobile: avatar-only collapse — name + role tag hide below the `sm` breakpoint while the pill stays clickable.
+- Verified end-to-end: closed/open dropdown, all 5 menu items render, click-outside closes, Escape closes, mobile viewport collapses cleanly.
+
 ## Implemented (2026-04-29) — Last login banner + Password quick-link
 - Backend: `/api/auth/login` and `/api/auth/2fa/verify` now go through a shared `_record_login(user, ip)` helper that rotates `last_login_at`/`last_login_ip` → `previous_login_at`/`previous_login_ip` and writes the new values. Login fields no longer rotate on a failed 2FA attempt (pre-existing minor bug fixed in passing).
 - Frontend: new `<LastLoginBanner/>` on the user Dashboard shows "LAST SIGN-IN · 3 hr ago · from 203.0.113.42 · NOT YOU? CHANGE PASSWORD →". Hidden until the second login (no `previous_login_at`), bank-style.
