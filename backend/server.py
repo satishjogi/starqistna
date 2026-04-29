@@ -1477,14 +1477,29 @@ async def cancellation_quote(booking_id: str, user: dict = Depends(require_user)
     hours = _hours_to_departure(b)
     eligible = hours >= CANCEL_REFUND_THRESHOLD_HOURS
     pricing = b.get("pricing", {})
+
+    # Stripe charged in MYR — quote the refund in the actual billed currency
+    # so the customer sees on the modal what will appear on their statement.
+    refund_amount = 0.0
+    refund_currency = (pricing.get("currency") or "myr").upper()
+    if eligible and float(pricing.get("total", 0)) > 0:
+        txn = await db.payment_transactions.find_one(
+            {"booking_id": booking_id, "payment_status": "paid"},
+            sort=[("created_at", -1)],
+        )
+        if txn:
+            refund_amount = float(txn.get("amount", 0))
+            refund_currency = (txn.get("currency") or "myr").upper()
+        else:
+            refund_amount = float(pricing.get("total", 0))
     return {
         "booking_id": b["id"],
         "reference": b.get("reference"),
         "hours_to_departure": round(hours, 2),
         "threshold_hours": CANCEL_REFUND_THRESHOLD_HOURS,
         "refund_eligible": eligible,
-        "refund_amount": float(pricing.get("total", 0)) if eligible else 0.0,
-        "currency": (pricing.get("currency") or "myr").upper(),
+        "refund_amount": refund_amount,
+        "currency": refund_currency,
         "outcome": "full_refund" if eligible else "ticket_burned",
         "policy": "Free cancellation up to 24 hours before departure. Within 24 hours, the ticket is non-refundable.",
     }
@@ -1535,24 +1550,28 @@ async def cancel_booking(booking_id: str, user: dict = Depends(require_user)):
         )
         if not txn or not txn.get("session_id"):
             raise HTTPException(400, "No paid Stripe session found for this booking; cannot refund automatically.")
+        # Refund must use the actual amount + currency Stripe charged (MYR),
+        # NOT the booking's display total — which may be in SGD.
+        charged_amount = float(txn.get("amount", total))
+        charged_currency = (txn.get("currency") or "myr").upper()
         try:
             pi = await asyncio.to_thread(_stripe_get_payment_intent_sync, txn["session_id"])
             if not pi:
                 raise HTTPException(400, "Stripe session has no payment_intent yet.")
             # Stripe expects amounts in minor units (cents/sen)
-            amount_minor = int(round(total * 100))
+            amount_minor = int(round(charged_amount * 100))
             idem_key = f"refund:{booking_id}"
             refund = await asyncio.to_thread(_stripe_refund_sync, pi, amount_minor, idem_key)
             refund_info = {
                 "refunded": True,
-                "amount": total,
-                "currency": currency.upper(),
+                "amount": charged_amount,
+                "currency": charged_currency,
                 "stripe_refund_id": refund.get("id") if isinstance(refund, dict) else getattr(refund, "id", None),
             }
             await db.payment_transactions.update_one(
                 {"session_id": txn["session_id"]},
                 {"$set": {"payment_status": "refunded", "refunded_at": utcnow().isoformat(),
-                          "refund_amount": total, "refund_id": refund_info["stripe_refund_id"]}},
+                          "refund_amount": charged_amount, "refund_id": refund_info["stripe_refund_id"]}},
             )
         except HTTPException:
             raise
@@ -1685,13 +1704,28 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
     if booking["payment_status"] == "paid":
         raise HTTPException(400, "Booking already paid")
 
-    currency = booking["pricing"].get("currency", "myr")
-    available_ids = {o["id"] for o in _payment_options_for(currency) if o["available"]}
-    if body.gateway not in available_ids:
-        raise HTTPException(400, f"Payment method '{body.gateway}' is not available for {currency.upper()} bookings")
+    # Single Stripe account — Malaysia. Always bill in MYR regardless of where
+    # the trip departs from. Display currency on receipts can stay as-is (SGD
+    # for SG departures), but the actual charge is converted to MYR using the
+    # live sgd_to_myr_rate maintained in app settings.
+    BILLING_CURRENCY = "myr"
+    display_currency = (booking["pricing"].get("currency") or "myr").lower()
+    display_total = float(booking["pricing"]["total"])
+    if display_currency == BILLING_CURRENCY:
+        amount = display_total
+        fx_rate = 1.0
+    else:
+        # Currently we only support SGD → MYR. Anything else is misconfigured.
+        if display_currency != "sgd":
+            raise HTTPException(400, f"Cannot bill {display_currency.upper()} bookings — only MYR/SGD supported.")
+        settings = await _get_settings()
+        fx_rate = float(settings.get("sgd_to_myr_rate", DEFAULT_SGD_TO_MYR))
+        amount = round(display_total * fx_rate, 2)
 
-    # SERVER-SIDE amount (never trust frontend)
-    amount = float(booking["pricing"]["total"])
+    # Gateway availability is now driven by the BILLING currency, not display.
+    available_ids = {o["id"] for o in _payment_options_for(BILLING_CURRENCY) if o["available"]}
+    if body.gateway not in available_ids:
+        raise HTTPException(400, f"Payment method '{body.gateway}' is not available")
 
     host_url = str(request.base_url).rstrip("/")
     webhook_url = f"{host_url}/api/webhook/stripe"
@@ -1703,7 +1737,7 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
 
     checkout_req = CheckoutSessionRequest(
         amount=amount,
-        currency=currency,
+        currency=BILLING_CURRENCY,
         success_url=success_url,
         cancel_url=cancel_url,
         payment_methods=[body.gateway],  # card | grabpay | fpx
@@ -1712,6 +1746,9 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
             "booking_reference": booking["reference"],
             "user_id": booking.get("user_id") or "guest",
             "payment_method": body.gateway,
+            "display_currency": display_currency,
+            "display_total": str(display_total),
+            "fx_rate": str(fx_rate),
         },
     )
     session: CheckoutSessionResponse = await stripe_checkout.create_checkout_session(checkout_req)
@@ -1721,8 +1758,11 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
             "id": new_id(),
             "session_id": session.session_id,
             "booking_id": body.booking_id,
-            "amount": amount,
-            "currency": currency,
+            "amount": amount,                  # MYR — what Stripe actually charges
+            "currency": BILLING_CURRENCY,
+            "display_amount": display_total,   # original price as shown to customer
+            "display_currency": display_currency,
+            "fx_rate": fx_rate,
             "payment_method": body.gateway,
             "user_id": booking.get("user_id"),
             "user_email": booking["contact_email"],

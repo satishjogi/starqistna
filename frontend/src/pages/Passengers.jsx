@@ -39,14 +39,12 @@ export default function Passengers() {
   const [promoError, setPromoError] = useState("");
   const [promoLoading, setPromoLoading] = useState(false);
 
-  // Gateway selection — currency-aware, all via Stripe
-  const scheduleCurrency = (flow?.schedule?.currency || "myr").toLowerCase();
+  // All payments billed in MYR via a single Stripe (Malaysia) account, so all
+  // 3 methods are always available — even for Singapore-priced trips.
   const gatewayOptions = [
     { id: "card", name: "Credit / Debit Card", provider: "Stripe", methods: "Visa · Mastercard · Amex", available: true },
-    { id: "grabpay", name: "GrabPay", provider: "Stripe", methods: "GrabPay wallet", available: scheduleCurrency === "myr" || scheduleCurrency === "sgd" },
-    ...(scheduleCurrency === "myr"
-      ? [{ id: "fpx", name: "FPX Online Banking", provider: "Stripe", methods: "Maybank · CIMB · PBB · RHB · all MY banks", available: true }]
-      : []),
+    { id: "grabpay", name: "GrabPay", provider: "Stripe", methods: "GrabPay wallet", available: true },
+    { id: "fpx", name: "FPX Online Banking", provider: "Stripe", methods: "Maybank · CIMB · PBB · RHB · all MY banks", available: true },
   ];
   const [gateway, setGateway] = useState("card");
 
@@ -351,6 +349,11 @@ export default function Passengers() {
               {loading ? "Redirecting to payment…" : `Pay with ${(gatewayOptions.find((g) => g.id === gateway)?.name) || "Card"} →`}
             </button>
             <div className="text-[10px] font-mono text-zinc-500 mt-3 text-center">SECURE CHECKOUT · STRIPE</div>
+            {(s.currency || "myr").toLowerCase() === "sgd" && (
+              <div className="text-[10px] font-mono text-zinc-500 mt-1 text-center" data-testid="passengers-myr-billing-note">
+                CARD WILL BE CHARGED IN MYR · 1 SGD ≈ RM {Number(fxRate).toFixed(2)}
+              </div>
+            )}
           </div>
         </div>
       </form>

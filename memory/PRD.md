@@ -119,6 +119,15 @@ Build a complete online bus booking system where visitors can search departure t
   - Frontend (`SeatSelection.jsx` + `index.css`): new bus-shell aesthetic — rounded windshield arc, driver steering-wheel icon, headrest-notched seat pills, aisle gap, EXIT door, "REAR · ENGINE" footer, hover-lift animation. Category-aware fill (adult = red, child = teal) so travellers see their mix at a glance. Supports 2+2 and 2+1 in one component.
   - Admin form replaced "Rows" input with "Total seats (capacity)" + inline hint explaining the layout mapping.
 
+## Implemented (2026-04-29) — Single-currency Stripe billing (MYR)
+- `/api/payments/checkout` now **always bills in MYR** regardless of booking display currency. SGD bookings auto-convert at checkout time using the live `sgd_to_myr_rate` (default 3.50, editable in Admin → Add Schedule).
+- `payment_transactions` now stores both the MYR charged amount + the original display amount/currency + the fx rate used, so receipts and refunds remain accurate.
+- Cancellation refunds (`/api/bookings/{id}/cancel`) now use the **actual MYR amount Stripe charged** from `payment_transactions`, not the booking's display total — fixes the bug where SGD bookings would have refunded the wrong amount.
+- Cancellation quote endpoint also returns the real MYR refund amount so the modal shows what'll appear on the customer's statement.
+- All 3 payment methods (Card, GrabPay, FPX) now available regardless of display currency, since the actual charge is always MYR. FPX must still be activated in the merchant's Stripe Dashboard.
+- Frontend Passengers page shows a small note "CARD WILL BE CHARGED IN MYR · 1 SGD ≈ RM 3.50" below the secure-checkout label for SGD bookings.
+- Verified end-to-end: SGD 18 booking → Stripe session created in MYR 63.00 (1:3.5 conversion), display preserved as SGD.
+
 ## Implemented (2026-04-29) — New Header (Option A · Minimal + Avatar Dropdown)
 - Public nav trimmed from 6 items to **2** (Search · Feedback). All account actions consolidated into a single avatar pill on the top-right.
 - Avatar pill shows initials in a coloured circle (blue for passenger, red for admin) + first name + small ADMIN role tag for admins.
