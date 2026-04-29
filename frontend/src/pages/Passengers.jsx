@@ -349,11 +349,6 @@ export default function Passengers() {
               {loading ? "Redirecting to payment…" : `Pay with ${(gatewayOptions.find((g) => g.id === gateway)?.name) || "Card"} →`}
             </button>
             <div className="text-[10px] font-mono text-zinc-500 mt-3 text-center">SECURE CHECKOUT · STRIPE</div>
-            {(s.currency || "myr").toLowerCase() === "sgd" && (
-              <div className="text-[10px] font-mono text-zinc-500 mt-1 text-center" data-testid="passengers-myr-billing-note">
-                CARD WILL BE CHARGED IN MYR · 1 SGD ≈ RM {Number(fxRate).toFixed(2)}
-              </div>
-            )}
           </div>
         </div>
       </form>
