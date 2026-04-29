@@ -14,10 +14,13 @@ import logging
 import uuid
 import asyncio
 import hashlib
+import re
 import secrets
 import bcrypt
 import jwt
 import pyotp
+from functools import lru_cache
+from cachetools import TTLCache
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from typing import List, Optional, Literal
@@ -50,6 +53,11 @@ JWT_ALG = os.environ.get("JWT_ALGORITHM", "HS256")
 JWT_EXPIRE_HOURS = int(os.environ.get("JWT_EXPIRE_HOURS", "168"))
 STRIPE_API_KEY = os.environ["STRIPE_API_KEY"]
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+BOOTSTRAP_ADMIN_PASSWORD = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD", "").strip()
+if not BOOTSTRAP_ADMIN_PASSWORD:
+    raise RuntimeError(
+        "BOOTSTRAP_ADMIN_PASSWORD env var is required. Set a strong password in backend/.env"
+    )
 
 app = FastAPI(title="Transit E1 - Bus Booking API")
 api = APIRouter(prefix="/api")
@@ -57,6 +65,13 @@ bearer = HTTPBearer(auto_error=False)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("transit")
+
+# In-process TTL caches (single-instance VPS friendly).
+# When we move to multi-worker, swap the backing store for Redis using the same
+# get/set pattern.
+_terminals_cache: TTLCache = TTLCache(maxsize=8, ttl=300)   # 5 min
+_popular_cache: TTLCache = TTLCache(maxsize=8, ttl=30)      # 30 sec
+_settings_cache: TTLCache = TTLCache(maxsize=2, ttl=60)     # 1 min
 
 
 # ---------- Helpers ----------
@@ -463,22 +478,35 @@ class BoardingValidateBody(BaseModel):
 # ---------- Search & Terminals ----------
 @api.get("/terminals")
 async def list_terminals(q: Optional[str] = None):
+    # Cache the unfiltered list (hot path on every search page).
+    cache_key = "all"
     query = {}
     if q:
+        # Escape user input to prevent ReDoS / regex injection. Cap length to
+        # protect against pathological patterns and DB load.
+        safe_q = re.escape(q.strip()[:64])
         query = {
             "$or": [
-                {"city": {"$regex": q, "$options": "i"}},
-                {"name": {"$regex": q, "$options": "i"}},
-                {"code": {"$regex": q, "$options": "i"}},
+                {"city": {"$regex": safe_q, "$options": "i"}},
+                {"name": {"$regex": safe_q, "$options": "i"}},
+                {"code": {"$regex": safe_q, "$options": "i"}},
             ]
         }
+        cache_key = None  # don't cache filtered results
+
+    if cache_key and cache_key in _terminals_cache:
+        return _terminals_cache[cache_key]
+
     terminals = await db.terminals.find(query, {"_id": 0}).sort("city", 1).to_list(500)
     # Group by city for UI
     by_city: dict = {}
     for t in terminals:
         by_city.setdefault(t["city"], []).append(t)
     grouped = [{"city": city, "terminals": sorted(items, key=lambda x: x["name"])} for city, items in sorted(by_city.items())]
-    return {"grouped": grouped, "all": terminals}
+    payload = {"grouped": grouped, "all": terminals}
+    if cache_key:
+        _terminals_cache[cache_key] = payload
+    return payload
 
 
 @api.get("/search")
@@ -508,12 +536,17 @@ async def search_schedules(
     from_term = await db.terminals.find_one({"id": from_terminal_id}, {"_id": 0})
     to_term = await db.terminals.find_one({"id": to_terminal_id}, {"_id": 0})
 
-    # Add booked seat counts
-    for s in schedules:
-        booked_count = await db.seat_locks.count_documents(
-            {"schedule_id": s["id"], "status": {"$in": ["locked", "booked"]}}
-        )
-        s["seats_available"] = s["total_seats"] - booked_count
+    # Single aggregation for booked-seat counts across ALL schedules in this result.
+    # Replaces an N+1 pattern (1 count_documents per schedule) with one round-trip.
+    if schedules:
+        sched_ids = [s["id"] for s in schedules]
+        pipeline = [
+            {"$match": {"schedule_id": {"$in": sched_ids}, "status": {"$in": ["locked", "booked"]}}},
+            {"$group": {"_id": "$schedule_id", "count": {"$sum": 1}}},
+        ]
+        counts = {row["_id"]: row["count"] async for row in db.seat_locks.aggregate(pipeline)}
+        for s in schedules:
+            s["seats_available"] = s["total_seats"] - counts.get(s["id"], 0)
 
     return {
         "from": from_term,
@@ -544,7 +577,15 @@ async def popular_now(limit: int = 6):
     For each pair we pick the soonest upcoming schedule (today or next few days),
     enrich with terminals + seats-available + pricing. Uses local Malaysia/Singapore
     time (UTC+8) because schedule `departure_time` is stored as local HH:MM.
+
+    Cached for 30 seconds — countdowns are computed client-side anyway, and seat
+    counts on this cosmetic widget can lag a few seconds without harm.
     """
+    limit = max(1, min(limit, 12))
+    cache_key = f"limit:{limit}"
+    if cache_key in _popular_cache:
+        return _popular_cache[cache_key]
+
     local_tz = timezone(timedelta(hours=8))
     now_local = datetime.now(local_tz)
     now_utc = datetime.now(timezone.utc)
@@ -631,7 +672,9 @@ async def popular_now(limit: int = 6):
             x.get("minutes_until_departure") if x.get("minutes_until_departure") is not None else 10**9,
         )
     )
-    return {"generated_at": now_utc.isoformat(), "items": suggestions[: max(1, min(limit, 12))]}
+    payload = {"generated_at": now_utc.isoformat(), "items": suggestions[:limit]}
+    _popular_cache[cache_key] = payload
+    return payload
 
 
 @api.get("/schedules/{schedule_id}")
@@ -1299,18 +1342,45 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
 @api.get("/bookings/me")
 async def my_bookings(user: dict = Depends(require_user)):
     items = await db.bookings.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    if not items:
+        return items
+    # Batch-fetch all referenced terminals in a single query (replaces N+1 lookups).
+    term_ids = {b["from_terminal_id"] for b in items} | {b["to_terminal_id"] for b in items}
+    terms = {
+        t["id"]: t
+        async for t in db.terminals.find({"id": {"$in": list(term_ids)}}, {"_id": 0})
+    }
     for b in items:
-        b["from"] = await db.terminals.find_one({"id": b["from_terminal_id"]}, {"_id": 0})
-        b["to"] = await db.terminals.find_one({"id": b["to_terminal_id"]}, {"_id": 0})
+        b["from"] = terms.get(b["from_terminal_id"])
+        b["to"] = terms.get(b["to_terminal_id"])
     return items
 
 
 @api.get("/bookings/{booking_id}")
-async def get_booking(booking_id: str, user: Optional[dict] = Depends(current_user)):
+async def get_booking(
+    booking_id: str,
+    email: Optional[str] = None,
+    user: Optional[dict] = Depends(current_user),
+):
+    """Allow:
+      - the booking owner (authenticated user_id match)
+      - any admin
+      - a guest who knows id + the contact_email used at checkout (?email=)
+    """
     b = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
     if not b:
         raise HTTPException(404, "Booking not found")
-    # allow: owner, admin, or guest who knows the id+email (for confirmation)
+
+    is_owner = bool(user and b.get("user_id") and user.get("id") == b["user_id"])
+    is_admin = bool(user and user.get("is_admin"))
+    is_guest_match = bool(
+        email
+        and b.get("contact_email")
+        and email.strip().lower() == b["contact_email"].strip().lower()
+    )
+    if not (is_owner or is_admin or is_guest_match):
+        raise HTTPException(403, "You don't have access to this booking")
+
     b["from"] = await db.terminals.find_one({"id": b["from_terminal_id"]}, {"_id": 0})
     b["to"] = await db.terminals.find_one({"id": b["to_terminal_id"]}, {"_id": 0})
     b["schedule"] = await db.schedules.find_one({"id": b["schedule_id"]}, {"_id": 0})
@@ -1476,6 +1546,7 @@ async def cancel_booking(booking_id: str, user: dict = Depends(require_user)):
 
 
 # ---------- Payments (Stripe) ----------
+@lru_cache(maxsize=8)
 def _payment_options_for(currency: str) -> list:
     """Return list of payment method options based on currency.
     All methods are processed through Stripe using the same merchant account.
@@ -1483,6 +1554,7 @@ def _payment_options_for(currency: str) -> list:
     - Card: universal (Visa/Mastercard/Amex) — all currencies
     - GrabPay: MY + SG markets (MYR, SGD)
     - FPX: MY online banking (MYR only)
+    Cached because (a) input space is tiny (myr/sgd/usd) and (b) result is read-only.
     """
     c = (currency or "myr").lower()
     opts = [
@@ -1516,10 +1588,25 @@ def _payment_options_for(currency: str) -> list:
 
 
 @api.get("/payments/options/{booking_id}")
-async def payment_options(booking_id: str):
+async def payment_options(
+    booking_id: str,
+    email: Optional[str] = None,
+    user: Optional[dict] = Depends(current_user),
+):
     booking = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
     if not booking:
         raise HTTPException(404, "Booking not found")
+
+    is_owner = bool(user and booking.get("user_id") and user.get("id") == booking["user_id"])
+    is_admin = bool(user and user.get("is_admin"))
+    is_guest_match = bool(
+        email
+        and booking.get("contact_email")
+        and email.strip().lower() == booking["contact_email"].strip().lower()
+    )
+    if not (is_owner or is_admin or is_guest_match):
+        raise HTTPException(403, "You don't have access to this booking")
+
     currency = booking.get("pricing", {}).get("currency", "myr")
     return {
         "booking_id": booking_id,
@@ -1650,8 +1737,10 @@ async def _finalize_booking(booking_id: str, session_id: str):
     )
     # Fire-and-forget email delivery
     if booking:
-        from_term = await db.terminals.find_one({"id": booking.get("from_terminal_id")}, {"_id": 0})
-        to_term = await db.terminals.find_one({"id": booking.get("to_terminal_id")}, {"_id": 0})
+        from_term, to_term = await asyncio.gather(
+            db.terminals.find_one({"id": booking.get("from_terminal_id")}, {"_id": 0}),
+            db.terminals.find_one({"id": booking.get("to_terminal_id")}, {"_id": 0}),
+        )
         asyncio.create_task(send_booking_confirmation(booking, from_term, to_term))
 
 
@@ -1694,12 +1783,20 @@ async def stripe_webhook(request: Request):
 # ---------- Admin ----------
 @api.get("/admin/stats")
 async def admin_stats(user: dict = Depends(require_admin)):
+    # Run all 5 counts concurrently — ~5× faster than sequential awaits.
+    users_n, bookings_n, confirmed_n, terminals_n, schedules_n = await asyncio.gather(
+        db.users.count_documents({}),
+        db.bookings.count_documents({}),
+        db.bookings.count_documents({"status": "confirmed"}),
+        db.terminals.count_documents({}),
+        db.schedules.count_documents({}),
+    )
     return {
-        "users": await db.users.count_documents({}),
-        "bookings": await db.bookings.count_documents({}),
-        "confirmed_bookings": await db.bookings.count_documents({"status": "confirmed"}),
-        "terminals": await db.terminals.count_documents({}),
-        "schedules": await db.schedules.count_documents({}),
+        "users": users_n,
+        "bookings": bookings_n,
+        "confirmed_bookings": confirmed_n,
+        "terminals": terminals_n,
+        "schedules": schedules_n,
     }
 
 
@@ -1764,7 +1861,8 @@ async def admin_audit_logs(
     if action and action != "all":
         query["action"] = action
     if actor_email:
-        query["actor_email"] = {"$regex": actor_email, "$options": "i"}
+        safe_email = re.escape(actor_email.strip()[:120])
+        query["actor_email"] = {"$regex": safe_email, "$options": "i"}
     limit = max(1, min(limit, 1000))
     items = await db.audit_logs.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
     return {"total": len(items), "items": items}
@@ -2025,8 +2123,12 @@ async def _get_settings() -> dict:
 @api.get("/settings")
 async def public_settings():
     """Public — used by the frontend to compute the bracketed MYR approx for SGD trips."""
+    if "global" in _settings_cache:
+        return _settings_cache["global"]
     s = await _get_settings()
-    return {"sgd_to_myr_rate": s.get("sgd_to_myr_rate", DEFAULT_SGD_TO_MYR)}
+    payload = {"sgd_to_myr_rate": s.get("sgd_to_myr_rate", DEFAULT_SGD_TO_MYR)}
+    _settings_cache["global"] = payload
+    return payload
 
 
 @api.patch("/admin/settings")
@@ -2036,6 +2138,7 @@ async def update_settings(body: AppSettingsBody, request: Request, user: dict = 
         {"$set": {"sgd_to_myr_rate": body.sgd_to_myr_rate, "updated_at": utcnow().isoformat()}},
         upsert=True,
     )
+    _settings_cache.pop("global", None)  # bust cache so next /settings reads fresh
     await log_audit(user, "update", "settings", "global",
                     {"sgd_to_myr_rate": body.sgd_to_myr_rate}, request)
     return {"ok": True, "sgd_to_myr_rate": body.sgd_to_myr_rate}
@@ -2124,11 +2227,18 @@ async def admin_list_feedback(
     if category and category != "all":
         query["category"] = category
     items = await db.feedback.find(query, {"_id": 0}).sort("created_at", -1).to_list(500)
+    # Run summary counts concurrently
+    total_n, new_n, prog_n, done_n = await asyncio.gather(
+        db.feedback.count_documents({}),
+        db.feedback.count_documents({"status": "new"}),
+        db.feedback.count_documents({"status": "in_progress"}),
+        db.feedback.count_documents({"status": "resolved"}),
+    )
     summary = {
-        "total": await db.feedback.count_documents({}),
-        "new": await db.feedback.count_documents({"status": "new"}),
-        "in_progress": await db.feedback.count_documents({"status": "in_progress"}),
-        "resolved": await db.feedback.count_documents({"status": "resolved"}),
+        "total": total_n,
+        "new": new_n,
+        "in_progress": prog_n,
+        "resolved": done_n,
     }
     return {"summary": summary, "items": items}
 
@@ -2232,6 +2342,7 @@ async def admin_create_terminal(body: TerminalCreateBody, request: Request, user
     }
     await db.terminals.insert_one(doc)
     doc.pop("_id", None)
+    _terminals_cache.clear()  # bust cache so /api/terminals reflects the new row
     await log_audit(user, "create", "terminal", doc["id"],
                     {"code": doc["code"], "city": doc["city"], "name": doc["name"]}, request)
     return doc
@@ -2250,6 +2361,7 @@ async def admin_update_terminal(terminal_id: str, body: TerminalUpdateBody, requ
     result = await db.terminals.update_one({"id": terminal_id}, {"$set": updates})
     if result.matched_count == 0:
         raise HTTPException(404, "Terminal not found")
+    _terminals_cache.clear()
     updated = await db.terminals.find_one({"id": terminal_id}, {"_id": 0})
     await log_audit(user, "update", "terminal", terminal_id, {"changes": updates}, request)
     return updated
@@ -2267,6 +2379,7 @@ async def admin_delete_terminal(terminal_id: str, request: Request, user: dict =
     result = await db.terminals.delete_one({"id": terminal_id})
     if result.deleted_count == 0:
         raise HTTPException(404, "Terminal not found")
+    _terminals_cache.clear()
     await log_audit(user, "delete", "terminal", terminal_id,
                     {"code": (existing or {}).get("code"), "city": (existing or {}).get("city")}, request)
     return {"deleted": True}
@@ -2649,14 +2762,15 @@ async def _seed_admin():
             "email": "admin@starqistna.com",
             "full_name": "Star Qistna Admin",
             "phone": "+60123456789",
-            "password_hash": hash_password("Admin@123"),
+            "password_hash": hash_password(BOOTSTRAP_ADMIN_PASSWORD),
             "is_admin": True,
             "role": "super_admin",
             "is_active": True,
+            "must_change_password": True,
             "created_at": utcnow().isoformat(),
         }
     )
-    logger.info("Seeded bootstrap super-admin admin@starqistna.com / Admin@123")
+    logger.info("Seeded bootstrap super-admin (email: admin@starqistna.com). Change password on first login.")
 
 
 async def _seed_promos():
@@ -2689,9 +2803,12 @@ async def _ensure_indexes():
     await db.users.create_index([("email", ASCENDING)], unique=True)
     await db.bookings.create_index([("user_id", ASCENDING)])
     await db.bookings.create_index([("reference", ASCENDING)], unique=True)
+    await db.bookings.create_index([("created_at", -1)])
+    await db.bookings.create_index([("status", ASCENDING)])
     await db.terminals.create_index([("city", ASCENDING)])
     await db.schedules.create_index(
-        [("from_terminal_id", ASCENDING), ("to_terminal_id", ASCENDING), ("departure_date", ASCENDING)]
+        [("from_terminal_id", ASCENDING), ("to_terminal_id", ASCENDING),
+         ("departure_date", ASCENDING), ("departure_time", ASCENDING)]
     )
     await db.payment_transactions.create_index([("session_id", ASCENDING)], unique=True)
     await db.promo_codes.create_index([("code", ASCENDING)], unique=True)
@@ -2738,7 +2855,10 @@ app.include_router(api)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
+    # We authenticate with Bearer JWTs (not cookies), so allow_credentials=False
+    # keeps us safe with allow_origins='*' for dev. In production, lock
+    # CORS_ORIGINS to your domain(s) and you can flip credentials on if needed.
+    allow_credentials=False,
     allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
     allow_methods=["*"],
     allow_headers=["*"],

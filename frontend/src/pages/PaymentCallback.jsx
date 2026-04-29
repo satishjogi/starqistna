@@ -101,7 +101,13 @@ export default function PaymentCallback() {
           <ReturnUpsell booking={booking} />
 
           <div className="mt-8 flex gap-3 flex-wrap">
-            <Link to={`/bookings/${booking.id}`} className="te-btn-primary" data-testid="view-booking-btn">View booking</Link>
+            <Link
+              to={`/bookings/${booking.id}${booking.user_id ? "" : `?email=${encodeURIComponent(booking.contact_email || "")}`}`}
+              className="te-btn-primary"
+              data-testid="view-booking-btn"
+            >
+              View booking
+            </Link>
             <Link to="/" className="te-btn-outline">Back home</Link>
           </div>
         </div>

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { QRCodeSVG } from "qrcode.react";
 import api from "../lib/api";
 import CancelBookingButton from "../components/CancelBookingButton";
@@ -11,15 +11,20 @@ function fmtPrice(v, ccy = "myr") {
 
 export default function BookingDetail() {
   const { id } = useParams();
+  const [searchParams] = useSearchParams();
+  const guestEmail = searchParams.get("email") || "";
   const [b, setB] = useState(null);
   const [err, setErr] = useState("");
 
+  // Guests pass ?email=… so the backend can verify ownership without auth.
+  const url = guestEmail ? `/bookings/${id}?email=${encodeURIComponent(guestEmail)}` : `/bookings/${id}`;
+
   useEffect(() => {
-    api.get(`/bookings/${id}`).then(({ data }) => setB(data)).catch((e) => setErr(e?.response?.data?.detail || "Failed to load booking"));
-  }, [id]);
+    api.get(url).then(({ data }) => setB(data)).catch((e) => setErr(e?.response?.data?.detail || "Failed to load booking"));
+  }, [url]);
 
   const reload = () => {
-    api.get(`/bookings/${id}`).then(({ data }) => setB(data)).catch(() => {});
+    api.get(url).then(({ data }) => setB(data)).catch(() => {});
   };
 
   if (err) return <div className="p-10 text-red-600">{err}</div>;

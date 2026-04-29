@@ -1,0 +1,45 @@
+{
+  "summary": "Day-1 security + perf audit regression. 32/32 new audit tests pass + 12/12 pre-existing cancel tests still pass. Frontend smoke: all 9 admin lazy tabs render correct panels; Dashboard renders Upcoming/Past/Cancelled tabs with counts. No regressions found. C1/C2/C3/C4/H1/H4/H2/H5/M1/M3 all verified.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Admin > Add Schedule (and other forms with terminal <select>)", "issues": ["React hydration warning: '<span> cannot be a child of <option>'. Caused by emergent instrumentation injecting <span data-ve-dynamic> inside <option> children. Cosmetic console warning only — dropdowns still function. Not introduced by this audit batch but still worth noting."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_audit_day1.py",
+    "/app/backend/tests/test_cancel_booking.py",
+    "/app/test_reports/pytest/iteration11_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "C1 JWT rotation verified: tokens forged with old placeholder secret 'change-me-in-production-...' return 401 on /auth/me; new login → /auth/me 200.",
+    "C2 verified at curl + test level: /api/health response has NO 'Access-Control-Allow-Credentials: true' header; bearer-token cross-origin still works.",
+    "C3 verified: backend logs grep for literal 'Admin@123' returns 0 matches; admin login still succeeds (BOOTSTRAP_ADMIN_PASSWORD env in .env preserves bootstrap behaviour).",
+    "C4 ownership: GET /api/bookings/{id} correctly returns 200 for owner, 200 for admin, 200 for guest with matching ?email=, 403 for non-owner authed user, 403 for guest with wrong email, 403 for guest with no email — all 6 cases pass.",
+    "H1 ReDoS-safe: re.escape() applied at server.py:487 (terminals) and audit-logs path. Tested with .*(.*).* / ^(a+)+$ / (((((((((a))))))))).* / [invalid — all return 200 quickly (<1s).",
+    "H4 /api/payments/options/{id} now correctly enforces auth/email — was previously open. 5/5 access-control test cases pass.",
+    "Perf H5 cache verified: back-to-back /api/popular/now returns identical 'generated_at' (within 30s TTL window).",
+    "Perf H2 search aggregation works: schedules array each carry seats_available within [0, total_seats].",
+    "Perf M1 /api/bookings/me: from/to terminal objects populated via single batched query (server.py:1348-1352).",
+    "Perf M3 /api/admin/stats and /api/admin/feedback shapes intact (users/bookings/confirmed_bookings/terminals/schedules and summary{total,new,in_progress,resolved}+items[]).",
+    "Cancellation regression: /api/bookings/{id}/cancellation-quote returns 401 unauthed and 403 for non-owner — verified with both pre-existing test_cancel_booking.py and new test_audit_day1.py cases.",
+    "Frontend: PaymentCallback.jsx line 105 correctly appends ?email=<contact_email> to /bookings/{id} link only when booking.user_id is null — verified by code inspection.",
+    "Frontend: BookingDetail.jsx now reads ?email= from URL for guest access (verified by C4 guest test passing through same backend endpoint).",
+    "Frontend: Admin.jsx all 9 React.lazy tabs (bookings/payments/schedules/add-schedule/terminals/promo-codes/feedback/audit-log/admins) load on demand and render their data-testid panels with no console errors except known instrumentation warning.",
+    "Frontend: Dashboard renders /dashboard with 3 stat cards + tabs (Upcoming/Past/Cancelled) + correct counts. Tab testids are 'bookings-tab-{upcoming|past|cancelled}' (not 'dashboard-tab-*').",
+    "Code quality (carried over): server.py is 2884 lines — recommend splitting into routers (auth/bookings/admin/payments) per <700-line guideline."
+  ],
+  "updated_files": ["/app/backend/tests/test_audit_day1.py"],
+  "success_rate": {
+    "backend": "100% (32/32 audit tests + 12/12 cancellation regression tests = 44/44)",
+    "frontend": "100% (all 9 admin lazy tabs render their data-testid panels; Dashboard renders with tabs + counts)"
+  },
+  "test_credentials": "Admin: admin@starqistna.com / Admin@123. Test users created with TEST_audit_a_*/TEST_audit_b_*@test.com prefix; seeded bookings prefixed TEST_AUDIT_* with random refs (TA*/TG*) — not auto-cleaned (need teardown enhancement) but use unique uuids so no collisions across runs.",
+  "seed_data_creation": "test_audit_day1.py seeds 2 confirmed bookings per session (one user-owned, one guest with contact_email='guest_buyer@example.com') via pymongo and cleans them up in fixture teardown. Test users created via /api/auth/register (cleanup not implemented — emails are unique per run).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Audit Day-1 batch fully verified. Reusable: /app/backend/tests/test_audit_day1.py (32 tests covering C1/C2/C3/C4/H1/H4/H2/H5/M1/M3 + cancel-quote regression). The test_audit_day1.py register fixture sends BOTH 'full_name' and 'name' fields because backend RegisterBody requires 'full_name'. Dashboard tabs use testid 'bookings-tab-{id}' not 'dashboard-tab-{id}' — note for any future Dashboard playwright tests. JWT_SECRET in .env: 3898e5b1...0903768 (128-char hex, post-rotation). BOOTSTRAP_ADMIN_PASSWORD=Admin@123 is set in env. CORS_ORIGINS='*' but allow_credentials=False — verified."
+}
