@@ -27,7 +27,7 @@ export default function Login() {
       } else {
         localStorage.setItem("te_token", data.access_token);
         await refresh();
-        navigate("/dashboard");
+        navigate(data.user?.must_change_password ? "/change-password" : "/dashboard");
       }
     } catch (e) {
       setError(e?.response?.data?.detail || "Login failed");
@@ -44,7 +44,7 @@ export default function Login() {
       const { data } = await api.post("/auth/2fa/verify", { challenge_token: challenge, code });
       localStorage.setItem("te_token", data.access_token);
       await refresh();
-      navigate("/dashboard");
+      navigate(data.user?.must_change_password ? "/change-password" : "/dashboard");
     } catch (e) {
       setError(e?.response?.data?.detail || "Invalid code");
     } finally {

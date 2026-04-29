@@ -24,6 +24,8 @@ import Terms from "./pages/Terms";
 import Privacy from "./pages/Privacy";
 import Refund from "./pages/Refund";
 import Security from "./pages/Security";
+import ChangePassword from "./pages/ChangePassword";
+import ForcePasswordChangeGate from "./components/ForcePasswordChangeGate";
 import { Toaster } from "sonner";
 
 function Layout({ children }) {
@@ -40,6 +42,7 @@ export default function App() {
   return (
     <AuthProvider>
       <BrowserRouter>
+        <ForcePasswordChangeGate />
         <Layout>
           <Routes>
             <Route path="/" element={<Home />} />
@@ -62,6 +65,7 @@ export default function App() {
             <Route path="/privacy" element={<Privacy />} />
             <Route path="/refund" element={<Refund />} />
             <Route path="/security" element={<Security />} />
+            <Route path="/change-password" element={<ChangePassword />} />
           </Routes>
         </Layout>
         <Toaster richColors position="top-right" />

@@ -992,6 +992,45 @@ async def me(user: dict = Depends(require_user)):
     return user
 
 
+class ChangePasswordBody(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8)
+
+
+@api.post("/auth/change-password")
+async def change_password(body: ChangePasswordBody, user: dict = Depends(require_user)):
+    """Authenticated user changes their own password.
+    - Verifies current password (constant-time bcrypt check)
+    - Enforces strength policy on the new password
+    - Disallows reusing the current password
+    - Clears the `must_change_password` flag on success
+    """
+    full = await db.users.find_one({"id": user["id"]})
+    if not full or not full.get("password_hash"):
+        raise HTTPException(400, "This account has no password set.")
+
+    if not verify_password(body.current_password, full["password_hash"]):
+        raise HTTPException(401, "Current password is incorrect.")
+
+    if body.current_password == body.new_password:
+        raise HTTPException(400, "New password must be different from the current one.")
+
+    _validate_password_strength(body.new_password)
+
+    new_hash = hash_password(body.new_password)
+    await db.users.update_one(
+        {"id": user["id"]},
+        {
+            "$set": {
+                "password_hash": new_hash,
+                "password_changed_at": utcnow().isoformat(),
+            },
+            "$unset": {"must_change_password": ""},
+        },
+    )
+    return {"ok": True, "message": "Password updated. Please use the new password from now on."}
+
+
 # ---------- Google Social Login (Emergent-managed) ----------
 # REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
 class GoogleSessionBody(BaseModel):

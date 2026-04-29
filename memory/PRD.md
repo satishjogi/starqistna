@@ -119,6 +119,14 @@ Build a complete online bus booking system where visitors can search departure t
   - Frontend (`SeatSelection.jsx` + `index.css`): new bus-shell aesthetic — rounded windshield arc, driver steering-wheel icon, headrest-notched seat pills, aisle gap, EXIT door, "REAR · ENGINE" footer, hover-lift animation. Category-aware fill (adult = red, child = teal) so travellers see their mix at a glance. Supports 2+2 and 2+1 in one component.
   - Admin form replaced "Rows" input with "Total seats (capacity)" + inline hint explaining the layout mapping.
 
+## Implemented (2026-04-29) — Forced password change on first login
+- New `POST /api/auth/change-password` endpoint: verifies current password, enforces strength, blocks reuse, clears `must_change_password` flag.
+- New `/change-password` route + `<ChangePassword/>` page with strength meter, match check, and helpful "first-time login" notice when forced.
+- New `<ForcePasswordChangeGate/>` component wrapping the router: any authed user with `must_change_password=true` is locked into `/change-password` until they change it (escape hatch: log out).
+- Login & 2FA flows updated to route to `/change-password` directly when the flag is set (no flash through `/dashboard`).
+- Bootstrap admin (`admin@starqistna.com`) is seeded with `must_change_password=true` so the first ever login is forced through the new password screen.
+- Verified end-to-end via Playwright: login → `/change-password` → escape attempt to `/admin` bounces back → set `NewStr0ngPass!2026` → land on `/admin` → logout → re-login with new password → straight to `/dashboard` with no redirect.
+
 ## Implemented (2026-04-29) — Security & Performance Audit (Day 1)
 - **🔴 Security blockers fixed:**
   - **C1** JWT_SECRET rotated from placeholder string to a 128-char hex random. Old tokens auto-invalidated.
