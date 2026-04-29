@@ -257,14 +257,9 @@ export default function Passengers() {
             <div className="flex items-center justify-between mb-3">
               <div className="te-overline">Payment method</div>
               <div className="text-[10px] font-mono font-bold bg-black text-white px-2 py-1 tracking-wider" data-testid="currency-badge">
-                BILLED IN {scheduleCurrency.toUpperCase()}
+                BILLED IN MYR
               </div>
             </div>
-            {scheduleCurrency === "sgd" && (
-              <div className="text-xs text-zinc-600 mb-3">
-                Singapore-boarding tickets are billed in Singapore Dollars (SGD).
-              </div>
-            )}
             <div className="space-y-2">
               {gatewayOptions.map((g) => {
                 const selected = gateway === g.id && g.available;
