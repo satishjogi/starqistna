@@ -16,8 +16,8 @@ const AuditLogTab = lazy(() => import("./admin/tabs/AuditLogTab"));
 const AdminsTab = lazy(() => import("./admin/tabs/AdminsTab"));
 
 const TABS = [
-  "bookings", "payments", "schedules", "add-schedule",
-  "terminals", "promo-codes", "feedback", "audit-log", "admins",
+  "add-schedule", "admins", "audit-log", "bookings", "feedback",
+  "payments", "promo-codes", "schedules", "terminals",
 ];
 
 function TabFallback() {
