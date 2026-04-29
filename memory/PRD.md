@@ -119,6 +119,27 @@ Build a complete online bus booking system where visitors can search departure t
   - Frontend (`SeatSelection.jsx` + `index.css`): new bus-shell aesthetic — rounded windshield arc, driver steering-wheel icon, headrest-notched seat pills, aisle gap, EXIT door, "REAR · ENGINE" footer, hover-lift animation. Category-aware fill (adult = red, child = teal) so travellers see their mix at a glance. Supports 2+2 and 2+1 in one component.
   - Admin form replaced "Rows" input with "Total seats (capacity)" + inline hint explaining the layout mapping.
 
+## Implemented (2026-04-29) — Security & Performance Audit (Day 1)
+- **🔴 Security blockers fixed:**
+  - **C1** JWT_SECRET rotated from placeholder string to a 128-char hex random. Old tokens auto-invalidated.
+  - **C2** CORS misconfiguration fixed: `allow_credentials=False` (we use Bearer tokens, not cookies). Closes the cross-origin token-theft hole.
+  - **C3** Bootstrap admin password moved to `BOOTSTRAP_ADMIN_PASSWORD` env var. No more plaintext password in startup logs. New admin accounts get `must_change_password=True` flag (UI hook deferred).
+  - **C4** `GET /api/bookings/{id}` now enforces ownership: owner OR admin OR guest with matching `?email=` query (matches `contact_email`). PaymentCallback's "View booking" link auto-appends `?email=` for guest checkouts. BookingDetail reads it from URL.
+- **🟠 P1 hardening:**
+  - **H1** ReDoS / regex injection fixed in `/api/terminals?q=` and `/api/admin/audit-logs?actor_email=` via `re.escape()` + length cap.
+  - **H2** `/api/search` N+1 → single aggregation pipeline (`$group $in $sum`). 200 round-trips → 1.
+  - **H4** `/api/payments/options/{id}` now requires auth or matching `?email=` (was open).
+  - **H5** `/api/popular/now` cached for 30s in-memory (TTLCache). 16+ DB queries → 0 on cache hit.
+- **🟡 P2 perf:**
+  - **M1** `/api/bookings/me` terminal lookups → single `$in` batch.
+  - **M2** `_finalize_booking` terminal lookups parallelised via `asyncio.gather`.
+  - **M3** `/api/admin/stats` (5 counts) and `/api/admin/feedback` (4 counts) parallelised via `asyncio.gather` (~5× faster).
+  - `_payment_options_for(currency)` wrapped in `@lru_cache` (tiny input space, read-only).
+  - `/api/terminals` (no `q`) cached 5min, busted on terminal create/update/delete.
+  - `/api/settings` cached 1min, busted on `update_settings`.
+- **M8** New indexes: `bookings.created_at`, `bookings.status`, schedules compound extended to include `departure_time`.
+- Verified: 44/44 backend tests pass (32 new audit + 12 cancellation regression). All 9 admin lazy tabs + Dashboard tabs render correctly. CORS preflight no longer emits credentials header. JWT rotation breaks old tokens as intended.
+
 ## Implemented (2026-04-27)
 - **Dashboard "My cancellations" filter** — Dashboard now separates bookings into three tabs: **Upcoming · Past · Cancelled**, each with its own count badge. Cancelled bookings (status `cancelled_refunded` or `cancelled_burned`) are pulled out of the date-based upcoming/past split so they don't clutter live trips. Stats row updated to 4 cards (Upcoming / Past / Cancelled in signal-red / "Plan a trip" CTA). Verified via Playwright: all 3 tabs switch and render their respective list panels.
 - **Admin.jsx refactor + lazy loading** — split the 1,137-line monolith into a slim shell + 9 self-contained tab components under `/app/frontend/src/pages/admin/tabs/` (`BookingsTab`, `PaymentsTab`, `SchedulesTab`, `AddScheduleTab`, `TerminalsTab`, `PromoCodesTab`, `FeedbackTab`, `AuditLogTab`, `AdminsTab`). Each tab owns its own data fetching, local form state, and event handlers. Now wrapped in `React.lazy` + `Suspense` so each tab's JS chunk only downloads when its tab is clicked — initial admin bundle is much smaller. All `data-testid` attributes preserved.
