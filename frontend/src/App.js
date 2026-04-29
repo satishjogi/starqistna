@@ -25,6 +25,7 @@ import Privacy from "./pages/Privacy";
 import Refund from "./pages/Refund";
 import Security from "./pages/Security";
 import ChangePassword from "./pages/ChangePassword";
+import HeaderPreview from "./pages/HeaderPreview";
 import ForcePasswordChangeGate from "./components/ForcePasswordChangeGate";
 import { Toaster } from "sonner";
 
@@ -66,6 +67,7 @@ export default function App() {
             <Route path="/refund" element={<Refund />} />
             <Route path="/security" element={<Security />} />
             <Route path="/change-password" element={<ChangePassword />} />
+            <Route path="/header-preview" element={<HeaderPreview />} />
           </Routes>
         </Layout>
         <Toaster richColors position="top-right" />
