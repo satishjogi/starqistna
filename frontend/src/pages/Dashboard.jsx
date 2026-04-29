@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import api from "../lib/api";
 import { useAuth } from "../lib/auth";
 import NextTripWidget from "../components/NextTripWidget";
+import LastLoginBanner from "../components/LastLoginBanner";
 
 function fmtPrice(v, ccy = "myr") {
   const map = { myr: "RM", sgd: "S$", usd: "$" };
@@ -53,6 +54,8 @@ export default function Dashboard() {
       <div className="te-overline mb-2">Passenger dashboard</div>
       <h1 className="text-4xl md:text-5xl font-black tracking-tight">Hi, {(user.full_name || user.email || "there").split(" ")[0]}.</h1>
       <p className="text-zinc-600 mt-2">{user.email}</p>
+
+      <LastLoginBanner user={user} />
 
       <NextTripWidget bookings={bookings} />
 

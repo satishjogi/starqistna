@@ -21,6 +21,7 @@ export default function Header() {
           <Link to="/feedback" className="hover:text-[#002FA7] transition" data-testid="nav-feedback">Feedback</Link>
           {user && <Link to="/dashboard" className="hover:text-[#002FA7] transition" data-testid="nav-dashboard">My Bookings</Link>}
           {user && <Link to="/security" className="hover:text-[#002FA7] transition" data-testid="nav-security">Security</Link>}
+          {user && <Link to="/change-password" className="hover:text-[#002FA7] transition" data-testid="nav-change-password">Password</Link>}
           {user?.is_admin && <Link to="/admin" className="hover:text-[#002FA7] transition" data-testid="nav-admin">Admin</Link>}
         </nav>
 

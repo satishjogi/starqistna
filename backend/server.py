@@ -782,6 +782,27 @@ async def register(body: RegisterBody, request: Request):
     user_public = {k: v for k, v in doc.items() if k not in ("password_hash", "_id", "totp_secret")}
     return TokenResponse(access_token=issue_jwt(user_id, doc["email"]), user=user_public)
 
+async def _record_login(user: dict, ip: str) -> dict:
+    """Rotate last-login fields: previous_login_* gets the prior values, and
+    last_login_* is set to now/this-IP. Returns the updated user dict so the
+    caller can include it in the response.
+
+    Mirrors the bank-style "last login was on X from Y" UI cue — comparing the
+    previous value lets users spot unfamiliar sessions immediately.
+    """
+    now_iso = utcnow().isoformat()
+    prev_at = user.get("last_login_at")
+    prev_ip = user.get("last_login_ip")
+    update = {"last_login_at": now_iso, "last_login_ip": ip}
+    if prev_at:
+        update["previous_login_at"] = prev_at
+        update["previous_login_ip"] = prev_ip
+    await db.users.update_one({"id": user["id"]}, {"$set": update})
+    user.update(update)
+    return user
+
+
+
 
 @api.post("/auth/login")
 async def login(body: LoginBody, request: Request):
@@ -794,13 +815,12 @@ async def login(body: LoginBody, request: Request):
         await _record_login_failure(ip, email)
         raise HTTPException(401, "Invalid email or password")
 
-    # If 2FA is enabled, return a short-lived challenge instead of the JWT.
-    # We clear password-attempt counters here because the password was correct;
-    # the 2FA step has its own brute-force protection via the 5-minute challenge expiry.
+    # Password OK — clear password-attempt counters. The 2FA step has its own
+    # protection via the 5-minute challenge expiry.
     await _clear_login_attempts(ip, email)
-    await db.users.update_one({"id": user["id"]}, {"$set": {"last_login_at": utcnow().isoformat()}})
 
     if user.get("totp_enabled"):
+        # Don't record the login yet — only after 2FA verifies.
         challenge = jwt.encode(
             {
                 "sub": user["id"],
@@ -814,6 +834,7 @@ async def login(body: LoginBody, request: Request):
         )
         return {"requires_2fa": True, "challenge_token": challenge}
 
+    user = await _record_login(user, ip)
     user_public = {k: v for k, v in user.items() if k not in ("password_hash", "_id", "totp_secret")}
     return TokenResponse(access_token=issue_jwt(user["id"], user["email"]), user=user_public)
 
@@ -846,6 +867,7 @@ async def verify_2fa(body: TwoFAVerifyBody, request: Request):
 
     # Success — clear the counter so the user can log in again later without punishment.
     await _clear_auth_attempts(ip, "2fa", identifier=throttle_id)
+    user = await _record_login(user, ip)
     user_public = {k: v for k, v in user.items() if k not in ("password_hash", "_id", "totp_secret")}
     return TokenResponse(access_token=issue_jwt(user["id"], user["email"]), user=user_public)
 

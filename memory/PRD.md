@@ -119,6 +119,12 @@ Build a complete online bus booking system where visitors can search departure t
   - Frontend (`SeatSelection.jsx` + `index.css`): new bus-shell aesthetic — rounded windshield arc, driver steering-wheel icon, headrest-notched seat pills, aisle gap, EXIT door, "REAR · ENGINE" footer, hover-lift animation. Category-aware fill (adult = red, child = teal) so travellers see their mix at a glance. Supports 2+2 and 2+1 in one component.
   - Admin form replaced "Rows" input with "Total seats (capacity)" + inline hint explaining the layout mapping.
 
+## Implemented (2026-04-29) — Last login banner + Password quick-link
+- Backend: `/api/auth/login` and `/api/auth/2fa/verify` now go through a shared `_record_login(user, ip)` helper that rotates `last_login_at`/`last_login_ip` → `previous_login_at`/`previous_login_ip` and writes the new values. Login fields no longer rotate on a failed 2FA attempt (pre-existing minor bug fixed in passing).
+- Frontend: new `<LastLoginBanner/>` on the user Dashboard shows "LAST SIGN-IN · 3 hr ago · from 203.0.113.42 · NOT YOU? CHANGE PASSWORD →". Hidden until the second login (no `previous_login_at`), bank-style.
+- Header gets a new "Password" nav item (`/change-password`) for any logged-in user.
+- Verified end-to-end: login → forced change → /admin → /dashboard renders the banner with relative time + IP; Header link reaches `/change-password`.
+
 ## Implemented (2026-04-29) — Forced password change on first login
 - New `POST /api/auth/change-password` endpoint: verifies current password, enforces strength, blocks reuse, clears `must_change_password` flag.
 - New `/change-password` route + `<ChangePassword/>` page with strength meter, match check, and helpful "first-time login" notice when forced.
