@@ -2846,17 +2846,66 @@ async def _migrate_sg_schedules():
 
 
 async def _seed_admin():
+    """Idempotent bootstrap admin seed.
+
+    On every startup:
+      1. If no admin exists → seed it with BOOTSTRAP_ADMIN_PASSWORD.
+      2. If admin exists AND its current password_hash still verifies against
+         BOOTSTRAP_ADMIN_PASSWORD → no-op (steady state).
+      3. If admin exists BUT the env password no longer matches the stored
+         hash → this usually happens after `.env` changes on production.
+         By default we log a big WARNING with recovery instructions.
+         If `RESET_ADMIN_ON_BOOT=true` is set in env, we force-resync the
+         password_hash to the current env value. This lets operators recover
+         a locked-out admin with a single .env flip + restart.
+    """
     existing = await db.users.find_one({"email": "admin@starqistna.com"})
+    reset_flag = os.environ.get("RESET_ADMIN_ON_BOOT", "").strip().lower() in ("1", "true", "yes")
+
     if existing:
-        # Migrate: ensure the bootstrap admin is a super_admin and active.
         updates: dict = {}
+        unsets: dict = {}
         if existing.get("role") != "super_admin":
             updates["role"] = "super_admin"
         if existing.get("is_active") is None:
             updates["is_active"] = True
-        if updates:
-            await db.users.update_one({"id": existing["id"]}, {"$set": updates})
+        if not existing.get("is_admin"):
+            updates["is_admin"] = True
+
+        stored_hash = existing.get("password_hash") or ""
+        env_matches_stored = bool(stored_hash) and verify_password(BOOTSTRAP_ADMIN_PASSWORD, stored_hash)
+
+        if not env_matches_stored:
+            if reset_flag:
+                updates["password_hash"] = hash_password(BOOTSTRAP_ADMIN_PASSWORD)
+                unsets["must_change_password"] = ""
+                logger.warning(
+                    "RESET_ADMIN_ON_BOOT=true → admin password re-synced to BOOTSTRAP_ADMIN_PASSWORD. "
+                    "IMPORTANT: remove RESET_ADMIN_ON_BOOT from .env and restart so this doesn't run again."
+                )
+            else:
+                logger.warning(
+                    "\n" + ("=" * 70) + "\n"
+                    "  Admin exists but BOOTSTRAP_ADMIN_PASSWORD in .env does NOT match\n"
+                    "  the password hash stored in MongoDB. Login with the env value\n"
+                    "  will fail.\n\n"
+                    "  To recover, choose ONE:\n"
+                    "    A) Set RESET_ADMIN_ON_BOOT=true in backend/.env, restart the\n"
+                    "       backend, then remove the flag and restart again.\n"
+                    "    B) Run: python scripts/reset_admin_password.py\n"
+                    + ("=" * 70)
+                )
+
+        if updates or unsets:
+            op: dict = {}
+            if updates:
+                op["$set"] = updates
+            if unsets:
+                op["$unset"] = unsets
+            await db.users.update_one({"id": existing["id"]}, op)
         return
+
+    # First-boot seed.
     await db.users.insert_one(
         {
             "id": new_id(),
