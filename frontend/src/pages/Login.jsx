@@ -86,9 +86,6 @@ export default function Login() {
               <div className="text-center text-sm mt-2">
                 No account? <Link className="font-bold underline" to="/register">Create one</Link>
               </div>
-              <div className="text-[10px] font-mono text-zinc-500 text-center mt-4">
-                ADMIN DEMO · admin@starqistna.com / Admin@123
-              </div>
             </form>
           </>
         ) : (
