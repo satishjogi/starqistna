@@ -1053,42 +1053,95 @@ async def change_password(body: ChangePasswordBody, user: dict = Depends(require
     return {"ok": True, "message": "Password updated. Please use the new password from now on."}
 
 
-# ---------- Google Social Login (Emergent-managed) ----------
+# ---------- Google Social Login (Own OAuth — starqistna.com branded) ----------
 # REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
-class GoogleSessionBody(BaseModel):
-    session_id: str
+# Flow (SPA-friendly authorization code):
+#   1. Frontend redirects the user to accounts.google.com/o/oauth2/v2/auth
+#      with our client_id, response_type=code, redirect_uri=<origin>/auth/google
+#   2. Google redirects back to the frontend /auth/google?code=...
+#   3. Frontend POSTs {code, redirect_uri} → this endpoint
+#   4. Backend exchanges code + client_secret for tokens (server-to-server),
+#      verifies the id_token signature via google-auth, upserts user, returns JWT.
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
 
 
-@api.post("/auth/google/session")
-async def google_session(body: GoogleSessionBody):
-    """Exchange an Emergent OAuth session_id for our own JWT (auto-linking by email).
-    If the existing account has 2FA enabled, returns a 2FA challenge token instead.
+class GoogleCallbackBody(BaseModel):
+    code: str
+    redirect_uri: str
+
+
+@api.post("/auth/google/callback")
+async def google_oauth_callback(body: GoogleCallbackBody):
+    """Exchange a Google authorization code for our own JWT.
+
+    Auto-links to an existing account by email so a user who registered with
+    email/password and then signs in with Google is merged (not duplicated).
+    Respects 2FA: if the linked account has TOTP enabled we return a 2FA
+    challenge instead of a session JWT.
     """
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        raise HTTPException(500, "Google OAuth is not configured on the server.")
+
+    # 1) Exchange authorization code for tokens.
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-                headers={"X-Session-ID": body.session_id},
+            token_resp = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "code": body.code,
+                    "client_id": GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "redirect_uri": body.redirect_uri,
+                    "grant_type": "authorization_code",
+                },
+                headers={"Accept": "application/json"},
             )
     except httpx.HTTPError as e:
-        logging.exception("Emergent auth call failed")
-        raise HTTPException(502, f"Auth provider unavailable: {e}")
+        logger.exception("Google token exchange failed")
+        raise HTTPException(502, f"Google token exchange failed: {e}")
 
-    if resp.status_code != 200:
-        raise HTTPException(401, "Invalid or expired Google session")
+    if token_resp.status_code != 200:
+        detail = token_resp.text[:200]
+        logger.warning("Google token endpoint returned %s: %s", token_resp.status_code, detail)
+        raise HTTPException(401, "Google authorization failed. Please try again.")
 
-    data = resp.json()
-    email = (data.get("email") or "").lower().strip()
-    name = data.get("name") or ""
-    picture = data.get("picture") or ""
-    if not email:
-        raise HTTPException(400, "Google account did not return an email")
+    token_data = token_resp.json()
+    id_token_str = token_data.get("id_token")
+    if not id_token_str:
+        raise HTTPException(401, "Google did not return an id_token.")
 
-    # Auto-link: find existing user by email, else create
+    # 2) Verify id_token signature + audience.
+    try:
+        from google.oauth2 import id_token as g_id_token
+        from google.auth.transport import requests as g_requests
+
+        idinfo = g_id_token.verify_oauth2_token(
+            id_token_str,
+            g_requests.Request(),
+            GOOGLE_CLIENT_ID,
+        )
+    except ValueError as e:
+        logger.warning("Google id_token verification failed: %s", e)
+        raise HTTPException(401, "Invalid Google identity token.")
+
+    email = (idinfo.get("email") or "").lower().strip()
+    if not email or not idinfo.get("email_verified", False):
+        raise HTTPException(400, "Google account email is missing or unverified.")
+
+    name = idinfo.get("name") or ""
+    picture = idinfo.get("picture") or ""
+    google_sub = idinfo.get("sub") or ""
+
+    # 3) Upsert user (auto-link by email).
     existing = await db.users.find_one({"email": email})
     if existing:
         user_id = existing["id"]
-        updates = {"google_linked": True, "last_login_at": utcnow().isoformat()}
+        updates = {
+            "google_linked": True,
+            "google_sub": google_sub,
+            "last_login_at": utcnow().isoformat(),
+        }
         if name and not existing.get("full_name"):
             updates["full_name"] = name
         if picture and not existing.get("picture"):
@@ -1102,16 +1155,18 @@ async def google_session(body: GoogleSessionBody):
             "email": email,
             "full_name": name,
             "phone": "",
-            "password_hash": "",  # no password for google-only accounts
+            "password_hash": "",  # google-only accounts have no password
             "is_admin": False,
+            "is_active": True,
             "google_linked": True,
+            "google_sub": google_sub,
             "picture": picture,
             "created_at": utcnow().isoformat(),
             "last_login_at": utcnow().isoformat(),
         }
         await db.users.insert_one(user_doc)
 
-    # Enforce 2FA if enabled on the account
+    # 4) Enforce 2FA if enabled on the linked account.
     if user_doc.get("totp_enabled"):
         challenge = jwt.encode(
             {

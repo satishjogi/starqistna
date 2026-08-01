@@ -25,6 +25,9 @@ cachetools==7.0.6
 # HTTP client (used in Google OAuth session callback)
 httpx==0.28.1
 
+# Google OAuth (custom flow — starqistna.com branded)
+google-auth==2.49.1
+
 # Payments
 stripe==15.0.1
 emergentintegrations==0.1.0

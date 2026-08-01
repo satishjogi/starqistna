@@ -58,6 +58,7 @@ export default function App() {
             <Route path="/admin-invite" element={<AdminInviteAccept />} />
             <Route path="/feedback" element={<Feedback />} />
             <Route path="/auth/callback" element={<AuthCallback />} />
+            <Route path="/auth/google" element={<AuthCallback />} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/bookings/:id" element={<BookingDetail />} />
             <Route path="/admin" element={<Admin />} />

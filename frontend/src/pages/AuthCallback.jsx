@@ -4,6 +4,11 @@ import api from "../lib/api";
 import { useAuth } from "../lib/auth";
 
 // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
+// Handles Google OAuth redirect back to our SPA.
+//  1. Reads ?code=... from Google
+//  2. Sends it (plus the same redirect_uri we used to initiate) to the backend
+//  3. Backend exchanges code for tokens, verifies id_token, upserts user, returns JWT
+//  4. Store JWT and redirect to /dashboard, OR if 2FA is required, show the challenge.
 export default function AuthCallback() {
   const navigate = useNavigate();
   const { refresh } = useAuth();
@@ -11,27 +16,40 @@ export default function AuthCallback() {
   const [status, setStatus] = useState("Completing Google sign-in…");
   const [error, setError] = useState("");
 
-  // 2FA challenge state (when account has TOTP)
+  // 2FA challenge state (when the linked account has TOTP)
   const [challenge, setChallenge] = useState(null);
-  const [code, setCode] = useState("");
+  const [code2fa, setCode2fa] = useState("");
   const [verifying, setVerifying] = useState(false);
 
   useEffect(() => {
     if (hasProcessed.current) return;
     hasProcessed.current = true;
 
-    const hash = window.location.hash || "";
-    const match = hash.match(/session_id=([^&]+)/);
-    if (!match) {
-      setError("Missing session. Please try signing in again.");
+    const params = new URLSearchParams(window.location.search);
+    const oauthCode = params.get("code");
+    const oauthError = params.get("error");
+
+    if (oauthError) {
+      setError(oauthError === "access_denied"
+        ? "Sign-in cancelled. Please try again."
+        : `Google returned an error: ${oauthError}`);
       return;
     }
-    const sessionId = decodeURIComponent(match[1]);
+    if (!oauthCode) {
+      setError("Missing authorization code. Please try signing in again.");
+      return;
+    }
+
+    // Must match exactly what GoogleAuthButton sent.
+    const redirectUri = window.location.origin + "/auth/google";
 
     (async () => {
       try {
-        const { data } = await api.post("/auth/google/session", { session_id: sessionId });
-        // Clear the hash so refresh doesn't re-process
+        const { data } = await api.post("/auth/google/callback", {
+          code: oauthCode,
+          redirect_uri: redirectUri,
+        });
+        // Strip ?code=... from history so a refresh doesn't reuse a spent code.
         window.history.replaceState(null, "", window.location.pathname);
         if (data.requires_2fa) {
           setChallenge(data.challenge_token);
@@ -52,7 +70,7 @@ export default function AuthCallback() {
     setVerifying(true);
     setError("");
     try {
-      const { data } = await api.post("/auth/2fa/verify", { challenge_token: challenge, code });
+      const { data } = await api.post("/auth/2fa/verify", { challenge_token: challenge, code: code2fa });
       localStorage.setItem("te_token", data.access_token);
       await refresh();
       navigate("/dashboard", { replace: true });
@@ -90,7 +108,7 @@ export default function AuthCallback() {
         ) : (
           <>
             <div className="te-overline mb-2">Access · 2FA</div>
-            <h1 className="text-3xl font-black tracking-tight mb-2">Verify it's you</h1>
+            <h1 className="text-3xl font-black tracking-tight mb-2">Verify it&apos;s you</h1>
             <p className="text-sm text-zinc-600 mb-6">Your account has 2FA enabled. Enter the 6-digit code from your authenticator app.</p>
             <form onSubmit={verify} className="te-card p-8 space-y-4 text-left" data-testid="google-2fa-form">
               <div>
@@ -101,14 +119,14 @@ export default function AuthCallback() {
                   required
                   maxLength={6}
                   autoFocus
-                  value={code}
-                  onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  value={code2fa}
+                  onChange={(e) => setCode2fa(e.target.value.replace(/\D/g, "").slice(0, 6))}
                   data-testid="google-2fa-code"
                 />
               </div>
               {error && <div className="text-xs font-bold text-red-600" data-testid="google-2fa-error">{error}</div>}
               <button
-                disabled={verifying || code.length !== 6}
+                disabled={verifying || code2fa.length !== 6}
                 className="te-btn-primary w-full"
                 data-testid="google-2fa-submit"
               >

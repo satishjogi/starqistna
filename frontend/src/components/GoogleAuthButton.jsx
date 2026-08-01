@@ -1,10 +1,28 @@
 import React from "react";
 
 // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
+// Own Google OAuth (starqistna.com branded — not Emergent-managed).
+// The Client ID is public-safe; the Client Secret lives on the backend.
 export default function GoogleAuthButton({ label = "Continue with Google", testId = "google-auth-btn" }) {
   const handleClick = () => {
-    const redirectUrl = window.location.origin + "/auth/callback";
-    window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
+    const clientId = process.env.REACT_APP_GOOGLE_CLIENT_ID;
+    if (!clientId) {
+      console.error("REACT_APP_GOOGLE_CLIENT_ID is not set in frontend/.env");
+      return;
+    }
+    // Build the redirect URI from the current origin so it works across
+    // localhost, preview and the production custom domain without config.
+    const redirectUri = window.location.origin + "/auth/google";
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: "code",
+      scope: "openid email profile",
+      access_type: "online",
+      prompt: "select_account",
+      include_granted_scopes: "true",
+    });
+    window.location.href = "https://accounts.google.com/o/oauth2/v2/auth?" + params.toString();
   };
 
   return (
