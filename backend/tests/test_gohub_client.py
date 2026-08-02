@@ -38,7 +38,7 @@ def test_md5_signature_uses_my_local_date_and_matches_manual_hash():
 def test_envelope_escapes_xml_special_chars():
     xml = _envelope("reserveOnlineQR_V2", {"TripNo": "SQ<001>&\"'A"}).decode()
     assert "&lt;001&gt;&amp;&quot;&apos;A" in xml
-    assert 'xmlns="http://tempuri.org/"' in xml
+    assert 'xmlns="https://eticketing.tbsbts.com.my/ws_cts"' in xml
 
 
 def test_envelope_skips_none_but_keeps_empty_string():
@@ -52,18 +52,21 @@ def test_parse_response_success_returns_all_fields():
     xml = """<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
   <soap:Body>
-    <reserveOnlineQR_V2Response xmlns="http://tempuri.org/">
+    <reserveOnlineQR_V2Response xmlns="https://eticketing.tbsbts.com.my/ws_cts">
       <reserveOnlineQR_V2Result>
-        <StatusCode>00</StatusCode>
-        <StatusDescription>OK</StatusDescription>
-        <ReservedID>R123</ReservedID>
-        <QR>ABC-QR-STRING</QR>
+        <reserveOnlineQR_V2_status code="0" msg="OK">
+          <reserveOnlineQR_V2_details>
+            <ReservedID>R123</ReservedID>
+            <QR>ABC-QR-STRING</QR>
+          </reserveOnlineQR_V2_details>
+        </reserveOnlineQR_V2_status>
       </reserveOnlineQR_V2Result>
     </reserveOnlineQR_V2Response>
   </soap:Body>
 </soap:Envelope>"""
     out = _parse_response("reserveOnlineQR_V2", xml)
-    assert out["StatusCode"] == "00"
+    assert out["status_code"] == "0"
+    assert out["status_msg"] == "OK"
     assert out["ReservedID"] == "R123"
     assert out["QR"] == "ABC-QR-STRING"
 
@@ -72,18 +75,28 @@ def test_parse_response_non_ok_status_raises():
     xml = """<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
   <soap:Body>
-    <reserveOnlineQR_V2Response xmlns="http://tempuri.org/">
+    <reserveOnlineQR_V2Response xmlns="https://eticketing.tbsbts.com.my/ws_cts">
       <reserveOnlineQR_V2Result>
-        <StatusCode>99</StatusCode>
-        <StatusDescription>Invalid signature</StatusDescription>
+        <reserveOnlineQR_V2_status code="2" msg="Invalid signature">
+          <reserveOnlineQR_V2_details />
+        </reserveOnlineQR_V2_status>
       </reserveOnlineQR_V2Result>
     </reserveOnlineQR_V2Response>
   </soap:Body>
 </soap:Envelope>"""
     with pytest.raises(GoHubError) as exc:
         _parse_response("reserveOnlineQR_V2", xml)
-    assert exc.value.code == "99"
+    assert exc.value.code == "2"
     assert "Invalid signature" in exc.value.message
+
+
+def test_parse_response_invalid_ip_matches_live_shape():
+    """Verified live 2026-02 against test endpoint — IP whitelist rejection."""
+    xml = """<?xml version="1.0" encoding="utf-8"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><queryOnlineQRResponse xmlns="https://eticketing.tbsbts.com.my/ws_cts"><queryOnlineQRResult><queryOnlineQR_status code="2" msg="Invalid Server IP : |1.2.3.4|"><queryOnlineQR_details /></queryOnlineQR_status></queryOnlineQRResult></queryOnlineQRResponse></soap:Body></soap:Envelope>"""
+    with pytest.raises(GoHubError) as exc:
+        _parse_response("queryOnlineQR", xml)
+    assert exc.value.code == "2"
+    assert "Invalid Server IP" in exc.value.message
 
 
 def test_parse_response_soap_fault_raises():
@@ -152,12 +165,14 @@ def test_client_live_call_success(monkeypatch):
     mocked_response = """<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
   <soap:Body>
-    <reserveOnlineQR_V2Response xmlns="http://tempuri.org/">
+    <reserveOnlineQR_V2Response xmlns="https://eticketing.tbsbts.com.my/ws_cts">
       <reserveOnlineQR_V2Result>
-        <StatusCode>00</StatusCode>
-        <StatusDescription>OK</StatusDescription>
-        <ReservedID>R123</ReservedID>
-        <QR>TESTQR001</QR>
+        <reserveOnlineQR_V2_status code="0" msg="OK">
+          <reserveOnlineQR_V2_details>
+            <ReservedID>R123</ReservedID>
+            <QR>TESTQR001</QR>
+          </reserveOnlineQR_V2_details>
+        </reserveOnlineQR_V2_status>
       </reserveOnlineQR_V2Result>
     </reserveOnlineQR_V2Response>
   </soap:Body>

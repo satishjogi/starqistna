@@ -42,8 +42,12 @@ logger = logging.getLogger(__name__)
 # TBS + CTS run on Malaysia time — signatures MUST use MY local date.
 MY_TZ = timezone(timedelta(hours=8))
 
-# SOAP namespace declared by every CTS op.
-_NS = {"soap": "http://schemas.xmlsoap.org/soap/envelope/", "cts": "http://tempuri.org/"}
+# CTS uses its own namespace inside the SOAP body (NOT the default tempuri).
+# Kept configurable via env so we can swap between test and live without a code change.
+CTS_NAMESPACE = "https://eticketing.tbsbts.com.my/ws_cts"
+
+# SOAP namespaces used when parsing the response envelope.
+_NS = {"soap": "http://schemas.xmlsoap.org/soap/envelope/", "cts": CTS_NAMESPACE}
 
 
 class GoHubError(RuntimeError):
@@ -81,7 +85,11 @@ def _xml_escape(v: Any) -> str:
 
 
 def _envelope(operation: str, body: dict) -> bytes:
-    """Build a minimal SOAP 1.1 envelope for a CTS operation."""
+    """Build a minimal SOAP 1.1 envelope for a CTS operation.
+
+    The body element and the ns must match CTS's WSDL: the target namespace
+    is `https://eticketing.tbsbts.com.my/ws_cts` (NOT the default tempuri).
+    """
     inner = "".join(f"<{k}>{_xml_escape(v)}</{k}>" for k, v in body.items() if v is not None)
     xml = (
         '<?xml version="1.0" encoding="utf-8"?>'
@@ -89,7 +97,7 @@ def _envelope(operation: str, body: dict) -> bytes:
         'xmlns:xsd="http://www.w3.org/2001/XMLSchema" '
         'xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">'
         "<soap:Body>"
-        f'<{operation} xmlns="http://tempuri.org/">{inner}</{operation}>'
+        f'<{operation} xmlns="{CTS_NAMESPACE}">{inner}</{operation}>'
         "</soap:Body></soap:Envelope>"
     )
     return xml.encode("utf-8")
@@ -98,28 +106,60 @@ def _envelope(operation: str, body: dict) -> bytes:
 def _parse_response(operation: str, xml_body: str) -> dict:
     """Extract the CTS `<{operation}Result>` payload as a dict.
 
-    CTS returns a `<StatusCode>` + `<StatusDescription>` inside the result.
-    Anything other than "00" raises GoHubError so the caller sees clean
-    exceptions instead of parsing XML themselves.
+    CTS's actual response shape (discovered live 2026-02):
+
+        <{op}Response xmlns="https://eticketing.tbsbts.com.my/ws_cts">
+          <{op}Result>
+            <{op}_status code="0" msg="OK">
+              <{op}_details>...business fields...</{op}_details>
+            </{op}_status>
+          </{op}Result>
+        </{op}Response>
+
+    We flatten to `{status_code, status_msg, ...business_fields}`. Any
+    non-"0" / non-"00" `code` attribute raises GoHubError so callers get
+    clean exceptions.
     """
     try:
         root = ET.fromstring(xml_body)
     except ET.ParseError as e:
         raise GoHubError("PARSE_ERROR", f"Malformed XML: {e}", raw=xml_body[:500]) from e
 
+    # SOAP fault path — CTS uses <faultstring>.
+    fault = root.find(".//soap:Fault/faultstring", _NS)
+    if fault is not None:
+        raise GoHubError("SOAP_FAULT", (fault.text or "").strip(), raw=xml_body[:500])
+
     result = root.find(f".//cts:{operation}Result", _NS)
     if result is None:
-        # SOAP fault path — CTS uses <faultstring>.
-        fault = root.find(".//soap:Fault/faultstring", _NS)
-        if fault is not None:
-            raise GoHubError("SOAP_FAULT", (fault.text or "").strip(), raw=xml_body[:500])
         raise GoHubError("NO_RESULT", f"Missing {operation}Result", raw=xml_body[:500])
 
-    payload = {child.tag.split("}")[-1]: (child.text or "").strip() for child in result}
-    code = payload.get("StatusCode") or payload.get("statusCode") or ""
-    if code and code != "00":
-        raise GoHubError(code, payload.get("StatusDescription") or "CTS returned non-OK status",
-                         raw=xml_body[:500])
+    payload: dict = {}
+    status = result.find(f"./cts:{operation}_status", _NS)
+    if status is not None:
+        code = (status.attrib.get("code") or "").strip()
+        msg = (status.attrib.get("msg") or "").strip()
+        payload["status_code"] = code
+        payload["status_msg"] = msg
+        # Ok = "0" or "00"; anything else is an error.
+        if code and code not in ("0", "00"):
+            raise GoHubError(code, msg or "CTS returned non-OK status", raw=xml_body[:500])
+        details = status.find(f"./cts:{operation}_details", _NS)
+        if details is not None:
+            for child in details:
+                tag = child.tag.split("}")[-1]
+                # Flatten attributes + text into the payload.
+                for k, v in child.attrib.items():
+                    payload[f"{tag}_{k}"] = v
+                if child.text and child.text.strip():
+                    payload[tag] = child.text.strip()
+    else:
+        # Fallback: some older ops may still return flat StatusCode children.
+        payload = {c.tag.split("}")[-1]: (c.text or "").strip() for c in result}
+        code = payload.get("StatusCode") or ""
+        if code and code not in ("0", "00"):
+            raise GoHubError(code, payload.get("StatusDescription") or "CTS returned non-OK",
+                             raw=xml_body[:500])
     return payload
 
 
@@ -217,7 +257,7 @@ class GoHubClient:
 
         headers = {
             "Content-Type": "text/xml; charset=utf-8",
-            "SOAPAction": f'"http://tempuri.org/{operation}"',
+            "SOAPAction": f'"{CTS_NAMESPACE}/{operation}"',
         }
         response_text = ""
         error: Optional[GoHubError] = None
