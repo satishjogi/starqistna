@@ -145,12 +145,13 @@ def test_client_dry_run_when_disabled(monkeypatch):
     db = _FakeDB()
     client = GoHubClient(db=db)
     out = _run(client.reserve_qr(
-        trans_id="T1", trip_no="SQ001", boarding_date="20260810",
-        boarding_time="1130", seat_number="1A",
+        trans_id="T1", trip_no="SQ001",
+        trip_date="20260810", depart_date="20260810", depart_time="1130",
         from_counter="TBS01", to_counter="GMC01",
+        seat_number="1A", sprice=55.0, passenger_name="Test",
     ))
     assert out["dry_run"] is True
-    assert out["StatusCode"] == "00"
+    assert out["status_code"] == "0"
     assert len(db.gohub_logs.inserted) == 1
     assert db.gohub_logs.inserted[0]["dry_run"] is True
 
@@ -169,8 +170,8 @@ def test_client_live_call_success(monkeypatch):
       <reserveOnlineQR_V2Result>
         <reserveOnlineQR_V2_status code="0" msg="OK">
           <reserveOnlineQR_V2_details>
-            <ReservedID>R123</ReservedID>
-            <QR>TESTQR001</QR>
+            <reservedid>R123</reservedid>
+            <qr>TESTQR001</qr>
           </reserveOnlineQR_V2_details>
         </reserveOnlineQR_V2_status>
       </reserveOnlineQR_V2Result>
@@ -183,12 +184,13 @@ def test_client_live_call_success(monkeypatch):
     db = _FakeDB()
     client = GoHubClient(db=db)
     out = _run(client.reserve_qr(
-        trans_id="T1", trip_no="SQ001", boarding_date="20260810",
-        boarding_time="1130", seat_number="1A",
+        trans_id="T1", trip_no="SQ001",
+        trip_date="20260810", depart_date="20260810", depart_time="1130",
         from_counter="TBS01", to_counter="GMC01",
+        seat_number="1A", sprice=55.0, passenger_name="Test",
     ))
-    assert out["QR"] == "TESTQR001"
-    assert out["ReservedID"] == "R123"
+    assert out["qr"] == "TESTQR001"
+    assert out["reservedid"] == "R123"
     assert len(db.gohub_logs.inserted) == 1
     log = db.gohub_logs.inserted[0]
     assert log["operation"] == "reserveOnlineQR_V2"
@@ -207,9 +209,8 @@ def test_client_http_error_persisted_and_raised(monkeypatch):
     db = _FakeDB()
     client = GoHubClient(db=db)
     with pytest.raises(GoHubError) as exc:
-        _run(client.confirm_qr(trans_id="T1", reserved_id="R1"))
+        _run(client.confirm_qr(reserved_id="R1"))
     assert exc.value.code == "HTTP_500"
-    # Audit log MUST still capture the failed attempt for post-mortem.
     assert len(db.gohub_logs.inserted) == 1
     assert db.gohub_logs.inserted[0]["error"]["code"] == "HTTP_500"
 
@@ -223,10 +224,30 @@ def test_audit_log_never_persists_passwords(monkeypatch):
     db = _FakeDB()
     client = GoHubClient(db=db)
     _run(client.reserve_qr(
-        trans_id="T", trip_no="SQ001", boarding_date="20260810", boarding_time="1130",
-        seat_number="1A", from_counter="TBS01", to_counter="GMC01",
+        trans_id="T", trip_no="SQ001",
+        trip_date="20260810", depart_date="20260810", depart_time="1130",
+        from_counter="TBS01", to_counter="GMC01",
+        seat_number="1A", sprice=55.0, passenger_name="Test",
     ))
     log = db.gohub_logs.inserted[0]
-    # No field literally named *password*/PLAINTEXT should leak into the log.
     for k, v in log["request"].items():
         assert "PLAINTEXT" not in str(v), f"password leaked in key {k}"
+
+
+def test_envelope_ticket_details_uses_attributes():
+    """Verify the ticket_details block uses ATTRIBUTES, not child elements —
+    the CTS WSDL is strict on this. Regression check for the schema fix."""
+    from gohub_client import _envelope
+    xml = _envelope(
+        "reserveOnlineQR_V2",
+        {"ota_code": "X", "signature": "S", "trans_id": "T1"},
+        ticket_details=[{"seatno": "1A", "seattype": "A", "sprice": 55.0, "name": "John"}],
+    ).decode()
+    # attributes present, seat/price as attrs on <detail>
+    assert '<ticket_details><detail ' in xml
+    assert 'seatno="1A"' in xml
+    assert 'seattype="A"' in xml
+    assert 'sprice="55.0"' in xml
+    assert 'name="John"' in xml
+    # no <seatno>1A</seatno> style children
+    assert '<seatno>' not in xml

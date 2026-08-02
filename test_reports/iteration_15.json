@@ -1,0 +1,31 @@
+{
+  "summary": "GoHub/CTS client rewrite verification. All 12 gohub tests pass. Health/admin regression clean. New POST /api/admin/gohub/probe endpoint works with dry-run when GOHUB_ENABLED=false, correctly returns 401 without auth and 403 for non-admin. gohub_probe.py script imports cleanly.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/admin/gohub/probe", "issue": "Unreachable/orphan code block (lines 3528-3541 in server.py) sits after the return statement — appears to be leftover from an old _ensure_indexes function pasted into the endpoint. Harmless (dead code) but should be removed."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_gohub_client.py",
+    "/app/test_reports/pytest/gohub_results.xml"
+  ],
+  "action_items": [
+    "Remove dead code at server.py lines 3528-3541 (unreachable after `return` in admin_gohub_probe).",
+    "Consider documenting valid seat_type values ('A','C','S','O') in the probe endpoint schema for operator UX."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 3584 lines — exceeds 700-line guideline; consider modularising (admin/, gohub/, bookings/ routers).",
+    "Dead code block after `return {\"trans_id\":...}` in admin_gohub_probe (lines 3528-3541).",
+    "gohub_client.py rewrite matches CTS WSDL (lowercase snake_case, <detail seatno=... seattype=... />, query by trans_id). Test coverage looks solid including new attribute-format test."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "skipped"},
+  "test_credentials": "admin@starqistna.com / Admin@123 (verified working)",
+  "seed_data_creation": "Registered a throwaway user via /api/auth/register (full_name field) to verify 403 path.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "gohub client uses lowercase snake_case per CTS WSDL. Probe endpoint at POST /api/admin/gohub/probe requires admin auth; seat_type Literal is A/C/S/O (not 'adult'). Live CTS calls will 'Invalid Server IP' unless from whitelisted VPS 187.77.133.105 — do not treat as bug. Registration endpoint requires `full_name`, not `name`.",
+  "rca of the issue": "N/A — verification task, no bugs found."
+}

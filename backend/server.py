@@ -3448,6 +3448,83 @@ async def _ensure_indexes():
     # GoHub / CTS audit trail — indexes for post-mortem queries.
     await db.gohub_logs.create_index([("started_at", ASCENDING)])
     await db.gohub_logs.create_index([("operation", ASCENDING)])
+
+
+# ---------- GoHub / CTS admin probe (dev + smoke-test only) ----------
+class GoHubProbeBody(BaseModel):
+    trip_no: str = "SQ001"
+    boarding_date: Optional[str] = None   # YYYYMMDD; defaults to today MY
+    boarding_time: str = "2330"
+    seat: str = "1A"
+    seat_type: Literal["A", "C", "S", "O"] = "A"
+    from_counter: str = "TBS01"
+    to_counter: str = "GMC01"
+    ic_no: str = ""
+    contact: str = ""
+    confirm: bool = False
+    cancel: bool = False
+
+
+@api.post("/admin/gohub/probe")
+async def admin_gohub_probe(body: GoHubProbeBody, request: Request, user: dict = Depends(require_admin)):
+    """Fire a single CTS reserve (optionally confirm/query/cancel) round-trip.
+
+    Meant for post-deploy smoke checks and TBS diagnostics — captures every
+    step so an operator can share the result back to TBS support if a call
+    fails. Persisted to `gohub_logs` like any other CTS call.
+    """
+    from gohub_client import GoHubClient, GoHubError  # local import — keep server startup light
+    import uuid as _uuid
+
+    my_today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d")
+    trans_id = f"PROBE-{_uuid.uuid4().hex[:12].upper()}"
+    client = GoHubClient(db=db, timeout=20)
+    steps: list[dict] = []
+
+    # 1) reserve
+    try:
+        reserve = await client.reserve_qr(
+            trans_id=trans_id, trip_no=body.trip_no,
+            trip_date=body.boarding_date or my_today,
+            depart_date=body.boarding_date or my_today,
+            depart_time=body.boarding_time,
+            from_counter=body.from_counter, to_counter=body.to_counter,
+            seat_number=body.seat, seat_type=body.seat_type,
+            sprice=55.0, passenger_name="Test Passenger",
+            ic_no=body.ic_no, contact_no=body.contact,
+        )
+        steps.append({"step": "reserve", "ok": True, "data": reserve})
+    except GoHubError as e:
+        steps.append({"step": "reserve", "ok": False, "error": {"code": e.code, "message": e.message}})
+        await log_audit(user, "probe", "gohub", trans_id, {"steps": steps}, request)
+        return {"trans_id": trans_id, "steps": steps}
+
+    reserved_id = reserve.get("reservedid") or reserve.get("ReservedID")
+    opetickno: Optional[str] = None
+    if body.confirm and reserved_id:
+        try:
+            confirm = await client.confirm_qr(reserved_id=reserved_id)
+            opetickno = confirm.get("opetickno") or confirm.get("newopetickno")
+            steps.append({"step": "confirm", "ok": True, "data": confirm})
+        except GoHubError as e:
+            steps.append({"step": "confirm", "ok": False, "error": {"code": e.code, "message": e.message}})
+
+    # Query is always by trans_id (not opetickno)
+    try:
+        q = await client.query_qr(trans_id=trans_id)
+        steps.append({"step": "query", "ok": True, "data": q})
+    except GoHubError as e:
+        steps.append({"step": "query", "ok": False, "error": {"code": e.code, "message": e.message}})
+
+    if body.cancel and opetickno:
+        try:
+            c = await client.cancel_qr(trans_id=trans_id, opetickno=opetickno)
+            steps.append({"step": "cancel", "ok": True, "data": c})
+        except GoHubError as e:
+            steps.append({"step": "cancel", "ok": False, "error": {"code": e.code, "message": e.message}})
+
+    await log_audit(user, "probe", "gohub", trans_id, {"steps_count": len(steps)}, request)
+    return {"trans_id": trans_id, "steps": steps}
     # Admin invites: auto-expire at `expires_at`
     await db.admin_invites.create_index("expires_at", expireAfterSeconds=0)
     await db.admin_invites.create_index([("email", ASCENDING)])

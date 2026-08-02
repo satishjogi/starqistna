@@ -84,13 +84,33 @@ def _xml_escape(v: Any) -> str:
     )
 
 
-def _envelope(operation: str, body: dict) -> bytes:
+def _detail_element(**attrs: Any) -> str:
+    """Build a `<detail attr1="v1" attr2="v2" />` element (CTS uses attributes)."""
+    kv = " ".join(f'{k}="{_xml_escape(v)}"' for k, v in attrs.items() if v is not None)
+    return f"<detail {kv} />"
+
+
+def _ticket_details_xml(details: list[dict]) -> str:
+    """Wrap a list of `detail` dicts in `<ticket_details>...</ticket_details>`."""
+    if not details:
+        return ""
+    inner = "".join(_detail_element(**d) for d in details)
+    return f"<ticket_details>{inner}</ticket_details>"
+
+
+def _envelope(operation: str, body: dict, ticket_details: Optional[list[dict]] = None) -> bytes:
     """Build a minimal SOAP 1.1 envelope for a CTS operation.
 
-    The body element and the ns must match CTS's WSDL: the target namespace
-    is `https://eticketing.tbsbts.com.my/ws_cts` (NOT the default tempuri).
+    * `body` maps element names → text values (all elements). None values are
+      skipped so we don't emit `<foo></foo>` for optional bits.
+    * `ticket_details`, if given, is appended as a `<ticket_details><detail
+      attr1="…" attr2="…" /></ticket_details>` block per CTS's WSDL — the
+      `<detail>` fields are ATTRIBUTES, not child elements.
     """
-    inner = "".join(f"<{k}>{_xml_escape(v)}</{k}>" for k, v in body.items() if v is not None)
+    inner_parts = [f"<{k}>{_xml_escape(v)}</{k}>" for k, v in body.items() if v is not None]
+    if ticket_details:
+        inner_parts.append(_ticket_details_xml(ticket_details))
+    inner = "".join(inner_parts)
     xml = (
         '<?xml version="1.0" encoding="utf-8"?>'
         '<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
@@ -188,70 +208,88 @@ class GoHubClient:
 
     # ---- Public operations ----------------------------------------------------
 
-    async def reserve_qr(self, *, trans_id: str, trip_no: str, boarding_date: str,
-                          boarding_time: str, seat_number: str, seat_type: str = "A",
-                          from_counter: str, to_counter: str, ic_no: Optional[str] = None,
-                          contact_no: Optional[str] = None) -> dict:
+    async def reserve_qr(self, *, trans_id: str, trip_no: str, trip_date: str,
+                          depart_date: str, depart_time: str,
+                          from_counter: str, to_counter: str,
+                          seat_number: str, seat_type: str = "A",
+                          sprice: float = 0.0, passenger_name: str = "",
+                          ic_no: str = "", contact_no: str = "") -> dict:
         """`reserveOnlineQR_V2` — soft-hold a QR ticket for ~1 hour.
 
-        Follow up with `confirm_qr(trans_id, reserved_id)` after payment
-        succeeds. If you skip confirm within the TTL, TBS auto-releases.
+        Field naming follows CTS WSDL exactly (lowercase snake_case).
+        `ticket_details/detail` carries per-seat attributes.
         """
-        return await self._call("reserveOnlineQR_V2", {
-            "OTACode": self.ota_code,
-            "MD5Sign": _md5_signature(self.ota_code, self.ota_password),
-            "OperatorCode": self.operator_code,
-            "TransID": trans_id,
-            "TripNo": trip_no,
-            "BoardingDate": boarding_date,   # YYYYMMDD
-            "BoardingTime": boarding_time,   # HHmm
-            "SeatNo": seat_number,
-            "SeatType": seat_type,           # A/C/S/O per CTS spec
-            "FromCounter": from_counter,
-            "ToCounter": to_counter,
-            "ICNo": ic_no or "",
-            "ContactNo": contact_no or "",
-        })
+        body = {
+            "signature": _md5_signature(self.ota_code, self.ota_password),
+            "ota_code": self.ota_code,
+            "operator_code": self.operator_code,
+            "trans_id": trans_id,
+            "trip_no": trip_no,
+            "trip_date": trip_date,           # YYYYMMDD — the scheduled trip day
+            "depart_date": depart_date,       # YYYYMMDD — actual boarding date
+            "depart_time": depart_time,       # HHmm
+            "from": from_counter,
+            "to": to_counter,
+        }
+        details = [{
+            "seatno": seat_number,
+            "seattype": seat_type,            # A/C/S/O
+            "sprice": sprice,
+            "name": passenger_name,
+            "ic": ic_no,
+            "contact": contact_no,
+        }]
+        return await self._call("reserveOnlineQR_V2", body, ticket_details=details)
 
-    async def confirm_qr(self, *, trans_id: str, reserved_id: str) -> dict:
+    async def confirm_qr(self, *, reserved_id: str, opetickno: str = "",
+                          new_opetickno: str = "") -> dict:
         """`confirmOnlineQR_V2` — commit a previously-reserved ticket."""
-        return await self._call("confirmOnlineQR_V2", {
-            "OTACode": self.ota_code,
-            "MD5Sign": _md5_signature(self.ota_code, self.ota_password),
-            "OperatorCode": self.operator_code,
-            "TransID": trans_id,
-            "ReservedID": reserved_id,
-        })
+        body = {
+            "signature": _md5_signature(self.ota_code, self.ota_password),
+            "ota_code": self.ota_code,
+            "operator_code": self.operator_code,
+            "reservedid": reserved_id,
+        }
+        details = None
+        if opetickno:
+            details = [{"opetickno": opetickno, "newopetickno": new_opetickno or opetickno}]
+        return await self._call("confirmOnlineQR_V2", body, ticket_details=details)
 
     async def cancel_qr(self, *, trans_id: str, opetickno: str) -> dict:
-        """`cancelOnlineQR` — void a confirmed ticket. Response includes refund_amount."""
-        return await self._call("cancelOnlineQR", {
-            "OTACode": self.ota_code,
-            "MD5Sign": _md5_signature(self.ota_code, self.ota_password),
-            "OperatorCode": self.operator_code,
-            "TransID": trans_id,
-            "OpeTickNo": opetickno,
-        })
+        """`cancelOnlineQR` — void a confirmed ticket. Response includes refund amount."""
+        body = {
+            "signature": _md5_signature(self.ota_code, self.ota_password),
+            "ota_code": self.ota_code,
+            "operator_code": self.operator_code,
+            "trans_id": trans_id,
+        }
+        details = [{"opetickno": opetickno}]
+        return await self._call("cancelOnlineQR", body, ticket_details=details)
 
-    async def query_qr(self, *, opetickno: str) -> dict:
-        """`queryOnlineQR` — reconcile a single ticket's current status."""
-        return await self._call("queryOnlineQR", {
-            "OTACode": self.ota_code,
-            "MD5Sign": _md5_signature(self.ota_code, self.ota_password),
-            "OperatorCode": self.operator_code,
-            "OpeTickNo": opetickno,
-        })
+    async def query_qr(self, *, trans_id: str) -> dict:
+        """`queryOnlineQR` — reconcile a transaction's current ticket state.
+
+        Note: queries are by `trans_id` (our correlation id), NOT opetickno.
+        """
+        body = {
+            "signature": _md5_signature(self.ota_code, self.ota_password),
+            "ota_code": self.ota_code,
+            "operator_code": self.operator_code,
+            "trans_id": trans_id,
+        }
+        return await self._call("queryOnlineQR", body)
 
     # ---- Transport ------------------------------------------------------------
 
-    async def _call(self, operation: str, body: dict) -> dict:
+    async def _call(self, operation: str, body: dict,
+                     ticket_details: Optional[list[dict]] = None) -> dict:
         """Send a SOAP request, parse, and persist an audit record."""
         started = datetime.now(timezone.utc)
-        request_xml = _envelope(operation, body)
+        request_xml = _envelope(operation, body, ticket_details=ticket_details)
 
         if not self.enabled or not self.base_url:
             payload = {"dry_run": True, "note": "GOHUB_ENABLED=false; returning mocked OK.",
-                       "StatusCode": "00", "StatusDescription": "OK (dry-run)"}
+                       "status_code": "0", "status_msg": "OK (dry-run)"}
             await self._audit_log(operation, body, request_xml, payload, None, started, dry_run=True)
             return payload
 
