@@ -511,16 +511,61 @@ async def list_terminals(q: Optional[str] = None):
 
 @api.get("/search")
 async def search_schedules(
-    from_terminal_id: str,
-    to_terminal_id: str,
     date: str,  # YYYY-MM-DD
+    from_terminal_id: Optional[str] = None,
+    to_terminal_id: Optional[str] = None,
+    from_city: Optional[str] = None,
+    to_city: Optional[str] = None,
 ):
-    # Find schedules matching date or recurring (we store schedules with `departure_date` field)
-    query = {
-        "from_terminal_id": from_terminal_id,
-        "to_terminal_id": to_terminal_id,
-        "departure_date": date,
-    }
+    """Search schedules for a date.
+
+    Two modes:
+      * Stop-level: caller passes `from_terminal_id` + `to_terminal_id`
+        (existing behaviour — one specific pickup → one specific drop-off).
+      * City-level: caller passes `from_city` and/or `to_city` — we expand
+        the query to every terminal in that city. Used when the customer
+        picks "Any stop in Kuala Lumpur" on the homepage.
+
+    You can mix modes (e.g. city → specific terminal). At least one side of
+    each pair must resolve to something or we return 400.
+    """
+    from_ids: List[str] = []
+    to_ids: List[str] = []
+
+    if from_terminal_id:
+        from_ids = [from_terminal_id]
+    elif from_city:
+        from_ids = [t["id"] async for t in db.terminals.find(
+            {"city": from_city, "is_pickup": {"$ne": False}}, {"_id": 0, "id": 1}
+        )]
+        # Backward-compat: terminals seeded before the is_pickup field default true.
+        if not from_ids:
+            from_ids = [t["id"] async for t in db.terminals.find({"city": from_city}, {"_id": 0, "id": 1})]
+    if to_terminal_id:
+        to_ids = [to_terminal_id]
+    elif to_city:
+        to_ids = [t["id"] async for t in db.terminals.find(
+            {"city": to_city, "is_dropoff": {"$ne": False}}, {"_id": 0, "id": 1}
+        )]
+        if not to_ids:
+            to_ids = [t["id"] async for t in db.terminals.find({"city": to_city}, {"_id": 0, "id": 1})]
+
+    if not from_ids or not to_ids:
+        raise HTTPException(400, "Provide either from_terminal_id or from_city (and same for `to`).")
+
+    # Find schedules matching date + terminal set.
+    if len(from_ids) == 1 and len(to_ids) == 1:
+        query = {
+            "from_terminal_id": from_ids[0],
+            "to_terminal_id": to_ids[0],
+            "departure_date": date,
+        }
+    else:
+        query = {
+            "from_terminal_id": {"$in": from_ids},
+            "to_terminal_id": {"$in": to_ids},
+            "departure_date": date,
+        }
 
     # If searching for "today" in local Malaysia/Singapore time (UTC+8 — same offset for both),
     # hide buses whose departure time has already passed so users don't book a departed trip.
@@ -532,9 +577,18 @@ async def search_schedules(
 
     schedules = await db.schedules.find(query, {"_id": 0}).sort("departure_time", 1).to_list(200)
 
-    # Enrich with terminal names
-    from_term = await db.terminals.find_one({"id": from_terminal_id}, {"_id": 0})
-    to_term = await db.terminals.find_one({"id": to_terminal_id}, {"_id": 0})
+    # Enrich with terminal names — for single-stop searches show the picked stop,
+    # for city-level searches show the city as the label + count of options.
+    if from_terminal_id:
+        from_meta = await db.terminals.find_one({"id": from_terminal_id}, {"_id": 0})
+    else:
+        from_meta = {"city": from_city, "name": f"Any stop · {from_city}", "code": None,
+                     "is_city": True, "stop_count": len(from_ids)}
+    if to_terminal_id:
+        to_meta = await db.terminals.find_one({"id": to_terminal_id}, {"_id": 0})
+    else:
+        to_meta = {"city": to_city, "name": f"Any stop · {to_city}", "code": None,
+                   "is_city": True, "stop_count": len(to_ids)}
 
     # Single aggregation for booked-seat counts across ALL schedules in this result.
     # Replaces an N+1 pattern (1 count_documents per schedule) with one round-trip.
@@ -549,8 +603,8 @@ async def search_schedules(
             s["seats_available"] = s["total_seats"] - counts.get(s["id"], 0)
 
     return {
-        "from": from_term,
-        "to": to_term,
+        "from": from_meta,
+        "to": to_meta,
         "date": date,
         "schedules": schedules,
     }

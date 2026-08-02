@@ -9,6 +9,8 @@ export default function SearchResults() {
   const navigate = useNavigate();
   const from = params.get("from");
   const to = params.get("to");
+  const fromCity = params.get("from_city");
+  const toCity = params.get("to_city");
   const date = params.get("date");
   const adults = parseInt(params.get("adults") || "1");
   const children = parseInt(params.get("children") || "0");
@@ -24,12 +26,17 @@ export default function SearchResults() {
 
   useEffect(() => {
     setLoading(true);
+    const searchParams = { date };
+    if (from) searchParams.from_terminal_id = from;
+    else if (fromCity) searchParams.from_city = fromCity;
+    if (to) searchParams.to_terminal_id = to;
+    else if (toCity) searchParams.to_city = toCity;
     api
-      .get("/search", { params: { from_terminal_id: from, to_terminal_id: to, date } })
+      .get("/search", { params: searchParams })
       .then(({ data }) => setData(data))
       .catch((e) => setError(e?.response?.data?.detail || "Failed to load schedules"))
       .finally(() => setLoading(false));
-  }, [from, to, date]);
+  }, [from, to, fromCity, toCity, date]);
 
   const selectSchedule = (sched) => {
     setFlow({
@@ -93,12 +100,17 @@ export default function SearchResults() {
                   return d.toISOString().slice(0, 10);
                 })();
                 if (isToday) {
-                  const nextDayLink = `/search?from=${from}&to=${to}&date=${tomorrow}&adults=${adults}&children=${children}`;
+                  const dayParams = new URLSearchParams({ date: tomorrow, adults: String(adults), children: String(children) });
+                  if (from) dayParams.set("from", from);
+                  else if (fromCity) dayParams.set("from_city", fromCity);
+                  if (to) dayParams.set("to", to);
+                  else if (toCity) dayParams.set("to_city", toCity);
+                  const nextDayLink = `/search?${dayParams.toString()}`;
                   return (
                     <>
                       <div className="font-black text-2xl">No more buses today.</div>
                       <p className="text-sm text-zinc-600 mt-2">
-                        It looks like today's departures have already left. Tomorrow's schedule is ready.
+                        It looks like today&apos;s departures have already left. Tomorrow&apos;s schedule is ready.
                       </p>
                       <Link to={nextDayLink} className="te-btn-primary inline-flex mt-5" data-testid="try-tomorrow-btn">
                         See buses tomorrow ({tomorrow}) →

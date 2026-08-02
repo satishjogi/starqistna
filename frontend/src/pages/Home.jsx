@@ -20,6 +20,9 @@ function TerminalSelect({ label, value, onChange, testId, exclude }) {
     return grouped
       .map((g) => ({
         ...g,
+        // City itself matches → keep the group so the "Any stop in {city}" pseudo-option
+        // stays reachable when the user is typing a city name.
+        cityMatch: g.city.toLowerCase().includes(lower),
         terminals: g.terminals.filter(
           (t) =>
             t.name.toLowerCase().includes(lower) ||
@@ -27,8 +30,15 @@ function TerminalSelect({ label, value, onChange, testId, exclude }) {
             t.code.toLowerCase().includes(lower)
         ),
       }))
-      .filter((g) => g.terminals.length > 0);
+      .filter((g) => g.terminals.length > 0 || g.cityMatch);
   }, [q, grouped]);
+
+  const pickCity = (city, terminals) => {
+    // Store the city as a virtual "selection" — no terminal id, is_city=true.
+    onChange({ id: null, is_city: true, city, name: `Any stop · ${city}`, code: city.split(" ").map((w) => w[0]).join("").toUpperCase(), stop_count: terminals.length });
+    setOpen(false);
+    setQ("");
+  };
 
   return (
     <div className="relative">
@@ -41,11 +51,16 @@ function TerminalSelect({ label, value, onChange, testId, exclude }) {
       >
         {value ? (
           <div>
-            <div className="font-bold">{value.city}</div>
-            <div className="text-xs text-zinc-500 font-mono">{value.code} · {value.name}</div>
+            <div className="font-bold flex items-center gap-2">
+              {value.is_city && <span aria-hidden="true">🏙</span>}
+              {value.city}
+            </div>
+            <div className="text-xs text-zinc-500 font-mono">
+              {value.is_city ? `Any stop · ${value.stop_count ?? ""} option${value.stop_count === 1 ? "" : "s"}` : `${value.code} · ${value.name}`}
+            </div>
           </div>
         ) : (
-          <div className="text-zinc-400">Select terminal</div>
+          <div className="text-zinc-400">Select terminal or city</div>
         )}
       </button>
       {open && (
@@ -60,30 +75,44 @@ function TerminalSelect({ label, value, onChange, testId, exclude }) {
               autoFocus
             />
           </div>
-          {filtered.map((g) => (
-            <div key={g.city}>
-              <div className="px-4 pt-3 pb-1 te-overline text-[10px]">{g.city}</div>
-              {g.terminals.map((t) => {
-                const disabled = exclude && exclude.id === t.id;
-                return (
-                  <button
-                    key={t.id}
-                    type="button"
-                    disabled={disabled}
-                    onClick={() => { onChange(t); setOpen(false); setQ(""); }}
-                    className={`w-full text-left px-4 py-3 hover:bg-zinc-50 border-b border-black/5 flex items-center justify-between ${disabled ? "opacity-40 cursor-not-allowed" : ""}`}
-                    data-testid={`${testId}-opt-${t.code}`}
-                  >
-                    <div>
-                      <div className="text-sm font-semibold">{t.name}</div>
-                      <div className="text-[10px] font-mono text-zinc-500 tracking-wider">{t.code} · {t.state}</div>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          ))}
-          {filtered.length === 0 && <div className="p-6 text-sm text-zinc-500 text-center">No terminals found</div>}
+          {filtered.map((g) => {
+            const cityDisabled = exclude?.is_city && exclude.city === g.city;
+            return (
+              <div key={g.city}>
+                <button
+                  type="button"
+                  disabled={cityDisabled}
+                  onClick={() => pickCity(g.city, g.terminals)}
+                  className={`w-full text-left px-4 pt-3 pb-2 hover:bg-emerald-50 border-b border-black/5 ${cityDisabled ? "opacity-40 cursor-not-allowed" : ""}`}
+                  data-testid={`${testId}-city-${g.city.replace(/\s+/g, "-").toLowerCase()}`}
+                >
+                  <div className="te-overline text-[10px]">🏙 Any stop · {g.city}</div>
+                  <div className="text-[10px] font-mono text-zinc-500 mt-0.5">
+                    {g.terminals.length} pickup option{g.terminals.length === 1 ? "" : "s"} available
+                  </div>
+                </button>
+                {g.terminals.map((t) => {
+                  const disabled = exclude && !exclude.is_city && exclude.id === t.id;
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      disabled={disabled}
+                      onClick={() => { onChange(t); setOpen(false); setQ(""); }}
+                      className={`w-full text-left px-4 py-3 hover:bg-zinc-50 border-b border-black/5 flex items-center justify-between ${disabled ? "opacity-40 cursor-not-allowed" : ""}`}
+                      data-testid={`${testId}-opt-${t.code}`}
+                    >
+                      <div>
+                        <div className="text-sm font-semibold">{t.name}</div>
+                        <div className="text-[10px] font-mono text-zinc-500 tracking-wider">{t.code} · {t.state}</div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })}
+          {filtered.length === 0 && <div className="p-6 text-sm text-zinc-500 text-center">No terminals or cities found</div>}
         </div>
       )}
     </div>
@@ -101,38 +130,48 @@ export default function Home() {
   const [children, setChildren] = useState(parseInt(params.get("children") || "0"));
   const [error, setError] = useState("");
 
-  // Prefill from/to terminals when URL params present (e.g. after "Modify search")
+  // Prefill from/to when URL params present (terminal id OR city name).
   useEffect(() => {
     const fromId = params.get("from");
     const toId = params.get("to");
-    if (!fromId && !toId) return;
+    const fromCity = params.get("from_city");
+    const toCity = params.get("to_city");
+    if (!fromId && !toId && !fromCity && !toCity) return;
     api.get("/terminals").then(({ data }) => {
       if (fromId) {
         const f = data.all.find((t) => t.id === fromId);
         if (f) setFrom(f);
+      } else if (fromCity) {
+        const stops = data.all.filter((t) => t.city === fromCity);
+        setFrom({ id: null, is_city: true, city: fromCity, name: `Any stop · ${fromCity}`, code: fromCity.slice(0, 3).toUpperCase(), stop_count: stops.length });
       }
       if (toId) {
         const t = data.all.find((x) => x.id === toId);
         if (t) setTo(t);
+      } else if (toCity) {
+        const stops = data.all.filter((t) => t.city === toCity);
+        setTo({ id: null, is_city: true, city: toCity, name: `Any stop · ${toCity}`, code: toCity.slice(0, 3).toUpperCase(), stop_count: stops.length });
       }
     }).catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const submit = (e) => {
     e.preventDefault();
     setError("");
-    if (!from || !to) return setError("Please select both departure and arrival terminals.");
-    if (from.id === to.id) return setError("Departure and arrival cannot be the same.");
+    if (!from || !to) return setError("Please select both departure and arrival.");
+    if (!from.is_city && !to.is_city && from.id === to.id) return setError("Departure and arrival cannot be the same.");
+    if (from.is_city && to.is_city && from.city === to.city) return setError("Departure and arrival cities cannot be the same.");
     if (adults + children < 1) return setError("At least one passenger is required.");
-    const params = new URLSearchParams({
-      from: from.id,
-      to: to.id,
+    const q = new URLSearchParams({
       date,
       adults: String(adults),
       children: String(children),
     });
-    navigate(`/search?${params.toString()}`);
+    if (from.is_city) q.set("from_city", from.city);
+    else q.set("from", from.id);
+    if (to.is_city) q.set("to_city", to.city);
+    else q.set("to", to.id);
+    navigate(`/search?${q.toString()}`);
   };
 
   return (
@@ -286,7 +325,7 @@ function PopularRoutes() {
         <div>
           <div className="te-overline mb-2">Popular routes</div>
           <h2 className="text-3xl md:text-5xl font-black tracking-tight">
-            Where everyone's going <span className="text-[#B5121B]">today.</span>
+            Where everyone&apos;s going <span className="text-[#B5121B]">today.</span>
           </h2>
         </div>
         <div className="font-mono text-[10px] text-zinc-500 tracking-wider">

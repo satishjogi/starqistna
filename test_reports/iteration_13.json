@@ -1,0 +1,38 @@
+{
+  "summary": "City-level /api/search feature fully verified end-to-end. Backend: 7/7 pytest cases pass (stop-level regression + city-to-city + mixed mode + 400 error branches). Frontend Playwright: home city picker → 🏙 icon + 'Any stop · Kuala Lumpur' text visible, FROM chip renders 'Kuala Lumpur / Any stop · 4 options', TO chip renders 'Singapore / Any stop · 2 options', search URL emits from_city=Kuala+Lumpur&to_city=Singapore (NOT from=/to=), city-mode results page renders 'Any stop · <city>' label + schedule cards + Select button. Stop-level regression: TBS→<terminal> picks emit from=<uuid>&to=<uuid> (no from_city/to_city), empty-state try-tomorrow link preserves stop mode. City-mode results actually aggregate more than a single pair (verified via API assertion).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Modify Search back-link on /search results", "issue": "Top 'MODIFY SEARCH' link (SearchResults.jsx:59) and bottom 'Back to Search' link (SearchResults.jsx:194) hardcode only from/to terminal ids. When user arrived via city mode (from_city/to_city), these links produce /?from=&to=&... which loses the city selection and lands them on a blank Home form. Home.jsx prefill useEffect DOES handle from_city/to_city — the fix is just to include those params in the back-link URLs.", "affected_selectors": ["[data-testid='back-home']", "[data-testid='back-to-search-bottom']"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_city_search.py",
+    "/app/test_reports/pytest/iteration13_results.xml"
+  ],
+  "action_items": [
+    "MINOR: Fix Modify-Search / Back-to-Search links in SearchResults.jsx (lines 59 & 194) to also include from_city/to_city when in city mode — otherwise city-mode users lose their selection on going back to Home.",
+    "NOTE (spec vs code): Review request referenced data-testid 'home-from-select-city-kuala-lumpur' and 'home-from-select-opt-TBS'. Actual code uses 'from-terminal-city-kuala-lumpur' and 'from-terminal-opt-TBS' (Home.jsx passes testId='from-terminal' / 'to-terminal'). Not a bug — the actual test-ids are consistent and testable — but flagging in case main agent intended to rename them."
+  ],
+  "critical_code_review_comments": [
+    "backend/server.py:512-610 (search_schedules): clean 2-mode implementation. from_ids/to_ids resolved separately from either terminal_id or city, with a graceful fallback for legacy terminals missing is_pickup/is_dropoff fields. Query optimizes to direct equality when single-stop, $in when multi. Post-query enrichment builds from_meta / to_meta correctly with is_city + stop_count for city mode. Seat-availability aggregation is single-round-trip. No _id leaks.",
+    "backend/server.py:553 raises HTTPException(400, ...) if from_ids OR to_ids is empty — this correctly covers both 'no params at all' and 'bogus city name' cases (verified with both test cases).",
+    "frontend/pages/Home.jsx:158-175 submit handler: sets from_city/to_city OR from/to based on is_city flag — never both. URLSearchParams encodes 'Kuala Lumpur' as 'Kuala+Lumpur' which the backend accepts (Python decodes '+' as space). Verified.",
+    "frontend/pages/Home.jsx:134-156 prefill useEffect: correctly reconstructs city-mode chip from from_city/to_city URL params, including stop_count from data.all.filter(...).length. Handles all 4 combinations (from-id/from-city × to-id/to-city).",
+    "frontend/pages/SearchResults.jsx:27-39: correctly reads either terminal id OR city from URL and forwards to /api/search with the right param names. Good.",
+    "frontend/pages/SearchResults.jsx:59 & 194: Back-link URLs do NOT preserve from_city/to_city (see integration_issues). Small fix.",
+    "frontend/pages/SearchResults.jsx:98-119: try-tomorrow link IS mode-aware (checks from vs fromCity, to vs toCity) and preserves whichever mode the user used. Good.",
+    "The exclude= prop on TerminalSelect correctly disables the same-city option in the other picker when a city is selected (Home.jsx:79 cityDisabled) — nice UX touch.",
+    "code-quality carry-over from iteration_12: server.py is now 3449+ lines. Still recommend splitting into routers."
+  ],
+  "updated_files": ["/app/backend/tests/test_city_search.py"],
+  "success_rate": {"backend": "100% (7/7)", "frontend": "100% (13/13 assertions)"},
+  "test_credentials": "Not needed for this batch — /api/search is a public endpoint. Admin: admin@starqistna.com / Admin@123 available if needed.",
+  "seed_data_creation": "None. All tests use existing seeded terminals (KL: 4 stops, SG: 2 stops in preview env) and pre-existing schedules.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Reusable test file: /app/backend/tests/test_city_search.py (7 tests, ~1.2s). Key facts: (1) Preview env has 4 KL terminals and 2 SG terminals (stop_count assertions rely on >=1, so safe). (2) Home data-testid pattern is `{testId}-city-{city-lower-hyphen}` and `{testId}-opt-{code}` — NOT `home-from-select-*` as the review-request spec text suggested. (3) City-level search does aggregate real results — verified 1 KL→SG schedule visible on 2026-08-02. (4) URLSearchParams encodes spaces as '+' — backend accepts. (5) Modify-Search back-link bug: minor, doesn't affect this batch's acceptance criteria but user-visible when navigating back from city-mode results. (6) Booking pipeline was NOT re-tested here (main agent explicitly said 'don't test pickup/drop-off selection' — separate batch). Existing regression coverage for the booking flow lives in test_bus_booking_api.py.",
+  "rca of the issue": "N/A — no bugs found in the primary feature under test."
+}
