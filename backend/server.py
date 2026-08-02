@@ -3448,6 +3448,20 @@ async def _ensure_indexes():
     # GoHub / CTS audit trail — indexes for post-mortem queries.
     await db.gohub_logs.create_index([("started_at", ASCENDING)])
     await db.gohub_logs.create_index([("operation", ASCENDING)])
+    # Admin invites: auto-expire at `expires_at`
+    await db.admin_invites.create_index("expires_at", expireAfterSeconds=0)
+    await db.admin_invites.create_index([("email", ASCENDING)])
+    await db.admin_invites.create_index([("token_fp", ASCENDING)])
+    await db.feedback.create_index([("created_at", ASCENDING)])
+    await db.feedback.create_index([("status", ASCENDING)])
+    # Backfill child_fare on legacy schedules (defaults to half adult fare)
+    try:
+        await db.schedules.update_many(
+            {"child_fare": {"$exists": False}},
+            [{"$set": {"child_fare": {"$round": [{"$multiply": ["$adult_fare", 0.5]}, 2]}}}],
+        )
+    except Exception as e:
+        logger.warning("child_fare backfill skipped: %s", e)
 
 
 # ---------- GoHub / CTS admin probe (dev + smoke-test only) ----------
@@ -3525,20 +3539,6 @@ async def admin_gohub_probe(body: GoHubProbeBody, request: Request, user: dict =
 
     await log_audit(user, "probe", "gohub", trans_id, {"steps_count": len(steps)}, request)
     return {"trans_id": trans_id, "steps": steps}
-    # Admin invites: auto-expire at `expires_at`
-    await db.admin_invites.create_index("expires_at", expireAfterSeconds=0)
-    await db.admin_invites.create_index([("email", ASCENDING)])
-    await db.admin_invites.create_index([("token_fp", ASCENDING)])
-    await db.feedback.create_index([("created_at", ASCENDING)])
-    await db.feedback.create_index([("status", ASCENDING)])
-    # Backfill child_fare on legacy schedules (defaults to half adult fare)
-    try:
-        await db.schedules.update_many(
-            {"child_fare": {"$exists": False}},
-            [{"$set": {"child_fare": {"$round": [{"$multiply": ["$adult_fare", 0.5]}, 2]}}}],
-        )
-    except Exception as e:
-        logger.warning("child_fare backfill skipped: %s", e)
 
 
 @api.get("/")

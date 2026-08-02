@@ -1,0 +1,39 @@
+{
+  "summary": "Follow-up bug-fix verification: the previously-orphaned startup index/backfill block (admin_invites TTL, feedback indexes, child_fare backfill) has been moved back into the startup indexes function. Backend restarts cleanly, all target indexes exist, backfill completed. 12/12 gohub tests pass. Auth + regression endpoints all green.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "verification_details": {
+    "gohub_pytest": "12/12 passed (/app/test_reports/pytest/gohub_results.xml)",
+    "admin_invites_indexes": "expires_at_1 (expireAfterSeconds=0), email_1, token_fp_1 — all present",
+    "feedback_indexes": "created_at_1, status_1 — both present",
+    "child_fare_backfill": "schedules with missing child_fare = 0 / 4509 total",
+    "gohub_logs_indexes": "started_at_1, operation_1 present",
+    "endpoints": {
+      "GET /api/health": 200,
+      "POST /api/admin/gohub/probe (no token)": 401,
+      "POST /api/admin/gohub/probe (non-admin)": 403,
+      "POST /api/admin/gohub/probe (admin, GOHUB_ENABLED=false)": "200 dry-run OK with reserve+query steps",
+      "GET /api/admin/routes": 200,
+      "GET /api/admin/terminals": 200,
+      "POST /api/auth/login (admin)": "200 with access_token"
+    },
+    "backend_startup": "clean — 'Star Qistna startup complete', no exceptions"
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_gohub_client.py",
+    "/app/test_reports/pytest/gohub_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Fix verified — startup block correctly placed at lines 3451-3464 of server.py before the admin_gohub_probe endpoint. Prior dead code inside the endpoint has been removed.",
+    "server.py still 3584 lines — modularization backlog item (not blocking)."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "skipped"},
+  "test_credentials": "admin@starqistna.com / Admin@123 (verified)",
+  "seed_data_creation": "Registered nonadm_v16@test.com for 403 path verification.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Startup indexes for admin_invites/feedback and child_fare backfill are now correctly executed on startup. Live CTS SOAP calls still expected to return 'Invalid Server IP' unless from whitelisted VPS 187.77.133.105. Non-admin registration uses `full_name` not `name`.",
+  "rca of the issue": "Bug had been introduced when the ensure_indexes block was accidentally pasted AFTER a `return` inside admin_gohub_probe (post-return = unreachable). The fix relocated those statements immediately after the gohub_logs indexes inside the startup indexes function, restoring TTL on admin_invites and adding feedback indexes + child_fare backfill on every startup. Verified live via motor index_information() and count_documents()."
+}
