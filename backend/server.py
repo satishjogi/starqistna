@@ -2437,6 +2437,24 @@ class CreateScheduleBody(BaseModel):
     child_fare: float
     total_seats: int = Field(ge=12, le=60, default=40)
     currency: str = "myr"
+    # Optional link to the Routes system (P0 wiring). If provided, the schedule
+    # is treated as an instance of that route — customer flow will use the
+    # route's pickup/dropoff pairings for pricing + boarding UX.
+    route_id: Optional[str] = None
+    trip_no: Optional[str] = None  # CTS/GoHub trip identifier, max 10 chars
+
+
+class ScheduleUpdateBody(BaseModel):
+    departure_date: Optional[str] = None
+    departure_time: Optional[str] = None
+    arrival_time: Optional[str] = None
+    bus_operator: Optional[str] = None
+    bus_type: Optional[Literal["VIP 27", "Executive", "Standard"]] = None
+    adult_fare: Optional[float] = None
+    child_fare: Optional[float] = None
+    total_seats: Optional[int] = Field(default=None, ge=12, le=60)
+    route_id: Optional[str] = None
+    trip_no: Optional[str] = None
 
 
 class BulkScheduleBody(BaseModel):
@@ -2451,6 +2469,24 @@ class BulkScheduleBody(BaseModel):
     adult_fare: float
     child_fare: float
     total_seats: int = Field(ge=12, le=60, default=40)
+    # Optional link to a Route (same rationale as CreateScheduleBody).
+    route_id: Optional[str] = None
+    trip_no: Optional[str] = None
+
+
+class BulkDeleteScheduleFilter(BaseModel):
+    """Filter for bulk delete previews and executions.
+
+    All fields are optional — combine to narrow the match. At least one filter
+    MUST be provided or the request is rejected (safety guard).
+    """
+    from_terminal_id: Optional[str] = None
+    to_terminal_id: Optional[str] = None
+    start_date: Optional[str] = None  # YYYY-MM-DD (inclusive)
+    end_date: Optional[str] = None    # YYYY-MM-DD (inclusive)
+    route_id: Optional[str] = None
+    unlinked_only: bool = False       # schedules where route_id is null / missing
+    force: bool = False               # allow deleting even schedules that have bookings
 
 
 # (AppSettingsBody is defined alongside the settings endpoints earlier in the file.)
@@ -2725,6 +2761,17 @@ async def admin_create_schedule(body: CreateScheduleBody, request: Request, user
     if not origin:
         raise HTTPException(400, "Invalid from_terminal_id")
     derived_currency = COUNTRY_TO_CURRENCY.get(origin.get("country", "MY"), "myr")
+    # If a route is linked, validate it exists and matches the from/to terminals.
+    if body.route_id:
+        route = await db.routes.find_one({"id": body.route_id}, {"_id": 0})
+        if not route:
+            raise HTTPException(400, "Linked route_id does not exist")
+        boarding_ids = {s["terminal_id"] for s in route.get("boarding_stops", [])}
+        alighting_ids = {s["terminal_id"] for s in route.get("alighting_stops", [])}
+        if body.from_terminal_id not in boarding_ids:
+            raise HTTPException(400, "from_terminal_id must be one of the route's boarding stops")
+        if body.to_terminal_id not in alighting_ids:
+            raise HTTPException(400, "to_terminal_id must be one of the route's alighting stops")
     doc = body.model_dump()
     doc["currency"] = derived_currency
     doc["id"] = new_id()
@@ -2741,6 +2788,7 @@ async def admin_create_schedule(body: CreateScheduleBody, request: Request, user
         "total_seats": doc.get("total_seats"),
         "layout_config": doc.get("layout_config"),
         "currency": derived_currency,
+        "route_id": doc.get("route_id"),
     }, request)
     return doc
 
@@ -2770,6 +2818,18 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
         raise HTTPException(400, "From and To terminals must differ")
     derived_currency = COUNTRY_TO_CURRENCY.get(origin.get("country", "MY"), "myr")
 
+    # Validate optional route link once, up front.
+    if body.route_id:
+        route = await db.routes.find_one({"id": body.route_id}, {"_id": 0})
+        if not route:
+            raise HTTPException(400, "Linked route_id does not exist")
+        boarding_ids = {s["terminal_id"] for s in route.get("boarding_stops", [])}
+        alighting_ids = {s["terminal_id"] for s in route.get("alighting_stops", [])}
+        if body.from_terminal_id not in boarding_ids:
+            raise HTTPException(400, "from_terminal_id must be one of the route's boarding stops")
+        if body.to_terminal_id not in alighting_ids:
+            raise HTTPException(400, "to_terminal_id must be one of the route's alighting stops")
+
     dow_set = set(body.days_of_week)
     created = 0
     skipped = 0
@@ -2786,7 +2846,7 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
             if existing:
                 skipped += 1
             else:
-                await db.schedules.insert_one({
+                doc = {
                     "id": new_id(),
                     "from_terminal_id": body.from_terminal_id,
                     "to_terminal_id": body.to_terminal_id,
@@ -2801,7 +2861,12 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
                     "layout_config": _layout_for_bus_type(body.bus_type),
                     "currency": derived_currency,
                     "created_at": utcnow().isoformat(),
-                })
+                }
+                if body.route_id:
+                    doc["route_id"] = body.route_id
+                if body.trip_no:
+                    doc["trip_no"] = body.trip_no
+                await db.schedules.insert_one(doc)
                 created += 1
         cur += timedelta(days=1)
     await log_audit(user, "bulk_create", "schedule", None, {
@@ -2859,6 +2924,125 @@ async def admin_delete_schedules_range(
         "deleted": result.deleted_count,
     }, request)
     return {"deleted": result.deleted_count, "range": f"{start_date}..{end_date}"}
+
+
+# ---------- Schedule PATCH + Bulk delete (P0 wiring) ----------
+def _build_bulk_delete_query(f: BulkDeleteScheduleFilter) -> dict:
+    """Convert a BulkDeleteScheduleFilter into a Mongo query.
+
+    Raises HTTPException(400) if no filter is set at all — this is a safety
+    guard so a bad UI form never accidentally deletes all 4,500+ schedules.
+    """
+    q: dict = {}
+    if f.from_terminal_id:
+        q["from_terminal_id"] = f.from_terminal_id
+    if f.to_terminal_id:
+        q["to_terminal_id"] = f.to_terminal_id
+    if f.route_id:
+        q["route_id"] = f.route_id
+    if f.start_date or f.end_date:
+        date_q: dict = {}
+        if f.start_date:
+            try:
+                datetime.fromisoformat(f.start_date)
+            except ValueError:
+                raise HTTPException(400, "Invalid start_date (expected YYYY-MM-DD)")
+            date_q["$gte"] = f.start_date
+        if f.end_date:
+            try:
+                datetime.fromisoformat(f.end_date)
+            except ValueError:
+                raise HTTPException(400, "Invalid end_date (expected YYYY-MM-DD)")
+            date_q["$lte"] = f.end_date
+        q["departure_date"] = date_q
+    if f.unlinked_only:
+        # Match schedules that have no route_id at all OR an explicit null.
+        q["$or"] = [{"route_id": {"$exists": False}}, {"route_id": None}]
+    if not q:
+        raise HTTPException(400, "At least one filter must be provided (safety guard).")
+    return q
+
+
+@api.patch("/admin/schedules/{schedule_id}")
+async def admin_update_schedule(schedule_id: str, body: ScheduleUpdateBody, request: Request,
+                                user: dict = Depends(require_admin)):
+    existing = await db.schedules.find_one({"id": schedule_id})
+    if not existing:
+        raise HTTPException(404, "Schedule not found")
+    updates = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    if "route_id" in updates:
+        route = await db.routes.find_one({"id": updates["route_id"]}, {"_id": 0})
+        if not route:
+            raise HTTPException(400, "route_id does not exist")
+        # Also ensure the schedule's from/to are within the route's boarding/alighting.
+        boarding_ids = {s["terminal_id"] for s in route.get("boarding_stops", [])}
+        alighting_ids = {s["terminal_id"] for s in route.get("alighting_stops", [])}
+        if existing["from_terminal_id"] not in boarding_ids:
+            raise HTTPException(400, "This schedule's from_terminal is not part of the target route's boarding stops")
+        if existing["to_terminal_id"] not in alighting_ids:
+            raise HTTPException(400, "This schedule's to_terminal is not part of the target route's alighting stops")
+    if "bus_type" in updates:
+        updates["layout_config"] = _layout_for_bus_type(updates["bus_type"])
+    if not updates:
+        raise HTTPException(400, "No changes provided")
+    result = await db.schedules.update_one({"id": schedule_id}, {"$set": updates})
+    if result.matched_count == 0:
+        raise HTTPException(404, "Schedule not found")
+    doc = await db.schedules.find_one({"id": schedule_id}, {"_id": 0})
+    await log_audit(user, "update", "schedule", schedule_id, {"fields": list(updates.keys())}, request)
+    return doc
+
+
+@api.post("/admin/schedules/bulk-delete/preview")
+async def admin_bulk_delete_preview(body: BulkDeleteScheduleFilter, user: dict = Depends(require_admin)):
+    """Return a count-only preview so admin can confirm before executing.
+
+    - matched:    total schedules matching the filter
+    - blocked:    those with ≥1 booking (cannot be safely deleted)
+    - deletable:  matched - blocked
+    """
+    q = _build_bulk_delete_query(body)
+    matched = await db.schedules.count_documents(q)
+    if matched == 0:
+        return {"matched": 0, "blocked": 0, "deletable": 0}
+    # Look up which of those have bookings.
+    ids = [s["id"] async for s in db.schedules.find(q, {"_id": 0, "id": 1})]
+    blocking_ids = await db.bookings.distinct("schedule_id", {"schedule_id": {"$in": ids}})
+    return {
+        "matched": matched,
+        "blocked": len(blocking_ids),
+        "deletable": matched - len(blocking_ids),
+    }
+
+
+@api.post("/admin/schedules/bulk-delete")
+async def admin_bulk_delete_execute(body: BulkDeleteScheduleFilter, request: Request,
+                                    user: dict = Depends(require_admin)):
+    """Delete matching schedules. By default skips any with bookings; set force=true to override."""
+    q = _build_bulk_delete_query(body)
+    docs = [s async for s in db.schedules.find(q, {"_id": 0, "id": 1})]
+    ids = [s["id"] for s in docs]
+    if not ids:
+        return {"deleted": 0, "skipped": 0}
+    blocking_ids = await db.bookings.distinct("schedule_id", {"schedule_id": {"$in": ids}})
+    if body.force:
+        target_ids = ids
+        skipped = 0
+    else:
+        target_ids = [i for i in ids if i not in blocking_ids]
+        skipped = len(blocking_ids)
+    if not target_ids:
+        return {"deleted": 0, "skipped": skipped, "note": "All matched schedules have bookings. Use force=true to override."}
+    result = await db.schedules.delete_many({"id": {"$in": target_ids}})
+    # Free any seat_locks tied to the deleted schedules.
+    await db.seat_locks.delete_many({"schedule_id": {"$in": target_ids}})
+    await log_audit(user, "bulk_delete", "schedule", None, {
+        "filter": body.model_dump(exclude_unset=True),
+        "deleted": result.deleted_count,
+        "skipped_with_bookings": skipped,
+        "force": body.force,
+    }, request)
+    return {"deleted": result.deleted_count, "skipped": skipped, "force": body.force}
 
 
 # ---------- Seeding & Indexes ----------

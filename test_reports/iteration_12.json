@@ -1,0 +1,39 @@
+{
+  "summary": "P0 admin slice — Routes CRUD + Schedule PATCH + Bulk-delete preview/execute + Terminal optional fields — fully verified. Backend: 15/15 pytest cases pass (test_routes_and_bulk_delete.py). Frontend Playwright: admin login → routes tab → create KL-SG-TEST route with TBS pickup + GMC dropoff + enabled pairing → save succeeds → route appears in list → sched-route dropdown lists new route → schedules tab shows bulk-delete-panel + bulk-preview-btn → bookings/payments/admins/audit-log/feedback tabs all load. Test route cleaned up via API.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Admin > Add Schedule (sched-route select)", "issues": ["Cosmetic React hydration warning: '<span> cannot be a child of <option>'. Root cause is emergent instrumentation injecting <span data-ve-dynamic> inside <option> children — NOT this batch. Dropdown still functions (verified: 'KL-SG-TEST · Test Route KL to SG …' visible + selectable). Same warning noted in iteration_11."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_routes_and_bulk_delete.py",
+    "/app/test_reports/pytest/iteration12_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Routes CRUD: POST/GET/PATCH/DELETE all excluding _id via _serialize_route + {'_id':0} projections — clean.",
+    "Route validation (_validate_route_stops) correctly rejects (a) unknown terminal_ids, (b) pickup_id not in boarding_stops, (c) dropoff_id not in alighting_stops. Duplicate-code returns 400 with 'exists' in detail.",
+    "POST /api/admin/schedules with route_id validates from_terminal_id ∈ boarding_stops AND to_terminal_id ∈ alighting_stops — verified with KLS (not in route) → 400 with 'boarding' message. Same guard duplicated in bulk-create (server.py:2822-2831).",
+    "PATCH /api/admin/schedules/{id}: correctly filters None values, validates route_id existence AND that schedule's from/to fit route bounds, rebuilds layout_config on bus_type change, 400 on empty update, 404 on missing id. Returns doc without _id.",
+    "POST /api/admin/schedules/bulk-delete/preview with {} → 400 'At least one filter must be provided (safety guard).' — verified. With {unlinked_only:true} → 200 with matched/blocked/deletable numeric (all ints, deletable == matched-blocked).",
+    "POST /api/admin/schedules/bulk-delete (force=false) verified end-to-end: created 2 schedules under a test route, seeded 1 booking on one of them via pymongo, called bulk-delete → response {deleted:1, skipped:1} — schedule with booking survived. Preview showed matched=2, blocked=1, deletable=1. Force cleanup via {force:true}.",
+    "Bulk-delete zero-match branch returns {deleted:0, skipped:0} (200) — no 400/no accidental all-delete.",
+    "seat_locks are cleaned up alongside deleted schedules (server.py:3038) — good side-effect hygiene.",
+    "TerminalCreateBody accepts new optional fields (landmark_address, lat, lng, cts_code, is_pickup, is_dropoff). Values round-trip intact via GET /admin/terminals (verified with lat=3.14, lng=101.7, cts_code='CTS-TEST-01', is_pickup=True, is_dropoff=False).",
+    "Auth regression: admin login 200 + is_admin=true + no must_change_password; POST /auth/google/callback with fake code → 401 (behavior confirmed).",
+    "Frontend RoutesTab renders correct data-testids (pickup-picker, dropoff-picker, pickup-add-{code}, dropoff-add-{code}, pair-{from}-{to}, route-save-btn) — matches request spec exactly.",
+    "SchedulesTab bulk-delete-panel + bulk-preview-btn + bulk-filter-{route,from,to,start,end,unlinked} + bulk-force-toggle + bulk-execute-btn all present.",
+    "AddScheduleTab sched-route dropdown populates from /admin/routes on mount and includes newly-created route immediately after save (verified in Playwright).",
+    "code-quality carry-over: server.py now 3449 lines (was 2884 in iteration_11). Splitting into routers (auth/admin_routes/admin_schedules/admin_terminals/bookings/payments) is increasingly important — recommend to main agent."
+  ],
+  "updated_files": ["/app/backend/tests/test_routes_and_bulk_delete.py"],
+  "success_rate": {"backend": "100% (15/15)", "frontend": "100% (all assertions pass)"},
+  "test_credentials": "Admin: admin@starqistna.com / Admin@123 — no must_change_password redirect (verified). Login button text is 'LOG IN' (not type=submit — for future Playwright).",
+  "seed_data_creation": "test_bulk_delete_skips_schedules_with_bookings seeds a fake booking directly in Mongo (id=TEST_BULK_*) attached to one of 2 test schedules under a temp route, then cleans up (booking delete + bulk-delete force=true + route delete). No orphan data left. Playwright test creates route KL-SG-TEST and deletes it via API in finally block.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Reusable test file: /app/backend/tests/test_routes_and_bulk_delete.py (15 tests, ~4s runtime). Key gotchas: (1) Google callback endpoint is POST /api/auth/google/callback with body {code, redirect_uri} — NOT /google/session. Session endpoint returns 404. (2) For Playwright login use page.get_by_role('button', name='LOG IN') — the Login button has no type='submit'. (3) The pair-{FROM}-{TO} cell in RoutesTab is a <td> with a nested <button> child that must be clicked to enable a pairing. Selector: page.locator('[data-testid=pair-TBS-GMC] button').first (4) sched-route select emits harmless '<span> cannot be a child of <option>' warning due to emergent instrumentation — ignore. (5) BulkDeleteScheduleFilter requires at least ONE filter field truthy, else 400 'safety guard' — good behavior. (6) Terminal count in preview environment: 14. Schedules: 4509."
+}

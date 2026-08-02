@@ -3,7 +3,9 @@ import api from "../../../lib/api";
 
 export default function AddScheduleTab() {
   const [terminals, setTerminals] = useState([]);
+  const [routes, setRoutes] = useState([]);
   const [form, setForm] = useState({
+    route_id: "", trip_no: "",
     from_terminal_id: "", to_terminal_id: "",
     start_date: "", end_date: "",
     days_of_week: [0, 1, 2, 3, 4, 5, 6],
@@ -17,6 +19,7 @@ export default function AddScheduleTab() {
 
   useEffect(() => {
     api.get("/admin/terminals").then(({ data }) => setTerminals(data)).catch(() => {});
+    api.get("/admin/routes").then(({ data }) => setRoutes(data)).catch(() => {});
     api.get("/settings").then(({ data }) => {
       setFxRate(data.sgd_to_myr_rate);
       setFxRateInput(String(data.sgd_to_myr_rate));
@@ -58,17 +61,44 @@ export default function AddScheduleTab() {
       return;
     }
     try {
-      const { data } = await api.post("/admin/schedules/bulk", {
+      const payload = {
         ...form,
         adult_fare: parseFloat(form.adult_fare),
         child_fare: parseFloat(form.child_fare),
         total_seats: parseInt(form.total_seats, 10),
-      });
+      };
+      if (!payload.route_id) delete payload.route_id;
+      if (!payload.trip_no) delete payload.trip_no;
+      const { data } = await api.post("/admin/schedules/bulk", payload);
       setMsg(`Created ${data.created} schedule(s)${data.skipped_duplicates ? ` · ${data.skipped_duplicates} skipped (duplicates)` : ""} · billed in ${data.currency.toUpperCase()}.`);
     } catch (e) {
       setMsg(e?.response?.data?.detail || "Failed");
     }
   };
+
+  // When a route is picked, narrow the from/to selects to just its boarding/alighting stops.
+  const selectedRoute = form.route_id ? routes.find((r) => r.id === form.route_id) : null;
+  const fromChoices = selectedRoute
+    ? terminals.filter((t) => selectedRoute.boarding_stops?.some((s) => s.terminal_id === t.id))
+    : terminals;
+  const toChoices = selectedRoute
+    ? terminals.filter((t) => selectedRoute.alighting_stops?.some((s) => s.terminal_id === t.id))
+    : terminals;
+
+  // Auto-apply the route's pairing price when both from/to selected.
+  useEffect(() => {
+    if (!selectedRoute || !form.from_terminal_id || !form.to_terminal_id) return;
+    const pair = selectedRoute.pairings?.find(
+      (p) => p.pickup_id === form.from_terminal_id && p.dropoff_id === form.to_terminal_id,
+    );
+    if (pair) {
+      setForm((prev) => ({
+        ...prev,
+        adult_fare: pair.adult_fare ?? prev.adult_fare,
+        child_fare: pair.child_fare ?? prev.child_fare,
+      }));
+    }
+  }, [form.route_id, form.from_terminal_id, form.to_terminal_id, selectedRoute]);
 
   // fxRate is read in the saveFxRate success message; suppress unused var lint
   void fxRate;
@@ -101,18 +131,44 @@ export default function AddScheduleTab() {
       </div>
 
       <form onSubmit={createSched} className="te-card p-6 mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl" data-testid="add-sched-form">
+        <div className="md:col-span-2">
+          <label className="te-label">Link to route <span className="text-zinc-400">(optional — auto-fills fare from pairings)</span></label>
+          <select
+            className="te-input"
+            value={form.route_id}
+            onChange={(e) => setForm({ ...form, route_id: e.target.value, from_terminal_id: "", to_terminal_id: "" })}
+            data-testid="sched-route"
+          >
+            <option value="">— None (create unlinked) —</option>
+            {routes.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.code} · {r.name} ({r.origin_city} → {r.destination_city})
+              </option>
+            ))}
+          </select>
+          {selectedRoute && (
+            <div className="text-[10px] font-mono text-emerald-700 mt-1">
+              ✓ Linked · {selectedRoute.boarding_stops?.length ?? 0} pickup(s) · {selectedRoute.alighting_stops?.length ?? 0} drop-off(s) · {selectedRoute.pairings?.length ?? 0} pairings
+            </div>
+          )}
+        </div>
         <div>
-          <label className="te-label">From Terminal</label>
-          <select className="te-input" required value={form.from_terminal_id} onChange={(e) => setForm({ ...form, from_terminal_id: e.target.value })}>
+          <label className="te-label">Trip No <span className="text-zinc-400">(CTS, ≤10 chars, opt)</span></label>
+          <input className="te-input font-mono" maxLength={10} value={form.trip_no} onChange={(e) => setForm({ ...form, trip_no: e.target.value.toUpperCase() })} placeholder="SQ001" data-testid="sched-trip-no" />
+        </div>
+        <div /> {/* spacer to keep grid aligned */}
+        <div>
+          <label className="te-label">From Terminal{selectedRoute && <span className="text-emerald-600 text-[10px] ml-1">· narrowed to route</span>}</label>
+          <select className="te-input" required value={form.from_terminal_id} onChange={(e) => setForm({ ...form, from_terminal_id: e.target.value })} data-testid="sched-from">
             <option value="">Select</option>
-            {terminals.map((t) => <option key={t.id} value={t.id}>{t.city} · {t.name}</option>)}
+            {fromChoices.map((t) => <option key={t.id} value={t.id}>{t.city} · {t.name}</option>)}
           </select>
         </div>
         <div>
-          <label className="te-label">To Terminal</label>
-          <select className="te-input" required value={form.to_terminal_id} onChange={(e) => setForm({ ...form, to_terminal_id: e.target.value })}>
+          <label className="te-label">To Terminal{selectedRoute && <span className="text-emerald-600 text-[10px] ml-1">· narrowed to route</span>}</label>
+          <select className="te-input" required value={form.to_terminal_id} onChange={(e) => setForm({ ...form, to_terminal_id: e.target.value })} data-testid="sched-to">
             <option value="">Select</option>
-            {terminals.map((t) => <option key={t.id} value={t.id}>{t.city} · {t.name}</option>)}
+            {toChoices.map((t) => <option key={t.id} value={t.id}>{t.city} · {t.name}</option>)}
           </select>
         </div>
         <div>
