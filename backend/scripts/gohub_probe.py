@@ -34,7 +34,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from dotenv import load_dotenv
+# Make `gohub_client` importable when this file is run as `python scripts/gohub_probe.py`.
+# Without this, sys.path starts with `scripts/` and can't find the module.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from dotenv import load_dotenv  # noqa: E402
 
 
 def _load_env() -> None:
