@@ -51,12 +51,22 @@ export default function SearchResults() {
     navigate(`/seats/${sched.id}`);
   };
 
+  // Build a URL back to Home that preserves the current search mode (stop vs city).
+  const homeBackUrl = (() => {
+    const q = new URLSearchParams({ date: date || "", adults: String(adults), children: String(children) });
+    if (from) q.set("from", from);
+    else if (fromCity) q.set("from_city", fromCity);
+    if (to) q.set("to", to);
+    else if (toCity) q.set("to_city", toCity);
+    return `/?${q.toString()}`;
+  })();
+
   return (
     <div className="px-4 md:px-6 lg:px-10 py-10 min-h-[60vh]">
       {/* Breadcrumb header */}
       <div className="mb-8">
         <Link
-          to={`/?from=${from || ""}&to=${to || ""}&date=${date || ""}&adults=${adults}&children=${children}`}
+          to={homeBackUrl}
           className="text-xs font-mono text-zinc-500 hover:text-black"
           data-testid="back-home"
         >
@@ -191,7 +201,7 @@ export default function SearchResults() {
               End of {data.schedules.length} result{data.schedules.length === 1 ? "" : "s"}
             </div>
             <Link
-              to={`/?from=${from || ""}&to=${to || ""}&date=${date || ""}&adults=${adults}&children=${children}`}
+              to={homeBackUrl}
               className="te-btn-outline flex items-center gap-2"
               data-testid="back-to-search-bottom"
             >
