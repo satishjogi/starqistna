@@ -288,7 +288,7 @@ class GoHubClient:
         request_xml = _envelope(operation, body, ticket_details=ticket_details)
 
         if not self.enabled or not self.base_url:
-            payload = {"dry_run": True, "note": "GOHUB_ENABLED=false; returning mocked OK.",
+            payload = {"dry_run": True, "note": "GOHUB_ENABLED=false; enable it on the VPS to hit TBS.",
                        "status_code": "0", "status_msg": "OK (dry-run)"}
             await self._audit_log(operation, body, request_xml, payload, None, started, dry_run=True)
             return payload

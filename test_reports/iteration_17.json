@@ -1,0 +1,35 @@
+{
+  "summary": "Verified TBS GoHub demo tab end-to-end. Backend: 12/12 gohub tests pass, /api/admin/gohub/probe returns dry-run response with qr_string:null + qr_png_data_url:null and steps flagged dry_run:true when GOHUB_ENABLED=false. Toggled GOHUB_ENABLED=true and confirmed live TBS returns 'Invalid Server IP' cleanly captured as steps[0].ok=false with error.code and message containing 'Invalid Server IP' (expected — cluster IP not whitelisted). Reverted the flag afterwards. Regression endpoints (/api/health, admin login, /api/admin/routes, /api/admin/terminals) all 200. Frontend: admin login → /admin → gohub-test tab loads, form fields (trip, seat, from_counter, to_counter, run button) all present and interactive, clicking Run TBS Probe renders the SOAP trace showing dry_run:true, no ticket rendered (expected), other admin tabs (routes/stops/add-schedule/schedules/bookings) still switch without hard errors.",
+  "backend_issues": {"critical": [], "minor": [
+    {"endpoint": "/api/admin/gohub/probe (live)", "issue": "Review request predicted TBS error code '2' — TBS actually returns code '4' with message 'Invalid Server IP : |<ip>|'. Our endpoint captures the shape correctly (ok:false, error.code, error.message with 'Invalid Server IP'). Just a doc-vs-reality delta — the endpoint behaviour is correct."}
+  ]},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "AddScheduleTab (pre-existing, not related to gohub-test)", "issues": ["React hydration warning: <span> as child of <option>. Instrumentation-related, not blocking, appears when navigating to add-schedule tab."]}
+    ]
+  },
+  "verification_details": {
+    "gohub_pytest": "12/12 passed (/app/test_reports/pytest/iteration17_gohub.xml)",
+    "probe_dry_run_response": "{trans_id, steps:[reserve dry_run:true, query dry_run:true], qr_string:null, qr_png_data_url:null}",
+    "probe_live_response": "steps[0]={step:'reserve', ok:false, error:{code:'4', message:'Invalid Server IP : |104.198.214.223|'}}",
+    "endpoints": {"GET /api/health": 200, "POST /api/auth/login (admin)": 200, "GET /api/admin/routes": 200, "GET /api/admin/terminals": 200, "POST /api/admin/gohub/probe (admin, dry-run)": 200, "POST /api/admin/gohub/probe (admin, live)": 200},
+    "frontend": {"tab_renders": true, "form_fields_present": ["gh-trip", "gh-seat", "gh-from", "gh-to", "gh-run"], "run_click_shows_steps": true, "qr_hidden_in_dry_run": true, "regression_tabs_ok": ["routes", "stops", "add-schedule", "schedules", "bookings"]}
+  },
+  "test_report_links": ["/app/backend/tests/test_gohub_client.py", "/app/test_reports/pytest/iteration17_gohub.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is 3608 lines — modularization backlog still applies (not blocking).",
+    "GoHubTestTab.jsx sends fields (boarding_date, ic_no, contact, confirm, cancel) that align with GoHubProbeBody. Good.",
+    "Consider adding QR image render caching / size limit if user runs the probe many times, but non-blocking."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "admin@starqistna.com / Admin@123 (verified)",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "GOHUB_ENABLED is reset to false in /app/backend/.env. Live TBS returns error code '4' (not '2' as the request document indicated) with message 'Invalid Server IP : |<caller-ip>|'. Only whitelisted VPS 187.77.133.105 can obtain a real QR. Dry-run response shape confirmed as {trans_id, steps:[...], qr_string:null, qr_png_data_url:null}. Admin.jsx tab id is 'gohub-test' with [data-testid=admin-tab-gohub-test].",
+  "rca of the issue": "N/A — no bug found. The single observation is that TBS's live error code is '4', not '2' as noted in the review brief; the endpoint still surfaces the error cleanly with 'Invalid Server IP' in the message, matching the intent."
+}

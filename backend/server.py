@@ -3538,7 +3538,31 @@ async def admin_gohub_probe(body: GoHubProbeBody, request: Request, user: dict =
             steps.append({"step": "cancel", "ok": False, "error": {"code": e.code, "message": e.message}})
 
     await log_audit(user, "probe", "gohub", trans_id, {"steps_count": len(steps)}, request)
-    return {"trans_id": trans_id, "steps": steps}
+
+    # Extract the resulting QR string (from confirm if run, else from reserve) and
+    # encode it as a PNG data URL so the demo page can render it directly.
+    qr_string = None
+    for step in reversed(steps):
+        if step["ok"] and step["data"].get("qr"):
+            qr_string = step["data"]["qr"]
+            break
+    qr_png_data_url = None
+    if qr_string:
+        try:
+            import qrcode, base64, io
+            img = qrcode.make(qr_string)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            qr_png_data_url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+        except Exception as e:
+            logger.warning("QR image render failed: %s", e)
+
+    return {
+        "trans_id": trans_id,
+        "steps": steps,
+        "qr_string": qr_string,
+        "qr_png_data_url": qr_png_data_url,
+    }
 
 
 @api.get("/")
