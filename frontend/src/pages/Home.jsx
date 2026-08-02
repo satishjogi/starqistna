@@ -131,6 +131,8 @@ export default function Home() {
   const [error, setError] = useState("");
 
   // Prefill from/to when URL params present (terminal id OR city name).
+  // Intentional: only run on mount — `params` is a fresh object each render
+  // and re-including it would cause an infinite refetch loop.
   useEffect(() => {
     const fromId = params.get("from");
     const toId = params.get("to");
@@ -153,6 +155,7 @@ export default function Home() {
         setTo({ id: null, is_city: true, city: toCity, name: `Any stop · ${toCity}`, code: toCity.slice(0, 3).toUpperCase(), stop_count: stops.length });
       }
     }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const submit = (e) => {

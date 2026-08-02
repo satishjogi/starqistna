@@ -1,0 +1,28 @@
+{
+  "summary": "Verified two one-line bug fixes: (1) Home.jsx useEffect eslint-disable comment — CI=true yarn build compiled cleanly with zero errors/warnings on Home.jsx. (2) deploy.sh nginx reload block — bash -n parses OK, and the block now uses `systemctl list-unit-files | grep -qE '^nginx(\\.service)?\\s'` (matches both nginx and nginx.service), falls back to `nginx -s reload` when the binary exists, and prints a clear warning otherwise. Regression: 12/12 gohub_client tests pass, /api/health returns {status:ok}, admin login → /admin → gohub-test tab renders with [data-testid=gohub-test-tab] and [data-testid=gh-run] button; clicking Run TBS Probe returned a SOAP trace containing 'Invalid Server IP' (live path — GOHUB_ENABLED is true in current env; either dry_run or Invalid Server IP is acceptable per brief). Homepage loads, no page/console errors, and the '🏙 Kuala Lumpur · Any stop · 4 options' city-level pseudo-option is selectable in the From terminal picker.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "verification_details": {
+    "bug1_ci_build": "cd /app/frontend && CI=true yarn build → Compiled successfully. Exit 0. No 'React Hook useEffect has a missing dependency' error on Home.jsx.",
+    "bug2_deploy_sh": "bash -n /app/scripts/deploy.sh → exit 0. Lines 90-98 confirmed: systemctl regex match ^nginx(\\.service)?\\s → sudo systemctl reload nginx; elif command -v nginx → sudo nginx -s reload; else warn clearly.",
+    "gohub_pytest": "12/12 passed (/app/test_reports/pytest/iteration18_gohub.xml)",
+    "health": "/api/health → {\"status\":\"ok\"}",
+    "frontend_admin_gohub": {"admin-tab-gohub-test": true, "gohub-test-tab content": true, "gh-run button": true, "run response indicator (Invalid Server IP)": true},
+    "homepage": {"loaded": true, "city_any_stop_selectable": true, "selected_text": "🏙 Kuala Lumpur · Any stop · 4 options", "page_errors": []}
+  },
+  "test_report_links": ["/app/backend/tests/test_gohub_client.py", "/app/test_reports/pytest/iteration18_gohub.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "The eslint-disable-next-line comment sits on line 158 immediately before the `}, []);` — CRA/react-scripts will honour it (react-hooks/exhaustive-deps is enabled by default). Emergent's config disables that rule and reports 'unused directive' as a warning; this is harmless per the request note.",
+    "deploy.sh nginx block is robust: systemctl → nginx -s reload → warn. Good.",
+    "Note: GOHUB_ENABLED appears to be true in the current preview env (probe returned live 'Invalid Server IP' rather than dry_run). Both are acceptable per brief; flagging so main agent is aware if they want to reset it before handoff."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "admin@starqistna.com / Admin@123 (verified)",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Both one-line fixes verified. CI=true yarn build passes clean on Home.jsx. deploy.sh nginx block parses and handles all 3 cases (systemd unit / binary fallback / neither). GOHUB_ENABLED is currently true in backend/.env — live TBS probe returns 'Invalid Server IP : |<caller-ip>|' as expected. All 12 gohub tests still green.",
+  "rca of the issue": "N/A — both bug fixes verified working as intended."
+}

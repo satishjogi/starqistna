@@ -87,11 +87,14 @@ if systemctl list-unit-files | grep -q starqistna-backend; then
 else
     warn "starqistna-backend systemd unit not found — skipping backend restart."
 fi
-if systemctl list-unit-files | grep -q "^nginx\.service"; then
+if systemctl list-unit-files | grep -qE "^nginx(\.service)?\s"; then
     sudo systemctl reload nginx
     echo "  ✓ nginx reloaded"
+elif command -v nginx >/dev/null 2>&1; then
+    sudo nginx -s reload 2>/dev/null && echo "  ✓ nginx reloaded (via nginx -s reload)" \
+        || warn "nginx found but reload failed — reload it manually."
 else
-    warn "nginx systemd unit not found — skipping nginx reload."
+    warn "nginx not found — skipping. Serve /app/frontend/build/ with your web server of choice."
 fi
 
 log "Deploy complete."
