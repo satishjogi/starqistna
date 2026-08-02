@@ -3,6 +3,7 @@ Transit E1 - Bus Booking System Backend
 FastAPI + MongoDB. API-first so future mobile (React Native) uses same endpoints.
 """
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, status
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -31,6 +32,7 @@ from emergentintegrations.payments.stripe.checkout import (
     CheckoutStatusResponse,
     CheckoutSessionRequest,
 )
+import stripe as stripe_sdk
 import httpx
 from email_service import (
     send_booking_confirmation,
@@ -1956,38 +1958,127 @@ async def _finalize_booking(booking_id: str, session_id: str):
 
 @api.post("/webhook/stripe")
 async def stripe_webhook(request: Request):
+    """
+    Stripe webhook receiver.
+
+    Contract with Stripe:
+      • Signature-verification failure  -> 400 (Stripe will retry with backoff, then disable).
+      • Anything else                   -> 200 (even on business errors, so Stripe never disables us).
+        Business errors are logged and can be reconciled from the Stripe dashboard.
+    """
     body_bytes = await request.body()
-    sig = request.headers.get("Stripe-Signature")
-    host_url = str(request.base_url).rstrip("/")
+    sig = request.headers.get("Stripe-Signature") or request.headers.get("stripe-signature")
 
-    # In production, STRIPE_WEBHOOK_SECRET must be set so the library verifies the
-    # Stripe-Signature header via stripe.Webhook.construct_event(). If it is not
-    # set (e.g. local/dev), we fall back to unverified parsing but log a warning.
-    if not STRIPE_WEBHOOK_SECRET:
+    # 1. Parse + verify signature.
+    event_dict: Optional[dict] = None
+    if STRIPE_WEBHOOK_SECRET:
+        if not sig:
+            logger.warning("stripe_webhook: missing Stripe-Signature header")
+            return JSONResponse(status_code=400, content={"error": "missing_signature"})
+        try:
+            event = stripe_sdk.Webhook.construct_event(
+                body_bytes, sig, STRIPE_WEBHOOK_SECRET
+            )
+            event_dict = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+        except stripe_sdk.error.SignatureVerificationError as e:
+            logger.warning("stripe_webhook: signature verification failed: %s", e)
+            return JSONResponse(status_code=400, content={"error": "invalid_signature"})
+        except ValueError as e:
+            # Invalid payload — return 400 so Stripe knows the body is malformed.
+            logger.warning("stripe_webhook: invalid payload: %s", e)
+            return JSONResponse(status_code=400, content={"error": "invalid_payload"})
+        except Exception as e:
+            # Any other verification-layer error: log and return 400 (do not fail 500).
+            logger.exception("stripe_webhook: verification error: %s", e)
+            return JSONResponse(status_code=400, content={"error": "verification_error"})
+    else:
+        # No secret configured (dev/preview). Parse JSON but skip verification.
         logger.warning(
-            "stripe_webhook: STRIPE_WEBHOOK_SECRET is not set — signature verification is disabled. "
-            "Set STRIPE_WEBHOOK_SECRET in backend/.env for production."
+            "stripe_webhook: STRIPE_WEBHOOK_SECRET is not set — accepting event without verification"
         )
-    if STRIPE_WEBHOOK_SECRET and not sig:
-        # Signature header missing but we expect to verify — reject.
-        raise HTTPException(400, "Missing Stripe-Signature header")
+        try:
+            import json as _json
+            event_dict = _json.loads(body_bytes.decode("utf-8"))
+        except Exception as e:
+            logger.exception("stripe_webhook: could not parse payload: %s", e)
+            # Still return 200 so Stripe stops retrying garbage.
+            return JSONResponse(status_code=200, content={"ok": True, "warning": "unparsable"})
 
-    stripe_checkout = StripeCheckout(
-        api_key=STRIPE_API_KEY,
-        webhook_secret=STRIPE_WEBHOOK_SECRET or None,
-        webhook_url=f"{host_url}/api/webhook/stripe",
-    )
+    # 2. From here on, ALWAYS return 200 — business errors must not disable the endpoint.
     try:
-        event = await stripe_checkout.handle_webhook(body_bytes, sig)
-    except Exception as e:
-        logger.exception("Webhook error: %s", e)
-        raise HTTPException(400, "Invalid webhook")
+        event_type = event_dict.get("type") if isinstance(event_dict, dict) else None
+        event_id = event_dict.get("id") if isinstance(event_dict, dict) else None
+        obj = (event_dict or {}).get("data", {}).get("object", {}) or {}
 
-    if event.payment_status == "paid" and event.session_id:
-        txn = await db.payment_transactions.find_one({"session_id": event.session_id})
-        if txn and not txn.get("booking_finalized"):
-            await _finalize_booking(txn["booking_id"], event.session_id)
-    return {"ok": True}
+        session_id: Optional[str] = None
+        payment_status: Optional[str] = None
+
+        if event_type == "checkout.session.completed":
+            session_id = obj.get("id")
+            payment_status = obj.get("payment_status")
+        elif event_type == "checkout.session.async_payment_succeeded":
+            session_id = obj.get("id")
+            payment_status = "paid"
+        elif event_type == "checkout.session.async_payment_failed":
+            session_id = obj.get("id")
+            payment_status = "failed"
+        elif event_type == "checkout.session.expired":
+            session_id = obj.get("id")
+            payment_status = obj.get("payment_status") or "expired"
+        elif event_type == "payment_intent.succeeded":
+            session_id = (obj.get("metadata") or {}).get("checkout_session_id")
+            payment_status = "paid"
+        elif event_type == "payment_intent.payment_failed":
+            session_id = (obj.get("metadata") or {}).get("checkout_session_id")
+            payment_status = "failed"
+        else:
+            # Any other event type: acknowledge and move on.
+            logger.info("stripe_webhook: ignoring event type=%s id=%s", event_type, event_id)
+            return JSONResponse(status_code=200, content={"ok": True, "ignored": event_type})
+
+        logger.info(
+            "stripe_webhook: type=%s session=%s payment_status=%s",
+            event_type, session_id, payment_status,
+        )
+
+        # Finalize booking (idempotent). Guard every DB call.
+        if payment_status == "paid" and session_id:
+            try:
+                txn = await db.payment_transactions.find_one({"session_id": session_id})
+                if not txn:
+                    logger.warning(
+                        "stripe_webhook: no payment_transaction row for session=%s (webhook fired before checkout row?)",
+                        session_id,
+                    )
+                elif txn.get("booking_finalized"):
+                    logger.info("stripe_webhook: session=%s already finalized — skipping", session_id)
+                else:
+                    await _finalize_booking(txn["booking_id"], session_id)
+                    logger.info("stripe_webhook: finalized booking for session=%s", session_id)
+            except Exception as be:
+                # Never let finalisation errors escape as 5xx to Stripe.
+                logger.exception(
+                    "stripe_webhook: finalize_booking failed for session=%s: %s", session_id, be
+                )
+
+        elif payment_status in ("failed", "expired") and session_id:
+            try:
+                await db.payment_transactions.update_one(
+                    {"session_id": session_id},
+                    {"$set": {"payment_status": payment_status, "updated_at": utcnow().isoformat()}},
+                )
+            except Exception as be:
+                logger.exception(
+                    "stripe_webhook: could not update payment_transaction for session=%s: %s",
+                    session_id, be,
+                )
+
+        return JSONResponse(status_code=200, content={"ok": True, "event": event_type})
+
+    except Exception as outer:
+        # Absolute last-resort net: never 5xx to Stripe.
+        logger.exception("stripe_webhook: unexpected error: %s", outer)
+        return JSONResponse(status_code=200, content={"ok": True, "warning": "handler_error"})
 
 
 # ---------- Admin ----------

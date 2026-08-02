@@ -201,16 +201,28 @@ Build a complete online bus booking system where visitors can search departure t
   - Verified: 12/12 backend pytest cases pass (auth gates, owner check, ≥24h vs <24h logic, fake-Stripe rollback safety, seat_lock cleanup, free-booking edge case). Admin lazy-loaded tabs all render their unique panels.
 
 ## Backlog / next tasks
+### P0 — Recently resolved
+- **[2026-02-02] Stripe webhook hardened.** `/api/webhook/stripe` no longer returns non-2xx on business errors. Signature verification is done with `stripe_sdk.Webhook.construct_event` directly (bypassing the emergentintegrations wrapper's blanket exception). Contract: 400 only on genuine signature/payload failure, 200 for everything else. Unknown event types (`customer.updated`, etc.) are acknowledged with `{"ignored": <type>}`. All DB / finalize errors are logged but swallowed. Backed by 7 pytest cases in `/app/backend/tests/test_stripe_webhook.py`. User must re-enable the webhook in the Stripe dashboard after deploying this change.
+
 ### P1
+- **GoHub Phase 2** — hook `_finalize_booking` to call `gohub_client.create_qr_ticket` and persist real QR payload/token on the booking (requires user's VPS IP to be whitelisted by TBS).
 - iPay88 integration (need merchant credentials: Merchant Code, Merchant Key, environment)
 - Email ticket delivery (Resend / SendGrid) with QR attached on `payment_status=paid`
 - React Native mobile app — deferred until web system is perfected (user request)
 
 ### P2
+- **Display GoHub QR** on `BookingDetail.jsx` and inside the Resend email receipt.
+- **Route Map Preview** (Leaflet) in Admin Routes editor.
 - Operator portal — skipped (single-company, not needed per user)
 - Promo code per-user usage limit (e.g. "first-time users only")
 - Admin: edit/delete schedules, terminal CRUD, refund handling
 - Multi-language (BM / EN / ZH), push notifications, seat preferences
+- AI Customer Support Chatbot + WhatsApp fallback widget
+
+### P3
+- Failure retry queue for GoHub (`gohub_retry_queue`)
+- Mobile horizontal scrollable rail for Popular Now widgets
+- Refactor `server.py` into route-based controllers (Auth / Admin / Bookings / Public)
 
 ## Notes
 - Admin login: `admin@transit.my` / `Admin@123` (auto-seeded)
