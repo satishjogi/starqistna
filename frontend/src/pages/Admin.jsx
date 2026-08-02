@@ -10,6 +10,7 @@ const PaymentsTab = lazy(() => import("./admin/tabs/PaymentsTab"));
 const SchedulesTab = lazy(() => import("./admin/tabs/SchedulesTab"));
 const AddScheduleTab = lazy(() => import("./admin/tabs/AddScheduleTab"));
 const TerminalsTab = lazy(() => import("./admin/tabs/TerminalsTab"));
+const RoutesTab = lazy(() => import("./admin/tabs/RoutesTab"));
 const PromoCodesTab = lazy(() => import("./admin/tabs/PromoCodesTab"));
 const FeedbackTab = lazy(() => import("./admin/tabs/FeedbackTab"));
 const AuditLogTab = lazy(() => import("./admin/tabs/AuditLogTab"));
@@ -17,7 +18,7 @@ const AdminsTab = lazy(() => import("./admin/tabs/AdminsTab"));
 
 const TABS = [
   "add-schedule", "admins", "audit-log", "bookings", "feedback",
-  "payments", "promo-codes", "schedules", "terminals",
+  "payments", "promo-codes", "routes", "schedules", "stops",
 ];
 
 function TabFallback() {
@@ -85,6 +86,8 @@ export default function Admin() {
         {tab === "schedules" && <SchedulesTab />}
         {tab === "add-schedule" && <AddScheduleTab />}
         {tab === "terminals" && <TerminalsTab />}
+        {tab === "stops" && <TerminalsTab />}
+        {tab === "routes" && <RoutesTab />}
         {tab === "promo-codes" && <PromoCodesTab />}
         {tab === "feedback" && <FeedbackTab />}
         {tab === "audit-log" && <AuditLogTab />}

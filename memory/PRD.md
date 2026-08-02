@@ -170,6 +170,24 @@ Build a complete online bus booking system where visitors can search departure t
 - **M8** New indexes: `bookings.created_at`, `bookings.status`, schedules compound extended to include `departure_time`.
 - Verified: 44/44 backend tests pass (32 new audit + 12 cancellation regression). All 9 admin lazy tabs + Dashboard tabs render correctly. CORS preflight no longer emits credentials header. JWT rotation breaks old tokens as intended.
 
+## Implemented (2026-08-02)
+- **Admin recovery + Google OAuth swap + deploy automation**
+  - New `backend/scripts/reset_admin_password.py` CLI tool + `RESET_ADMIN_ON_BOOT=true` env flag to unblock a locked-out super-admin without dropping the DB.
+  - `_seed_admin()` now detects env↔DB password drift on every boot and logs a big recovery WARNING.
+  - Google Auth switched from Emergent-managed to own OAuth Client (Client ID: `426301430644-uq2k54p7l3les28e4t3okeltl3ucu2n3.apps.googleusercontent.com`). Users see "Continue to starqistna.com" branded consent. Backend endpoint `POST /api/auth/google/callback` exchanges code+client_secret with Google, verifies id_token via `google-auth`, upserts user (auto-link by email), issues JWT. Respects existing 2FA.
+  - New `scripts/deploy.sh` (repo root) — idempotent VPS deploy: syncs `.env.example` → `.env` (never overwrites values), pip install, yarn build, systemctl restart backend + reload nginx.
+  - `.env.example` files committed (with real public Client ID baked in). `.gitignore` cleaned + exception `!**/.env.example` added.
+  - Removed the admin demo credentials hint from `Login.jsx` (no more `ADMIN DEMO · admin@starqistna.com / Admin@123` visible on production).
+
+- **Routes + Stops data model (KL-SG focused)** — first slice of the multi-stop trip system.
+  - Extended `terminals` schema with: `landmark_address, lat, lng, cts_code, is_pickup, is_dropoff` — all optional, backward-compatible with existing 14 terminals.
+  - New `routes` collection: `code, name, origin_city, destination_city, direction, is_active, boarding_stops[{terminal_id, offset_min}], alighting_stops[{terminal_id, offset_min}], pairings[{pickup_id, dropoff_id, adult_fare, child_fare, senior_fare, oku_fare, currency, cts_route_code}]`. All fares default to RM 55; each pairing individually overridable.
+  - Endpoints (all admin-gated): `GET/POST/PATCH/DELETE /api/admin/routes` and `GET /api/admin/routes/{id}`. Validation ensures every pairing references a stop that is actually in the route's boarding/alighting arrays.
+  - Admin UI:
+    - `TerminalsTab.jsx` rewritten as **"Stops"** — inline **Edit** action, landmark address, GPS, CTS code, pickup/dropoff toggle chips, filter search.
+    - New `RoutesTab.jsx` — list of routes on the left, editor on the right with basic info, side-by-side pickup/dropoff stop pickers (add/remove/re-order by offset minute), and a full **pairings matrix** with per-cell fare editor (A/C/S/O + currency + CTS route code). Bulk actions: "Fill empty cells" (default RM 55), "Clear all".
+  - Verified: full CRUD via curl (create → GET → PATCH fare → DUPLICATE guard → validation error → DELETE). Playwright confirmed end-to-end UI flow: login → admin → routes tab → new route form → add pickup + dropoff stops → enable pairing cell.
+
 ## Implemented (2026-04-27)
 - **Dashboard "My cancellations" filter** — Dashboard now separates bookings into three tabs: **Upcoming · Past · Cancelled**, each with its own count badge. Cancelled bookings (status `cancelled_refunded` or `cancelled_burned`) are pulled out of the date-based upcoming/past split so they don't clutter live trips. Stats row updated to 4 cards (Upcoming / Past / Cancelled in signal-red / "Plan a trip" CTA). Verified via Playwright: all 3 tabs switch and render their respective list panels.
 - **Admin.jsx refactor + lazy loading** — split the 1,137-line monolith into a slim shell + 9 self-contained tab components under `/app/frontend/src/pages/admin/tabs/` (`BookingsTab`, `PaymentsTab`, `SchedulesTab`, `AddScheduleTab`, `TerminalsTab`, `PromoCodesTab`, `FeedbackTab`, `AuditLogTab`, `AdminsTab`). Each tab owns its own data fetching, local form state, and event handlers. Now wrapped in `React.lazy` + `Suspense` so each tab's JS chunk only downloads when its tab is clicked — initial admin bundle is much smaller. All `data-testid` attributes preserved.
