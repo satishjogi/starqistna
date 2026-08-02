@@ -3445,6 +3445,9 @@ async def _ensure_indexes():
     await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
     await db.password_reset_tokens.create_index([("user_id", ASCENDING)])
     await db.password_reset_tokens.create_index([("token_fp", ASCENDING)])
+    # GoHub / CTS audit trail — indexes for post-mortem queries.
+    await db.gohub_logs.create_index([("started_at", ASCENDING)])
+    await db.gohub_logs.create_index([("operation", ASCENDING)])
     # Admin invites: auto-expire at `expires_at`
     await db.admin_invites.create_index("expires_at", expireAfterSeconds=0)
     await db.admin_invites.create_index([("email", ASCENDING)])

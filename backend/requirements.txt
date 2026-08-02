@@ -28,6 +28,9 @@ httpx==0.28.1
 # Google OAuth (custom flow — starqistna.com branded)
 google-auth==2.49.1
 
+# GoHub / CTS OnlineQR SOAP client (dev/test dependency for mocking httpx)
+respx==0.22.0
+
 # Payments
 stripe==15.0.1
 emergentintegrations==0.1.0
