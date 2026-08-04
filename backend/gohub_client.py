@@ -60,6 +60,10 @@ class GoHubError(RuntimeError):
         self.raw = raw
 
 
+# ---------------------------------------------------------------------------
+# Format helpers — CTS spec §4 requires very specific date/time shapes.
+# ---------------------------------------------------------------------------
+
 def _today_my_date() -> str:
     """Malaysia local date as `YYYYMMDD` — used in the auth signature."""
     return datetime.now(MY_TZ).strftime("%Y%m%d")
@@ -69,6 +73,58 @@ def _md5_signature(ota_code: str, ota_password: str) -> str:
     """Compute md5(OTACode + TodayDate + OTAPassword) per CTS spec §3.2."""
     raw = f"{ota_code}{_today_my_date()}{ota_password}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest().upper()
+
+
+def _fmt_date_ddmmyyyy(value: str) -> str:
+    """Normalize a date to `DD/MM/YYYY` (CTS spec §4, 10 chars).
+
+    Accepts `YYYYMMDD`, `DD/MM/YYYY`, or `YYYY-MM-DD` — anything else raises.
+    """
+    if not value:
+        raise ValueError("depart_date/trip_date is required")
+    v = value.strip()
+    # Already in the right shape.
+    if re.fullmatch(r"\d{2}/\d{2}/\d{4}", v):
+        return v
+    # YYYYMMDD
+    if re.fullmatch(r"\d{8}", v):
+        return f"{v[6:8]}/{v[4:6]}/{v[0:4]}"
+    # YYYY-MM-DD
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+        y, m, d = v.split("-")
+        return f"{d}/{m}/{y}"
+    raise ValueError(f"Unrecognised date format: {value!r} (expected YYYYMMDD / DD/MM/YYYY / YYYY-MM-DD)")
+
+
+def _fmt_time_hhmmss(value: str) -> str:
+    """Normalize a time to `HHMMSS` (CTS spec §4, 6 chars, 24-hour).
+
+    Accepts `HHMM`, `HHMMSS`, `HH:MM`, or `HH:MM:SS`.
+    """
+    if not value:
+        raise ValueError("depart_time is required")
+    v = value.strip().replace(":", "")
+    if re.fullmatch(r"\d{6}", v):
+        return v
+    if re.fullmatch(r"\d{4}", v):
+        return f"{v}00"
+    raise ValueError(f"Unrecognised time format: {value!r} (expected HHMM / HHMMSS / HH:MM)")
+
+
+def make_opetickno(booking_ref: str, seat_no: str) -> str:
+    """Compose the operator ticket number sent to CTS.
+
+    Format:  `SQ-{booking_ref}-{seat_no}`   (max 20 chars per CTS spec §4).
+
+    Booking refs are 8 chars (BK + 6-char uuid slice); seat numbers are typically
+    2-3 chars ("1A" .. "12D"). That keeps us well within the 20-char envelope.
+    """
+    if not booking_ref or not seat_no:
+        raise ValueError("booking_ref and seat_no are both required for opetickno")
+    tick = f"SQ-{booking_ref}-{seat_no}".upper()
+    if len(tick) > 20:
+        raise ValueError(f"opetickno {tick!r} exceeds 20 chars — shorten booking_ref or seat_no")
+    return tick
 
 
 def _xml_escape(v: Any) -> str:
@@ -96,6 +152,48 @@ def _ticket_details_xml(details: list[dict]) -> str:
         return ""
     inner = "".join(_detail_element(**d) for d in details)
     return f"<ticket_details>{inner}</ticket_details>"
+
+
+# ---------------------------------------------------------------------------
+# Seat validation — enforces CTS §4 mandatory fields BEFORE we hit the wire.
+# ---------------------------------------------------------------------------
+
+_ALLOWED_SEAT_TYPES = {"A", "C", "S", "O"}
+
+
+def _validate_and_normalize_seats(
+    seats: list[dict], *, require_opetickno: bool = True, require_name: bool = True
+) -> list[dict]:
+    """Verify every seat dict carries the fields CTS requires and coerce shapes.
+
+    Contract per CTS §4:
+      * `opetickno`  — mandatory, ≤ 20 chars
+      * `seatno`     — optional (recommended), ≤ 3 chars
+      * `seattype`   — optional, one of A/C/S/O
+      * `sprice`     — optional numeric, formatted with 2 dp
+      * `name`       — mandatory, ≤ 50 chars
+      * `ic`         — optional, ≤ 14 chars
+      * `contact`    — optional, ≤ 14 chars
+    """
+    if not seats:
+        raise ValueError("seats list must not be empty")
+    out: list[dict] = []
+    for i, seat in enumerate(seats):
+        s = dict(seat)  # copy so we don't mutate caller data
+        if require_opetickno and not s.get("opetickno"):
+            raise ValueError(f"seats[{i}].opetickno is required")
+        if require_name and not s.get("name"):
+            raise ValueError(f"seats[{i}].name is required")
+        if s.get("seattype") and s["seattype"] not in _ALLOWED_SEAT_TYPES:
+            raise ValueError(
+                f"seats[{i}].seattype={s['seattype']!r} — must be one of A/C/S/O"
+            )
+        # Format sprice to 2 dp so CTS's numeric parser doesn't choke on 55 vs 55.0.
+        if "sprice" in s and s["sprice"] is not None:
+            s["sprice"] = f"{float(s['sprice']):.2f}"
+        # Drop keys with None so we don't emit empty attributes.
+        out.append({k: v for k, v in s.items() if v is not None and v != ""})
+    return out
 
 
 def _envelope(operation: str, body: dict, ticket_details: Optional[list[dict]] = None) -> bytes:
@@ -208,62 +306,99 @@ class GoHubClient:
 
     # ---- Public operations ----------------------------------------------------
 
-    async def reserve_qr(self, *, trans_id: str, trip_no: str, trip_date: str,
-                          depart_date: str, depart_time: str,
-                          from_counter: str, to_counter: str,
-                          seat_number: str, seat_type: str = "A",
-                          sprice: float = 0.0, passenger_name: str = "",
-                          ic_no: str = "", contact_no: str = "") -> dict:
-        """`reserveOnlineQR_V2` — soft-hold a QR ticket for ~1 hour.
+    async def get_qr(self, *, trans_id: str, trip_no: str, trip_date: str,
+                      depart_date: str, depart_time: str,
+                      from_counter: str, to_counter: str,
+                      seats: list[dict]) -> dict:
+        """`getOnlineQR_V2` — one-shot QR generation (no reserve+confirm).
 
-        Field naming follows CTS WSDL exactly (lowercase snake_case).
-        `ticket_details/detail` carries per-seat attributes.
+        Recommended path once payment has cleared: CTS returns the CTS
+        ticket_no + QR string in a single round-trip, so nothing can end up
+        "reserved but unconfirmed" on our side.
+
+        `seats` is a list of per-passenger dicts. See `_validate_and_normalize_seats`
+        for the required shape (opetickno + name are mandatory).
         """
+        details = _validate_and_normalize_seats(seats)
         body = {
             "signature": _md5_signature(self.ota_code, self.ota_password),
             "ota_code": self.ota_code,
             "operator_code": self.operator_code,
             "trans_id": trans_id,
             "trip_no": trip_no,
-            "trip_date": trip_date,           # YYYYMMDD — the scheduled trip day
-            "depart_date": depart_date,       # YYYYMMDD — actual boarding date
-            "depart_time": depart_time,       # HHmm
+            "trip_date": _fmt_date_ddmmyyyy(trip_date),
+            "depart_date": _fmt_date_ddmmyyyy(depart_date),
+            "depart_time": _fmt_time_hhmmss(depart_time),
             "from": from_counter,
             "to": to_counter,
         }
-        details = [{
-            "seatno": seat_number,
-            "seattype": seat_type,            # A/C/S/O
-            "sprice": sprice,
-            "name": passenger_name,
-            "ic": ic_no,
-            "contact": contact_no,
-        }]
+        return await self._call("getOnlineQR_V2", body, ticket_details=details)
+
+    async def reserve_qr(self, *, trans_id: str, trip_no: str, trip_date: str,
+                          depart_date: str, depart_time: str,
+                          from_counter: str, to_counter: str,
+                          seats: list[dict]) -> dict:
+        """`reserveOnlineQR_V2` — soft-hold QR tickets for ~1 hour.
+
+        Use this when you want to lock a fare for a customer BEFORE payment.
+        Follow up with `confirm_qr(reserved_id=...)` to commit.
+
+        `seats` — one dict per passenger. See `_validate_and_normalize_seats`.
+        """
+        details = _validate_and_normalize_seats(seats)
+        body = {
+            "signature": _md5_signature(self.ota_code, self.ota_password),
+            "ota_code": self.ota_code,
+            "operator_code": self.operator_code,
+            "trans_id": trans_id,
+            "trip_no": trip_no,
+            "trip_date": _fmt_date_ddmmyyyy(trip_date),
+            "depart_date": _fmt_date_ddmmyyyy(depart_date),
+            "depart_time": _fmt_time_hhmmss(depart_time),
+            "from": from_counter,
+            "to": to_counter,
+        }
         return await self._call("reserveOnlineQR_V2", body, ticket_details=details)
 
-    async def confirm_qr(self, *, reserved_id: str, opetickno: str = "",
-                          new_opetickno: str = "") -> dict:
-        """`confirmOnlineQR_V2` — commit a previously-reserved ticket."""
+    async def confirm_qr(self, *, reserved_id: str,
+                          seats: list[dict]) -> dict:
+        """`confirmOnlineQR_V2` — commit previously-reserved tickets.
+
+        `seats` must carry `{opetickno, newopetickno}` for every reserved seat.
+        The `newopetickno` is the FINAL operator ticket number CTS will echo
+        back on the QR. We normally pass the same value for both.
+        """
+        details = []
+        for i, s in enumerate(seats):
+            if not s.get("opetickno"):
+                raise ValueError(f"seats[{i}].opetickno is required for confirm")
+            details.append({
+                "opetickno": s["opetickno"],
+                "newopetickno": s.get("newopetickno") or s["opetickno"],
+            })
         body = {
             "signature": _md5_signature(self.ota_code, self.ota_password),
             "ota_code": self.ota_code,
             "operator_code": self.operator_code,
             "reservedid": reserved_id,
         }
-        details = None
-        if opetickno:
-            details = [{"opetickno": opetickno, "newopetickno": new_opetickno or opetickno}]
         return await self._call("confirmOnlineQR_V2", body, ticket_details=details)
 
-    async def cancel_qr(self, *, trans_id: str, opetickno: str) -> dict:
-        """`cancelOnlineQR` — void a confirmed ticket. Response includes refund amount."""
+    async def cancel_qr(self, *, trans_id: str, opeticknos: list[str]) -> dict:
+        """`cancelOnlineQR` — void confirmed tickets. Response includes refund amount.
+
+        `opeticknos` is a list — CTS lets you cancel every seat in a booking
+        with a single call by stacking multiple `<detail>` elements.
+        """
+        if not opeticknos:
+            raise ValueError("cancel_qr requires at least one opetickno")
         body = {
             "signature": _md5_signature(self.ota_code, self.ota_password),
             "ota_code": self.ota_code,
             "operator_code": self.operator_code,
             "trans_id": trans_id,
         }
-        details = [{"opetickno": opetickno}]
+        details = [{"opetickno": t} for t in opeticknos]
         return await self._call("cancelOnlineQR", body, ticket_details=details)
 
     async def query_qr(self, *, trans_id: str) -> dict:

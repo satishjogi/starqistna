@@ -71,12 +71,25 @@ def _parse_args() -> argparse.Namespace:
 
 
 async def _run(args: argparse.Namespace) -> int:
-    from gohub_client import GoHubClient, GoHubError  # after env is loaded
+    from gohub_client import GoHubClient, GoHubError, make_opetickno  # after env is loaded
 
     trans_id = f"PROBE-{uuid.uuid4().hex[:12].upper()}"
+    probe_ref = trans_id.split("-", 1)[1][:8]
+    opetickno = make_opetickno(probe_ref, args.seat)
+    seat = {
+        "opetickno": opetickno,
+        "seatno": args.seat,
+        "seattype": args.seat_type,
+        "sprice": 55.0,
+        "name": "Test Passenger",
+        "ic": args.ic_no,
+        "contact": args.contact,
+    }
+
     print(f"• Endpoint: {os.environ.get('GOHUB_BASE_URL')}")
     print(f"• OTA:      {os.environ.get('GOHUB_OTA_CODE')} / operator: {os.environ.get('GOHUB_OPERATOR_CODE')}")
     print(f"• TransID:  {trans_id}")
+    print(f"• Opetickno:{opetickno}")
     print()
 
     client = GoHubClient(db=None, timeout=20)
@@ -92,12 +105,7 @@ async def _run(args: argparse.Namespace) -> int:
             depart_time=args.boarding_time,
             from_counter=args.from_counter,
             to_counter=args.to_counter,
-            seat_number=args.seat,
-            seat_type=args.seat_type,
-            sprice=55.0,
-            passenger_name="Test Passenger",
-            ic_no=args.ic_no,
-            contact_no=args.contact,
+            seats=[seat],
         )
         print("    OK ✓")
         for k, v in reserve.items():
@@ -114,15 +122,16 @@ async def _run(args: argparse.Namespace) -> int:
         return 0
 
     # 2) confirmOnlineQR_V2 (optional)
-    opetickno = None
     if args.confirm:
         print("\n2/3  confirmOnlineQR_V2 …")
         try:
-            confirm = await client.confirm_qr(reserved_id=reserved_id)
+            confirm = await client.confirm_qr(
+                reserved_id=reserved_id,
+                seats=[{"opetickno": opetickno, "newopetickno": opetickno}],
+            )
             print("    OK ✓")
             for k, v in confirm.items():
                 print(f"       {k}: {v}")
-            opetickno = confirm.get("opetickno") or confirm.get("newopetickno")
         except GoHubError as e:
             print(f"    FAIL ✗  [{e.code}] {e.message}")
             return 2
@@ -139,10 +148,10 @@ async def _run(args: argparse.Namespace) -> int:
     except GoHubError as e:
         print(f"    FAIL ✗  [{e.code}] {e.message}")
 
-    if args.cancel and opetickno:
+    if args.cancel:
         print("\n4/4  cancelOnlineQR …")
         try:
-            c = await client.cancel_qr(trans_id=trans_id, opetickno=opetickno)
+            c = await client.cancel_qr(trans_id=trans_id, opeticknos=[opetickno])
             print("    OK ✓")
             for k, v in c.items():
                 print(f"       {k}: {v}")

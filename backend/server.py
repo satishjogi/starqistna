@@ -3578,13 +3578,27 @@ async def admin_gohub_probe(body: GoHubProbeBody, request: Request, user: dict =
     step so an operator can share the result back to TBS support if a call
     fails. Persisted to `gohub_logs` like any other CTS call.
     """
-    from gohub_client import GoHubClient, GoHubError  # local import — keep server startup light
+    from gohub_client import GoHubClient, GoHubError, make_opetickno  # local import — keep server startup light
     import uuid as _uuid
 
     my_today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d")
     trans_id = f"PROBE-{_uuid.uuid4().hex[:12].upper()}"
     client = GoHubClient(db=db, timeout=20)
     steps: list[dict] = []
+
+    # One probe = one seat + one passenger. Compose a spec-compliant opetickno
+    # from the trans_id (which acts as our synthetic "booking ref" here).
+    probe_ref = trans_id.split("-", 1)[1][:8]
+    opetickno = make_opetickno(probe_ref, body.seat)
+    probe_seat = {
+        "opetickno": opetickno,
+        "seatno": body.seat,
+        "seattype": body.seat_type,
+        "sprice": 55.0,
+        "name": "Test Passenger",
+        "ic": body.ic_no,
+        "contact": body.contact,
+    }
 
     # 1) reserve
     try:
@@ -3594,9 +3608,7 @@ async def admin_gohub_probe(body: GoHubProbeBody, request: Request, user: dict =
             depart_date=body.boarding_date or my_today,
             depart_time=body.boarding_time,
             from_counter=body.from_counter, to_counter=body.to_counter,
-            seat_number=body.seat, seat_type=body.seat_type,
-            sprice=55.0, passenger_name="Test Passenger",
-            ic_no=body.ic_no, contact_no=body.contact,
+            seats=[probe_seat],
         )
         steps.append({"step": "reserve", "ok": True, "data": reserve})
     except GoHubError as e:
@@ -3605,11 +3617,12 @@ async def admin_gohub_probe(body: GoHubProbeBody, request: Request, user: dict =
         return {"trans_id": trans_id, "steps": steps}
 
     reserved_id = reserve.get("reservedid") or reserve.get("ReservedID")
-    opetickno: Optional[str] = None
     if body.confirm and reserved_id:
         try:
-            confirm = await client.confirm_qr(reserved_id=reserved_id)
-            opetickno = confirm.get("opetickno") or confirm.get("newopetickno")
+            confirm = await client.confirm_qr(
+                reserved_id=reserved_id,
+                seats=[{"opetickno": opetickno, "newopetickno": opetickno}],
+            )
             steps.append({"step": "confirm", "ok": True, "data": confirm})
         except GoHubError as e:
             steps.append({"step": "confirm", "ok": False, "error": {"code": e.code, "message": e.message}})
@@ -3621,9 +3634,9 @@ async def admin_gohub_probe(body: GoHubProbeBody, request: Request, user: dict =
     except GoHubError as e:
         steps.append({"step": "query", "ok": False, "error": {"code": e.code, "message": e.message}})
 
-    if body.cancel and opetickno:
+    if body.cancel:
         try:
-            c = await client.cancel_qr(trans_id=trans_id, opetickno=opetickno)
+            c = await client.cancel_qr(trans_id=trans_id, opeticknos=[opetickno])
             steps.append({"step": "cancel", "ok": True, "data": c})
         except GoHubError as e:
             steps.append({"step": "cancel", "ok": False, "error": {"code": e.code, "message": e.message}})
