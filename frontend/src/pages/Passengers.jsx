@@ -114,6 +114,10 @@ export default function Passengers() {
       return setError("Phone must be in international format, e.g. +60123456789.");
     }
     setLoading(true);
+
+    // Two backend calls in a row — track which one failed so we can surface
+    // the real error message instead of a misleading generic string.
+    let stage = "booking";
     try {
       const body = {
         schedule_id: flow.schedule_id,
@@ -126,7 +130,7 @@ export default function Passengers() {
       const { data: booking } = await api.post("/bookings", body);
       setFlow({ ...flow, booking });
 
-      // Create Stripe checkout session
+      stage = "checkout";
       const { data: checkout } = await api.post("/payments/checkout", {
         booking_id: booking.id,
         origin_url: window.location.origin,
@@ -134,7 +138,26 @@ export default function Passengers() {
       });
       window.location.href = checkout.url;
     } catch (e) {
-      setError(e?.response?.data?.detail?.message || e?.response?.data?.detail || "Could not create booking.");
+      const detail = e?.response?.data?.detail;
+      const server = detail?.message || (typeof detail === "string" ? detail : "");
+      const status = e?.response?.status;
+
+      let msg;
+      if (stage === "checkout") {
+        // Common: the operator hasn't enabled GrabPay / FPX on the Stripe dashboard.
+        if (/grabpay|fpx|payment.?method.*invalid|not.*activated/i.test(server)) {
+          msg = `Payment method "${gateway.toUpperCase()}" is not activated on the Stripe account yet. `
+              + `Activate it under Stripe Dashboard → Payment methods, or pick Card to continue. `
+              + `(${server})`;
+        } else {
+          msg = `Payment could not be started: ${server || "Stripe error"}${status ? ` (HTTP ${status})` : ""}`;
+        }
+      } else {
+        msg = server
+          ? `Could not create booking: ${server}${status ? ` (HTTP ${status})` : ""}`
+          : "Could not create booking. Please try again.";
+      }
+      setError(msg);
       setLoading(false);
     }
   };

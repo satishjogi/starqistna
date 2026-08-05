@@ -1862,7 +1862,27 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
             "fx_rate": str(fx_rate),
         },
     )
-    session: CheckoutSessionResponse = await stripe_checkout.create_checkout_session(checkout_req)
+    try:
+        session: CheckoutSessionResponse = await stripe_checkout.create_checkout_session(checkout_req)
+    except Exception as e:
+        # Stripe surfaces payment-method activation issues with a helpful message
+        # (e.g. "The payment method type provided: grabpay is invalid"). Return
+        # the exact message so the frontend can guide the operator to enable it
+        # in the Stripe dashboard instead of showing a generic error.
+        msg = str(e)
+        logger.warning("Stripe create_checkout_session failed: %s", msg)
+        if "invalid" in msg.lower() and body.gateway.lower() in msg.lower():
+            raise HTTPException(
+                422,
+                detail={
+                    "message": f"Payment method '{body.gateway}' isn't activated on this Stripe account yet. "
+                               f"Enable it under Stripe Dashboard → Settings → Payment methods, "
+                               f"or select Card to continue.",
+                    "gateway": body.gateway,
+                    "stripe_error": msg,
+                },
+            )
+        raise HTTPException(502, detail={"message": f"Could not start Stripe checkout: {msg}"})
 
     await db.payment_transactions.insert_one(
         {
