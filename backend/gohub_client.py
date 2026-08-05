@@ -65,14 +65,26 @@ class GoHubError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 def _today_my_date() -> str:
-    """Malaysia local date as `YYYYMMDD` — used in the auth signature."""
-    return datetime.now(MY_TZ).strftime("%Y%m%d")
+    """Malaysia local date as ``DD/MM/YYYY`` — the format TBS uses inside the
+    signature (verified live 2026-08 via ``scripts/gohub_sign_sweep.py``).
+
+    The spec (v1.2.11) says "MD5 Encryption based on (OTACode+Today Date+Password)"
+    but is silent on the date format. Empirically TBS's server accepts only
+    the slash-separated DD/MM/YYYY variant — same shape as ``trip_date`` /
+    ``depart_date`` in the request body.
+    """
+    return datetime.now(MY_TZ).strftime("%d/%m/%Y")
 
 
 def _md5_signature(ota_code: str, ota_password: str) -> str:
-    """Compute md5(OTACode + TodayDate + OTAPassword) per CTS spec §3.2."""
+    """Compute md5(OTACode + TodayDate + OTAPassword) — LOWERCASE hex.
+
+    TBS's server compares the hash as a lowercase hex string (verified live —
+    the spec's own example values are lowercase too, e.g.
+    ``89fa559006207c107fab09ff555f5b32``).
+    """
     raw = f"{ota_code}{_today_my_date()}{ota_password}"
-    return hashlib.md5(raw.encode("utf-8")).hexdigest().upper()
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
 def _fmt_date_ddmmyyyy(value: str) -> str:

@@ -30,12 +30,15 @@ from gohub_client import (  # noqa: E402
 # ---------------------------------------------------------------------------
 
 def test_md5_signature_uses_my_local_date_and_matches_manual_hash():
+    """Regression: TBS accepts md5(OTA + DD/MM/YYYY + PWD) as LOWERCASE hex.
+    Verified live 2026-08 via ``scripts/gohub_sign_sweep.py``."""
     ota = "STARQISTINA"
     pw = "STCRF251C"
     my_tz = timezone(timedelta(hours=8))
-    today = datetime.now(my_tz).strftime("%Y%m%d")
-    expected = hashlib.md5(f"{ota}{today}{pw}".encode()).hexdigest().upper()
+    today = datetime.now(my_tz).strftime("%d/%m/%Y")
+    expected = hashlib.md5(f"{ota}{today}{pw}".encode()).hexdigest()  # lowercase
     assert _md5_signature(ota, pw) == expected
+    assert expected == expected.lower(), "signature must be lowercase hex"
 
 
 def test_envelope_escapes_xml_special_chars():
