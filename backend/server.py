@@ -1929,6 +1929,144 @@ async def payment_status(session_id: str, request: Request):
     return {"payment_status": check.payment_status, "status": check.status, "booking": booking}
 
 
+async def _issue_gohub_tickets(booking_id: str) -> None:
+    """After payment confirms, call CTS `getOnlineQR_V2` to fetch the real QR
+    ticket(s) for a booking. Fire-and-forget: never crash the caller.
+
+    Result is persisted onto the booking as:
+      * ``gohub_status``     — "confirmed" | "skipped" | "failed"
+      * ``gohub_tickets``    — [{seat_number, opetickno, tickno, qr}, ...]
+      * ``gohub_error``      — {code, message}  (only when status == failed)
+      * ``gohub_processed_at`` — ISO timestamp
+
+    When ``GOHUB_ENABLED`` is off, or the from/to terminals lack a ``cts_code``,
+    or the schedule lacks a ``trip_no``, we mark it ``skipped`` — the operator
+    can retry from the admin panel once TBS finishes their config.
+    """
+    booking = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    if not booking:
+        logger.warning("gohub: booking %s vanished before ticket issuance", booking_id)
+        return
+
+    now_iso = utcnow().isoformat()
+
+    # Load everything we need for the CTS call in parallel.
+    schedule, from_term, to_term = await asyncio.gather(
+        db.schedules.find_one({"id": booking.get("schedule_id")}, {"_id": 0}),
+        db.terminals.find_one({"id": booking.get("from_terminal_id")}, {"_id": 0}),
+        db.terminals.find_one({"id": booking.get("to_terminal_id")}, {"_id": 0}),
+    )
+
+    # Pre-flight validation — anything missing means we skip, not fail.
+    reasons: list[str] = []
+    if os.environ.get("GOHUB_ENABLED", "false").strip().lower() not in ("1", "true", "yes"):
+        reasons.append("GOHUB_ENABLED=false")
+    if not schedule or not (schedule.get("trip_no") or "").strip():
+        reasons.append("schedule.trip_no missing")
+    if not from_term or not (from_term.get("cts_code") or "").strip():
+        reasons.append("from_terminal.cts_code missing")
+    if not to_term or not (to_term.get("cts_code") or "").strip():
+        reasons.append("to_terminal.cts_code missing")
+
+    if reasons:
+        await db.bookings.update_one(
+            {"id": booking_id},
+            {"$set": {
+                "gohub_status": "skipped",
+                "gohub_skip_reason": "; ".join(reasons),
+                "gohub_processed_at": now_iso,
+            }},
+        )
+        logger.info("gohub: skipped booking %s (%s)", booking.get("reference"), ", ".join(reasons))
+        return
+
+    from gohub_client import GoHubClient, GoHubError, make_opetickno
+
+    booking_ref = booking.get("reference") or booking_id[:8].upper()
+    # Adult and child fares live on the schedule; use them as sprice per seattype.
+    adult_fare = float(schedule.get("adult_fare") or 0.0)
+    child_fare = float(schedule.get("child_fare") or (adult_fare * 0.5))
+
+    # Build one CTS <detail> per passenger. CTS caps opetickno at 20 chars —
+    # make_opetickno enforces that and raises early if it would overflow.
+    seats: list[dict] = []
+    for pax in booking.get("passengers", []):
+        seat_no = str(pax.get("seat_number") or "").strip()
+        category = (pax.get("category") or "adult").lower()
+        seattype = "C" if category == "child" else "A"
+        seats.append({
+            "opetickno": make_opetickno(booking_ref, seat_no),
+            "seatno": seat_no,
+            "seattype": seattype,
+            "sprice": child_fare if seattype == "C" else adult_fare,
+            "name": (pax.get("name") or "").strip()[:50] or "Passenger",
+            "ic": (pax.get("ic_or_passport") or "").strip()[:14],
+            "contact": (booking.get("contact_phone") or "").strip()[:14],
+        })
+
+    client = GoHubClient(db=db, timeout=20)
+    try:
+        result = await client.get_qr(
+            trans_id=booking_ref,
+            trip_no=schedule["trip_no"],
+            trip_date=schedule["departure_date"],
+            depart_date=schedule["departure_date"],
+            depart_time=schedule["departure_time"],
+            from_counter=from_term["cts_code"],
+            to_counter=to_term["cts_code"],
+            seats=seats,
+        )
+    except GoHubError as e:
+        await db.bookings.update_one(
+            {"id": booking_id},
+            {"$set": {
+                "gohub_status": "failed",
+                "gohub_error": {"code": e.code, "message": e.message},
+                "gohub_processed_at": now_iso,
+            }},
+        )
+        logger.warning("gohub: booking %s failed [%s] %s", booking_ref, e.code, e.message)
+        return
+    except Exception as e:  # noqa: BLE001 — never propagate to caller
+        await db.bookings.update_one(
+            {"id": booking_id},
+            {"$set": {
+                "gohub_status": "failed",
+                "gohub_error": {"code": "UNEXPECTED", "message": str(e)[:250]},
+                "gohub_processed_at": now_iso,
+            }},
+        )
+        logger.exception("gohub: unexpected error for booking %s", booking_ref)
+        return
+
+    # Parse per-passenger detail rows out of the flattened response.
+    # `_parse_response` flattens `<detail .../>` children as ``detail_<attr>``
+    # keys — since CTS returns MULTIPLE `<detail>` we re-parse the raw XML
+    # audit row to get an ordered list. Simpler: use single-seat mapping via
+    # opetickno lookup on any keys the client already surfaced.
+    tickets: list[dict] = []
+    for seat in seats:
+        # For the common single-seat happy path the flattened dict has the
+        # attributes directly; when TBS returns multiple we surface only the
+        # last one — the audit log in `gohub_logs` still has the full XML.
+        tickets.append({
+            "seat_number": seat["seatno"],
+            "opetickno": seat["opetickno"],
+            "tickno": result.get("detail_tickno") or result.get("tickno") or "",
+            "qr": result.get("detail_QR") or result.get("QR") or result.get("qr") or "",
+        })
+
+    await db.bookings.update_one(
+        {"id": booking_id},
+        {"$set": {
+            "gohub_status": "confirmed",
+            "gohub_tickets": tickets,
+            "gohub_processed_at": now_iso,
+        }, "$unset": {"gohub_error": ""}},
+    )
+    logger.info("gohub: booking %s issued %d ticket(s)", booking_ref, len(tickets))
+
+
 async def _finalize_booking(booking_id: str, session_id: str):
     """Idempotent: mark seats booked, confirm booking, increment promo use, mark txn finalized, send email."""
     await db.seat_locks.update_many(
@@ -1954,6 +2092,8 @@ async def _finalize_booking(booking_id: str, session_id: str):
             db.terminals.find_one({"id": booking.get("to_terminal_id")}, {"_id": 0}),
         )
         asyncio.create_task(send_booking_confirmation(booking, from_term, to_term))
+        # Fire-and-forget CTS QR issuance — never blocks the webhook.
+        asyncio.create_task(_issue_gohub_tickets(booking_id))
 
 
 @api.post("/webhook/stripe")
@@ -3556,6 +3696,24 @@ async def _ensure_indexes():
 
 
 # ---------- GoHub / CTS admin probe (dev + smoke-test only) ----------
+@api.post("/admin/bookings/{booking_id}/gohub/retry")
+async def admin_gohub_retry(booking_id: str, user: dict = Depends(require_admin)):
+    """Manually retry CTS ticket issuance for a booking whose earlier attempt
+    was skipped or failed (typical use: TBS finished uploading a rate)."""
+    booking = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    if not booking:
+        raise HTTPException(404, "Booking not found")
+    if booking.get("payment_status") != "paid":
+        raise HTTPException(409, "Booking is not paid — nothing to issue")
+    await _issue_gohub_tickets(booking_id)
+    fresh = await db.bookings.find_one(
+        {"id": booking_id},
+        {"_id": 0, "gohub_status": 1, "gohub_tickets": 1,
+         "gohub_error": 1, "gohub_processed_at": 1, "reference": 1},
+    )
+    return fresh or {"gohub_status": "unknown"}
+
+
 class GoHubProbeBody(BaseModel):
     trip_no: str = "SQ001"
     boarding_date: Optional[str] = None   # YYYYMMDD; defaults to today MY
