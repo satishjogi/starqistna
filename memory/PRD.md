@@ -202,16 +202,26 @@ Build a complete online bus booking system where visitors can search departure t
 
 ## Backlog / next tasks
 ### P0 — Recently resolved
-- **[2026-02-02] Stripe webhook hardened.** `/api/webhook/stripe` no longer returns non-2xx on business errors. Signature verification is done with `stripe_sdk.Webhook.construct_event` directly (bypassing the emergentintegrations wrapper's blanket exception). Contract: 400 only on genuine signature/payload failure, 200 for everything else. Unknown event types (`customer.updated`, etc.) are acknowledged with `{"ignored": <type>}`. All DB / finalize errors are logged but swallowed. Backed by 7 pytest cases in `/app/backend/tests/test_stripe_webhook.py`. User must re-enable the webhook in the Stripe dashboard after deploying this change.
+- **[2026-08-05] GoHub Phase 1 (spec-compliance) + Phase 2 (Stripe → CTS wiring) shipped.**
+  - Client refactored to full CTS OnlineQR v1.2.11 conformance: dates now `DD/MM/YYYY`, times `HHMMSS`, multi-seat `<detail>` per `<ticket_details>`, mandatory `opetickno` + `name`, one-shot `getOnlineQR_V2` method added.
+  - **`opetickno` format** locked as `SQ-{booking_ref}-{seat_no}` (uppercase, ≤ 20 chars — validated).
+  - **Signature formula verified live** as `md5(OTACode + DD/MM/YYYY + Password)` **lowercase** hex (not the uppercase `YYYYMMDD` the spec implied). Encoded in `_md5_signature()` after live sweep of ~200 variants via `scripts/gohub_sign_sweep.py`.
+  - Origin counter code confirmed as `TBS` (past error 14). Destination code `GMC` currently returns `[12] Online QR rate cannot be found` — pending TBS-side rate configuration upload.
+  - **Phase 2 wiring**: `_finalize_booking` fires `asyncio.create_task(_issue_gohub_tickets(...))` after Stripe webhook. Pre-flight guards: `GOHUB_ENABLED`, `schedule.trip_no`, `terminal.cts_code` on both ends → skips gracefully if any missing. On success persists `booking.gohub_status='confirmed'` + `gohub_tickets=[{seat_number, opetickno, tickno, qr}, ...]`. On `GoHubError`/unexpected exception: `gohub_status='failed'` + `gohub_error={code, message}`. Never propagates back to Stripe webhook (fire-and-forget).
+  - **Admin retry endpoint**: `POST /api/admin/bookings/{id}/gohub/retry` — for reissuing tickets after TBS uploads the rate.
+  - **48 pytest cases green** (34 client + 7 Phase 2 wiring + 7 Stripe webhook regression) — all offline.
+- **[2026-02-02] Stripe webhook hardened.** `/api/webhook/stripe` returns 400 only on signature failure; 200 on all business errors (unknown event types acknowledged with `{"ignored": <type>}`). Backed by 7 pytest cases in `test_stripe_webhook.py`.
 
 ### P1
-- **GoHub Phase 2** — hook `_finalize_booking` to call `gohub_client.create_qr_ticket` and persist real QR payload/token on the booking (requires user's VPS IP to be whitelisted by TBS).
+- **TBS rate upload (blocking real QR issuance)** — waiting on TBS ops to upload the CTS rate for `SQ001 · TBS → GMC · 11:30 · 40-seat Executive Coach`. Once done, existing failed bookings can be reissued via `POST /api/admin/bookings/{id}/gohub/retry`.
 - iPay88 integration (need merchant credentials: Merchant Code, Merchant Key, environment)
 - Email ticket delivery (Resend / SendGrid) with QR attached on `payment_status=paid`
 - React Native mobile app — deferred until web system is perfected (user request)
 
 ### P2
 - **Display GoHub QR** on `BookingDetail.jsx` and inside the Resend email receipt.
+- **`QrCodeWithLogo` PNG fetch** — CTS returns a QR string; a separate CTS endpoint generates the scannable image.
+- **`_WithHandling` variants** (getOnlineQRWithHandling / reserveOnlineQRWithHandling) — v1.2.10 additions with management-fee support.
 - **Route Map Preview** (Leaflet) in Admin Routes editor.
 - Operator portal — skipped (single-company, not needed per user)
 - Promo code per-user usage limit (e.g. "first-time users only")
@@ -220,9 +230,15 @@ Build a complete online bus booking system where visitors can search departure t
 - AI Customer Support Chatbot + WhatsApp fallback widget
 
 ### P3
-- Failure retry queue for GoHub (`gohub_retry_queue`)
+- Failure retry queue for GoHub (`gohub_retry_queue`) — auto-reissue on TBS outage recovery
 - Mobile horizontal scrollable rail for Popular Now widgets
 - Refactor `server.py` into route-based controllers (Auth / Admin / Bookings / Public)
+
+## Diagnostic tools shipped this session
+- `backend/scripts/gohub_sign_debug.py` — prints signature inputs (masked pw) + all common variants
+- `backend/scripts/gohub_sign_sweep.py` — fires ~200 signature variants live at TBS; identifies the accepted formula
+- `backend/scripts/gohub_dest_sweep.py` — sweeps candidate destination counter codes to find valid CTS routes
+- `backend/scripts/gohub_probe.py` — full reserve → confirm → query → cancel probe
 
 ## Notes
 - Admin login: `admin@transit.my` / `Admin@123` (auto-seeded)
