@@ -1,14 +1,16 @@
-"""Signature-variant sweep against the live TBS test endpoint.
+"""Exhaustive signature-variant sweep against TBS test endpoint.
 
-Fires `queryOnlineQR` four times, each with a different signature formula.
-Whichever comes back with anything OTHER than [5] Invalid Signature is the
-formula TBS actually uses on their server.
+Tries every realistic combination of:
+  * hash algorithm  (md5, sha1, sha256)
+  * password source (GOHUB_OTA_PASSWORD, GOHUB_OPERATOR_PASSWORD)
+  * date format     (YYYYMMDD, DD/MM/YYYY, DDMMYYYY)
+  * field order     (ota+date+pwd, pwd+ota+date, ota+pwd+date, +operator variants)
+  * output case     (upper / lower hex)
 
-Zero side-effects: `queryOnlineQR` only READS state — no bookings created.
+Sends each as a harmless `queryOnlineQR` (read-only) and prints the ones
+whose response does NOT contain "Invalid Signature".
 
-Usage (on the whitelisted VPS):
-    cd ~/app/backend
-    source .venv/bin/activate
+Usage (whitelisted VPS):
     python scripts/gohub_sign_sweep.py
 """
 from __future__ import annotations
@@ -34,28 +36,44 @@ CTS_NAMESPACE = "https://eticketing.tbsbts.com.my/ws_cts"
 _NS = {"soap": "http://schemas.xmlsoap.org/soap/envelope/", "cts": CTS_NAMESPACE}
 
 
-def _md5(v: str, upper: bool = True) -> str:
-    d = hashlib.md5(v.encode("utf-8")).hexdigest()
+def _hash(algo: str, v: str, upper: bool) -> str:
+    d = hashlib.new(algo, v.encode("utf-8")).hexdigest()
     return d.upper() if upper else d
 
 
-def _variants(ota: str, pw: str) -> list[tuple[str, str]]:
-    now_my = datetime.now(MY_TZ)
-    ymd = now_my.strftime("%Y%m%d")
-    dmy_slash = now_my.strftime("%d/%m/%Y")
-    dmy = now_my.strftime("%d%m%Y")
-    return [
-        ("OTA + YYYYMMDD + PWD  (upper)", _md5(f"{ota}{ymd}{pw}", True)),
-        ("OTA + YYYYMMDD + PWD  (lower)", _md5(f"{ota}{ymd}{pw}", False)),
-        ("OTA + DD/MM/YYYY + PWD (upper)", _md5(f"{ota}{dmy_slash}{pw}", True)),
-        ("OTA + DDMMYYYY + PWD  (upper)", _md5(f"{ota}{dmy}{pw}", True)),
-        ("PWD + OTA + YYYYMMDD  (upper)", _md5(f"{pw}{ota}{ymd}", True)),
-        ("OTA + PWD + YYYYMMDD  (upper)", _md5(f"{ota}{pw}{ymd}", True)),
+def _build_variants(ota: str, ota_pw: str, operator: str, op_pw: str) -> list[tuple[str, str]]:
+    """Return a list of (label, signature_hex) pairs to try."""
+    now = datetime.now(MY_TZ)
+    dates = {
+        "YMD": now.strftime("%Y%m%d"),
+        "DMY/": now.strftime("%d/%m/%Y"),
+        "DMY": now.strftime("%d%m%Y"),
+    }
+    passwords = {"OTA_PW": ota_pw, "OP_PW": op_pw} if op_pw else {"OTA_PW": ota_pw}
+    orderings = [
+        # label,  lambda(a, d, p, op) -> raw
+        ("O+D+P",   lambda a, d, p, op: f"{a}{d}{p}"),
+        ("O+P+D",   lambda a, d, p, op: f"{a}{p}{d}"),
+        ("P+O+D",   lambda a, d, p, op: f"{p}{a}{d}"),
+        ("D+O+P",   lambda a, d, p, op: f"{d}{a}{p}"),
+        ("O+op+D+P", lambda a, d, p, op: f"{a}{op}{d}{p}"),
+        ("O+D+op+P", lambda a, d, p, op: f"{a}{d}{op}{p}"),
     ]
+    algos = ["md5", "sha1", "sha256"]
+    variants: list[tuple[str, str]] = []
+    for algo in algos:
+        for date_name, date_val in dates.items():
+            for pw_name, pw_val in passwords.items():
+                for ord_name, ord_fn in orderings:
+                    raw = ord_fn(ota, date_val, pw_val, operator)
+                    for upper in (True, False):
+                        case = "UP" if upper else "lo"
+                        label = f"{algo:6} {ord_name:9} {date_name:5} {pw_name:6} {case}"
+                        variants.append((label, _hash(algo, raw, upper)))
+    return variants
 
 
 def _envelope(signature: str, ota: str, operator: str, trans_id: str) -> bytes:
-    """Build a queryOnlineQR envelope with the chosen signature."""
     body = (
         f"<signature>{signature}</signature>"
         f"<ota_code>{ota}</ota_code>"
@@ -73,7 +91,6 @@ def _envelope(signature: str, ota: str, operator: str, trans_id: str) -> bytes:
 
 
 def _parse_status(xml_text: str) -> tuple[str, str]:
-    """Extract (code, msg) from the CTS response."""
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
@@ -86,48 +103,76 @@ def _parse_status(xml_text: str) -> tuple[str, str]:
 
 async def _try(client: httpx.AsyncClient, url: str, signature: str,
                 ota: str, operator: str) -> tuple[str, str]:
-    trans_id = f"SIGSWEEP-{uuid.uuid4().hex[:8].upper()}"
+    trans_id = f"SW-{uuid.uuid4().hex[:8].upper()}"
     body = _envelope(signature, ota, operator, trans_id)
     headers = {
         "Content-Type": "text/xml; charset=utf-8",
         "SOAPAction": f'"{CTS_NAMESPACE}/queryOnlineQR"',
     }
-    r = await client.post(url, content=body, headers=headers, timeout=15)
-    return _parse_status(r.text)
+    try:
+        r = await client.post(url, content=body, headers=headers, timeout=15)
+        return _parse_status(r.text)
+    except Exception as e:
+        return ("EXC", str(e)[:80])
 
 
 async def _main() -> None:
     url = os.environ.get("GOHUB_BASE_URL", "").strip()
     ota = os.environ.get("GOHUB_OTA_CODE", "").strip()
-    pw = os.environ.get("GOHUB_OTA_PASSWORD", "").strip()
+    ota_pw = os.environ.get("GOHUB_OTA_PASSWORD", "").strip()
     operator = os.environ.get("GOHUB_OPERATOR_CODE", "").strip()
+    op_pw = os.environ.get("GOHUB_OPERATOR_PASSWORD", "").strip()
 
-    if not (url and ota and pw and operator):
+    if not (url and ota and ota_pw and operator):
         print("❌ Missing GOHUB_* env vars in backend/.env")
         return
 
-    print(f"Endpoint: {url}")
-    print(f"OTA:      {ota}   Operator: {operator}")
+    print(f"Endpoint : {url}")
+    print(f"OTA      : {ota}")
+    print(f"Operator : {operator}")
+    print(f"OTA pw   : len={len(ota_pw)}  operator pw: len={len(op_pw) if op_pw else 0}")
     print()
-    print(f"{'Variant':<38}  {'Code':<6}  Message")
-    print("-" * 90)
+
+    variants = _build_variants(ota, ota_pw, operator, op_pw)
+    print(f"Testing {len(variants)} signature variants (throttled to 5 concurrent)…\n")
+
+    winners: list[tuple[str, str, str]] = []
+    all_rows: list[tuple[str, str, str]] = []
+    sem = asyncio.Semaphore(5)
 
     async with httpx.AsyncClient() as client:
-        for label, sig in _variants(ota, pw):
-            try:
+        async def _run(label: str, sig: str):
+            async with sem:
                 code, msg = await _try(client, url, sig, ota, operator)
-            except Exception as e:
-                code, msg = ("EXC", str(e)[:80])
-            marker = "  ← LIKELY WINNER" if code != "5" and code != "EXC" else ""
-            print(f"{label:<38}  {code:<6}  {msg}{marker}")
+                is_signature_error = "invalid signature" in msg.lower()
+                row = (label, code, msg)
+                all_rows.append(row)
+                if not is_signature_error and code not in ("EXC", "PARSE", "NO_STATUS"):
+                    winners.append(row)
 
-    print()
-    print("Reading the results:")
-    print("  code=5  Invalid Signature — TBS rejected this formula")
-    print("  code=1  Transaction ID cannot be found — GOOD, signature was accepted!")
-    print("          (we sent a fake trans_id on purpose)")
-    print("  code=4  Invalid Server IP — VPS not whitelisted")
-    print("  code=0  Success (unlikely because trans_id is fake)")
+        await asyncio.gather(*(_run(label, sig) for label, sig in variants))
+
+    print("=" * 90)
+    if winners:
+        print(f"🎯 {len(winners)} variant(s) ACCEPTED by TBS (signature valid):")
+        print("=" * 90)
+        for label, code, msg in winners:
+            print(f"  ✓ {label}   →  [{code}] {msg}")
+        print()
+        print("→ Use the winner's algo + order + date + password source in gohub_client.py")
+    else:
+        print("❌ Every variant returned 'Invalid Signature'. Likely causes:")
+        print("   1. Password in backend/.env doesn't match what TBS provisioned")
+        print("   2. TBS uses a bespoke formula not covered by this sweep")
+        print("   3. Escape / trim issue in the password value")
+        print()
+        print("Next step: email TBS support with the OTA code + a request for the exact")
+        print("signature formula (algo, field order, date format).")
+        print()
+        print(f"(Ran {len(all_rows)} variants — sample rejection:")
+        if all_rows:
+            l, c, m = all_rows[0]
+            print(f"    {l}  →  [{c}] {m})")
 
 
 if __name__ == "__main__":
