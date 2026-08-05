@@ -45,11 +45,19 @@ export default function BookingDetail() {
           )}
         </div>
         <div className="flex items-center gap-4">
-          {b.status === "confirmed" && (
-            <div className="bg-white p-2 border border-black/10" data-testid="detail-qr">
-              <QRCodeSVG value={b.reference} size={112} level="M" />
-            </div>
-          )}
+          {b.status === "confirmed" && (() => {
+            // Header QR: prefer the first CTS-issued pass, else the booking reference.
+            const firstCts = (b.gohub_tickets || []).find((t) => t?.qr);
+            const value = firstCts?.qr || b.reference;
+            return (
+              <div className="bg-white p-2 border border-black/10" data-testid="detail-qr">
+                <QRCodeSVG value={value} size={112} level="M" />
+                {firstCts && (
+                  <div className="mt-1 text-[8px] font-mono uppercase text-emerald-700 text-center tracking-wider">TBS GATE</div>
+                )}
+              </div>
+            );
+          })()}
           <div className={`text-xs font-mono font-black uppercase px-3 py-2 ${
             b.status === "confirmed"
               ? "bg-emerald-100 text-emerald-700"
@@ -61,6 +69,27 @@ export default function BookingDetail() {
           </div>
         </div>
       </div>
+
+      {/* CTS / TBS boarding-pass status — visible only after payment is confirmed. */}
+      {b.status === "confirmed" && b.gohub_status && (
+        <div className="mt-4" data-testid="detail-gohub-banner">
+          {b.gohub_status === "confirmed" && (b.gohub_tickets || []).length > 0 && (
+            <div className="border border-emerald-300 bg-emerald-50 text-emerald-800 px-4 py-3 text-xs font-mono uppercase tracking-wider">
+              TBS boarding pass ready · Scan the QR for each passenger at the TBS gate
+            </div>
+          )}
+          {b.gohub_status === "failed" && (
+            <div className="border border-amber-300 bg-amber-50 text-amber-800 px-4 py-3 text-xs font-mono uppercase tracking-wider" data-testid="detail-gohub-failed">
+              TBS boarding pass being finalised · Our team is preparing your QR
+            </div>
+          )}
+          {b.gohub_status === "skipped" && (
+            <div className="border border-blue-300 bg-blue-50 text-blue-800 px-4 py-3 text-xs font-mono uppercase tracking-wider">
+              Seat confirmed · Show your booking reference at the counter
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="te-card p-8 mt-6">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
@@ -88,15 +117,30 @@ export default function BookingDetail() {
 
         <div className="te-overline text-[10px] mb-3">Passengers</div>
         <div className="space-y-2">
-          {b.passengers.map((p, i) => (
-            <div key={i} className="flex justify-between items-center border-b border-black/5 pb-2">
-              <div>
-                <div className="font-bold">{p.name}</div>
-                <div className="text-[10px] font-mono uppercase text-zinc-500">{p.category} {p.ic_or_passport && `· ${p.ic_or_passport}`}</div>
+          {b.passengers.map((p, i) => {
+            const cts = (b.gohub_tickets || []).find((t) => t?.seat_number === p.seat_number && t?.qr);
+            return (
+              <div key={i} className="flex justify-between items-center border-b border-black/5 pb-2 gap-3" data-testid={`passenger-row-${p.seat_number}`}>
+                <div className="min-w-0">
+                  <div className="font-bold truncate">{p.name}</div>
+                  <div className="text-[10px] font-mono uppercase text-zinc-500">{p.category} {p.ic_or_passport && `· ${p.ic_or_passport}`}</div>
+                </div>
+                <div className="flex items-center gap-3 flex-shrink-0">
+                  {cts && (
+                    <div className="flex flex-col items-center" data-testid={`passenger-qr-${p.seat_number}`}>
+                      <div className="bg-white p-1 border border-black/10">
+                        <QRCodeSVG value={cts.qr} size={72} level="M" />
+                      </div>
+                      {cts.tickno && (
+                        <div className="text-[8px] font-mono text-zinc-500 mt-1">{cts.tickno}</div>
+                      )}
+                    </div>
+                  )}
+                  <div className="font-mono font-black">SEAT {p.seat_number}</div>
+                </div>
               </div>
-              <div className="font-mono font-black">SEAT {p.seat_number}</div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         <div className="te-divider-dashed my-6" />

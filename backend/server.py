@@ -1942,6 +1942,9 @@ async def _issue_gohub_tickets(booking_id: str) -> None:
     When ``GOHUB_ENABLED`` is off, or the from/to terminals lack a ``cts_code``,
     or the schedule lacks a ``trip_no``, we mark it ``skipped`` — the operator
     can retry from the admin panel once TBS finishes their config.
+
+    Finally, always dispatches the booking-confirmation email (regardless of
+    CTS outcome) so the customer always receives a receipt.
     """
     booking = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
     if not booking:
@@ -1968,6 +1971,16 @@ async def _issue_gohub_tickets(booking_id: str) -> None:
     if not to_term or not (to_term.get("cts_code") or "").strip():
         reasons.append("to_terminal.cts_code missing")
 
+    async def _send_email_with_current_state() -> None:
+        """Reload the booking (so the email sees the latest gohub_* fields)
+        and fire the confirmation email — never lets errors escape."""
+        try:
+            fresh = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+            if fresh:
+                await send_booking_confirmation(fresh, from_term, to_term)
+        except Exception:  # noqa: BLE001
+            logger.exception("gohub: email dispatch failed for booking %s", booking_id)
+
     if reasons:
         await db.bookings.update_one(
             {"id": booking_id},
@@ -1978,6 +1991,7 @@ async def _issue_gohub_tickets(booking_id: str) -> None:
             }},
         )
         logger.info("gohub: skipped booking %s (%s)", booking.get("reference"), ", ".join(reasons))
+        await _send_email_with_current_state()
         return
 
     from gohub_client import GoHubClient, GoHubError, make_opetickno
@@ -2026,6 +2040,7 @@ async def _issue_gohub_tickets(booking_id: str) -> None:
             }},
         )
         logger.warning("gohub: booking %s failed [%s] %s", booking_ref, e.code, e.message)
+        await _send_email_with_current_state()
         return
     except Exception as e:  # noqa: BLE001 — never propagate to caller
         await db.bookings.update_one(
@@ -2037,18 +2052,15 @@ async def _issue_gohub_tickets(booking_id: str) -> None:
             }},
         )
         logger.exception("gohub: unexpected error for booking %s", booking_ref)
+        await _send_email_with_current_state()
         return
 
     # Parse per-passenger detail rows out of the flattened response.
     # `_parse_response` flattens `<detail .../>` children as ``detail_<attr>``
-    # keys — since CTS returns MULTIPLE `<detail>` we re-parse the raw XML
-    # audit row to get an ordered list. Simpler: use single-seat mapping via
-    # opetickno lookup on any keys the client already surfaced.
+    # keys — since CTS returns MULTIPLE `<detail>` we surface only the last
+    # one via the flattened dict. The full XML lives in ``gohub_logs``.
     tickets: list[dict] = []
     for seat in seats:
-        # For the common single-seat happy path the flattened dict has the
-        # attributes directly; when TBS returns multiple we surface only the
-        # last one — the audit log in `gohub_logs` still has the full XML.
         tickets.append({
             "seat_number": seat["seatno"],
             "opetickno": seat["opetickno"],
@@ -2065,10 +2077,16 @@ async def _issue_gohub_tickets(booking_id: str) -> None:
         }, "$unset": {"gohub_error": ""}},
     )
     logger.info("gohub: booking %s issued %d ticket(s)", booking_ref, len(tickets))
+    await _send_email_with_current_state()
 
 
 async def _finalize_booking(booking_id: str, session_id: str):
-    """Idempotent: mark seats booked, confirm booking, increment promo use, mark txn finalized, send email."""
+    """Idempotent: mark seats booked, confirm booking, increment promo use, mark txn finalized.
+
+    The confirmation email is dispatched from inside ``_issue_gohub_tickets``
+    once the CTS attempt completes — so the email always reflects the final
+    boarding-pass state (real CTS QR vs. fallback).
+    """
     await db.seat_locks.update_many(
         {"booking_id": booking_id, "status": "locked"},
         {"$set": {"status": "booked", "expires_at": None}},
@@ -2085,14 +2103,8 @@ async def _finalize_booking(booking_id: str, session_id: str):
         {"session_id": session_id},
         {"$set": {"booking_finalized": True, "payment_status": "paid", "status": "complete"}},
     )
-    # Fire-and-forget email delivery
     if booking:
-        from_term, to_term = await asyncio.gather(
-            db.terminals.find_one({"id": booking.get("from_terminal_id")}, {"_id": 0}),
-            db.terminals.find_one({"id": booking.get("to_terminal_id")}, {"_id": 0}),
-        )
-        asyncio.create_task(send_booking_confirmation(booking, from_term, to_term))
-        # Fire-and-forget CTS QR issuance — never blocks the webhook.
+        # Fire-and-forget CTS QR issuance — includes the confirmation email dispatch.
         asyncio.create_task(_issue_gohub_tickets(booking_id))
 
 

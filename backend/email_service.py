@@ -38,20 +38,67 @@ def _render_ticket_html(booking: dict, from_term: dict, to_term: dict) -> str:
     ccy = _currency_symbol(pricing.get("currency", "myr"))
     total = f"{ccy} {float(pricing.get('total', 0)):.2f}"
 
-    pax_rows = "".join(
-        f"""<tr>
-              <td style="padding:10px 0;border-top:1px dashed #e4e4e7;font-family:monospace;font-weight:700;font-size:13px">{p.get('seat_number','')}</td>
+    # Map seat_number → CTS ticket (if TBS issued QR passes for this booking).
+    gohub_tickets = booking.get("gohub_tickets") or []
+    tick_by_seat = {t.get("seat_number"): t for t in gohub_tickets if t.get("qr")}
+    has_cts_passes = bool(tick_by_seat)
+
+    def _pax_row(p: dict) -> str:
+        seat = p.get("seat_number", "")
+        cts = tick_by_seat.get(seat)
+        # Each CTS QR is attached as its own CID (seat "1A" → CID "qr-1A").
+        qr_cell = ""
+        if cts:
+            qr_cell = (
+                f'<td align="right" style="padding:10px 0 10px 12px;border-top:1px dashed #e4e4e7;vertical-align:middle;width:96px">'
+                f'<img alt="QR seat {seat}" src="cid:qr-{seat}" width="88" height="88" '
+                f'style="display:block;background:#fff;padding:4px;border:1px solid #e4e4e7" />'
+                f'<div style="font-family:monospace;font-size:9px;color:#71717a;margin-top:4px">'
+                f'{cts.get("tickno","")}</div>'
+                f'</td>'
+            )
+        return f"""<tr>
+              <td style="padding:10px 0;border-top:1px dashed #e4e4e7;font-family:monospace;font-weight:700;font-size:13px">{seat}</td>
               <td style="padding:10px 0 10px 12px;border-top:1px dashed #e4e4e7;font-size:14px">
                 <div style="font-weight:700">{p.get('name','')}</div>
                 <div style="color:#71717a;font-size:11px;text-transform:uppercase;letter-spacing:.1em">{p.get('category','adult')}</div>
               </td>
+              {qr_cell}
             </tr>"""
-        for p in booking.get("passengers", [])
-    )
 
-    # CID inline reference — resolved from the PNG attachment added in send_booking_confirmation.
-    # Gmail, Outlook, Apple Mail all render CID-referenced attachments inline.
-    qr_src = "cid:qrcode"
+    pax_rows = "".join(_pax_row(p) for p in booking.get("passengers", []))
+
+    # Header QR:
+    #  * CTS confirmed → point at the first CTS QR (the "one to scan at TBS")
+    #  * otherwise → fall back to the booking reference so the customer always
+    #    has something to show at the counter while TBS finalises the route.
+    if has_cts_passes:
+        header_qr_src = f"cid:qr-{list(tick_by_seat.keys())[0]}"
+        header_caption = "SCAN AT TBS BOARDING GATE"
+    else:
+        header_qr_src = "cid:qrcode"
+        header_caption = "BOARDING PASS IS BEING PREPARED · SHOW REFERENCE AT COUNTER"
+
+    # Status banner: friendly message when CTS didn't issue a real QR yet.
+    gohub_status = (booking.get("gohub_status") or "").lower()
+    if gohub_status == "confirmed" and has_cts_passes:
+        banner = (
+            '<div style="margin:20px 0;padding:14px 16px;background:#ecfdf5;border:1px solid #10b981;color:#065f46;font-size:13px">'
+            '<b>Boarding pass ready.</b> Scan the QR next to each passenger at the TBS gate.</div>'
+        )
+    elif gohub_status == "failed":
+        banner = (
+            '<div style="margin:20px 0;padding:14px 16px;background:#fef3c7;border:1px solid #f59e0b;color:#78350f;font-size:13px">'
+            '<b>Boarding pass being finalised.</b> Our team is preparing your TBS QR pass — we\'ll email it separately before departure. '
+            'You can still show this booking reference at the counter.</div>'
+        )
+    elif gohub_status == "skipped":
+        banner = (
+            '<div style="margin:20px 0;padding:14px 16px;background:#eff6ff;border:1px solid #3b82f6;color:#1e3a8a;font-size:13px">'
+            '<b>Your seat is confirmed.</b> Show this booking reference at the boarding counter.</div>'
+        )
+    else:
+        banner = ""
 
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Your Star Qistna ticket</title></head>
@@ -63,16 +110,19 @@ def _render_ticket_html(booking: dict, from_term: dict, to_term: dict) -> str:
     <div style="padding:28px">
       <div style="text-transform:uppercase;letter-spacing:.22em;color:#16a34a;font-size:11px;font-weight:700">Confirmed</div>
       <h1 style="margin:8px 0 4px;font-size:36px;letter-spacing:-1px;font-weight:900">Seat secured.</h1>
-      <p style="color:#52525b;font-size:14px;margin:0 0 24px">Show this ticket at the boarding gate. One QR per booking.</p>
+      <p style="color:#52525b;font-size:14px;margin:0 0 24px">Show this ticket at the boarding gate. One QR per passenger.</p>
+
+      {banner}
 
       <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;border-left:4px solid #002FA7">
         <tr>
           <td style="padding:20px 24px;vertical-align:middle">
             <div style="text-transform:uppercase;letter-spacing:.2em;color:#52525b;font-size:10px;font-weight:700">Booking reference</div>
             <div style="font-family:monospace;font-weight:900;font-size:28px;letter-spacing:1px;margin-top:4px">{ref}</div>
+            <div style="text-transform:uppercase;letter-spacing:.18em;color:#52525b;font-size:9px;font-weight:700;margin-top:8px">{header_caption}</div>
           </td>
           <td align="right" style="padding:16px 24px;vertical-align:middle">
-            <img alt="QR {ref}" src="{qr_src}" width="128" height="128" style="display:block;background:#fff;padding:6px;border:1px solid #e4e4e7" />
+            <img alt="QR {ref}" src="{header_qr_src}" width="128" height="128" style="display:block;background:#fff;padding:6px;border:1px solid #e4e4e7" />
           </td>
         </tr>
       </table>
@@ -133,7 +183,16 @@ def _send_sync(to_email: str, subject: str, html: str, attachments: list = None)
 
 
 async def send_booking_confirmation(booking: dict, from_term: dict, to_term: dict):
-    """Non-blocking best-effort: log on failure, do not raise into the booking path."""
+    """Non-blocking best-effort: log on failure, do not raise into the booking path.
+
+    When CTS has issued real QR passes (``booking.gohub_tickets``), one PNG
+    attachment is created per seat with Content-ID ``qr-{seat_number}``. The
+    HTML body picks these up inline via ``<img src="cid:qr-1A">`` etc.
+
+    When no CTS pass exists yet (skipped/failed/pending), we fall back to a
+    single booking-reference QR attached as ``cid:qrcode`` so the customer
+    can still show something at the counter.
+    """
     if not resend.api_key:
         logger.warning("RESEND_API_KEY not set; skipping email")
         return
@@ -143,19 +202,35 @@ async def send_booking_confirmation(booking: dict, from_term: dict, to_term: dic
         return
     html = _render_ticket_html(booking, from_term, to_term)
     subject = f"Star Qistna — Booking confirmed · {booking.get('reference','')}"
-    # Attach QR as a PNG file with a Content-ID so the HTML body can reference it
-    # as <img src="cid:qrcode">. Attachment also remains downloadable as a fallback.
-    ref = booking.get("reference", "ticket")
-    qr_bytes_b64 = _qr_png_base64(ref)
-    attachments = [{
-        "filename": f"{ref}.png",
-        "content": qr_bytes_b64,
-        "content_type": "image/png",
-        "content_id": "qrcode",
-    }]
+
+    attachments: list[dict] = []
+    gohub_tickets = [t for t in (booking.get("gohub_tickets") or []) if t.get("qr")]
+    if gohub_tickets:
+        # One CID per CTS QR — email clients render each inline next to its passenger row.
+        for t in gohub_tickets:
+            seat = t.get("seat_number", "?")
+            attachments.append({
+                "filename": f"boarding-{seat}.png",
+                "content": _qr_png_base64(t["qr"]),
+                "content_type": "image/png",
+                "content_id": f"qr-{seat}",
+            })
+    else:
+        # Fallback so the header <img cid:qrcode> still has something to render.
+        ref = booking.get("reference", "ticket")
+        attachments.append({
+            "filename": f"{ref}.png",
+            "content": _qr_png_base64(ref),
+            "content_type": "image/png",
+            "content_id": "qrcode",
+        })
+
     try:
         res = await asyncio.to_thread(_send_sync, to_email, subject, html, attachments)
-        logger.info("Sent booking email to %s ref=%s id=%s", to_email, booking.get("reference"), res.get("id"))
+        logger.info(
+            "Sent booking email to %s ref=%s cts_passes=%d id=%s",
+            to_email, booking.get("reference"), len(gohub_tickets), res.get("id"),
+        )
     except Exception as e:
         logger.exception("Failed to send booking email to %s: %s", to_email, e)
 
