@@ -90,9 +90,9 @@ log "4/4  Restarting services"
 BACKEND_RESTARTED=0
 
 if command -v systemctl >/dev/null 2>&1; then
-    # Look for any systemd unit that plausibly hosts our backend. `list-unit-files`
-    # is enumerated verbatim so we don't miss disabled-but-installed units.
-    CANDIDATE_UNITS=$(systemctl list-unit-files --type=service --no-legend 2>/dev/null \
+    # Enumerate ALL loaded units (running, enabled, or otherwise) — much broader
+    # than list-unit-files, which misses transient / manually-created units.
+    CANDIDATE_UNITS=$(systemctl list-units --type=service --all --no-legend 2>/dev/null \
         | awk '{print $1}' \
         | grep -iE '(qistna|starqistna|star-qistna|star_qistna|fastapi|uvicorn|gunicorn|bus-backend|bus_backend)' \
         | head -3 || true)
