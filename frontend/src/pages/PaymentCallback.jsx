@@ -96,12 +96,46 @@ export default function PaymentCallback() {
             <div className="flex-1">
               <div className="te-overline">Booking reference</div>
               <div className="font-mono text-3xl font-black mt-1" data-testid="booking-reference">{booking.reference}</div>
-              <div className="text-xs text-zinc-600 mt-2">Scan the QR at the boarding gate.</div>
+              {(() => {
+                const firstCts = (booking.gohub_tickets || []).find((t) => t?.qr);
+                if (firstCts) {
+                  return <div className="text-xs text-emerald-700 font-bold mt-2">TBS boarding pass ready · Scan the QR at the gate.</div>;
+                }
+                if (booking.gohub_status === "failed") {
+                  return <div className="text-xs text-amber-700 font-bold mt-2">TBS boarding pass being finalised — we&apos;ll email it separately.</div>;
+                }
+                return <div className="text-xs text-zinc-600 mt-2">Show your booking reference at the boarding counter.</div>;
+              })()}
             </div>
-            <div className="bg-white p-3 border border-black/10" data-testid="booking-qr">
-              <QRCodeSVG value={booking.reference} size={128} level="M" />
-            </div>
+            {(() => {
+              const firstCts = (booking.gohub_tickets || []).find((t) => t?.qr);
+              const qrValue = firstCts?.qr || booking.reference;
+              return (
+                <div className="bg-white p-3 border border-black/10 flex flex-col items-center" data-testid="booking-qr">
+                  <QRCodeSVG value={qrValue} size={128} level="M" />
+                  {firstCts && (
+                    <div className="mt-1 text-[9px] font-mono uppercase text-emerald-700 tracking-wider">TBS GATE</div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
+
+          {/* Per-passenger CTS QR passes when TBS has issued them. */}
+          {(booking.gohub_tickets || []).some((t) => t?.qr) && (
+            <div className="mt-6 border border-emerald-200 bg-emerald-50/50 p-4" data-testid="cts-passes">
+              <div className="te-overline text-[10px] text-emerald-700 mb-3">TBS Boarding Passes · scan each at the gate</div>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                {booking.gohub_tickets.filter((t) => t?.qr).map((t) => (
+                  <div key={t.seat_number} className="bg-white p-2 border border-black/10 flex flex-col items-center" data-testid={`cts-pass-${t.seat_number}`}>
+                    <QRCodeSVG value={t.qr} size={100} level="M" />
+                    <div className="mt-1 font-mono font-bold text-xs">SEAT {t.seat_number}</div>
+                    {t.tickno && <div className="font-mono text-[9px] text-zinc-500">{t.tickno}</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6 text-sm">
             <div>
