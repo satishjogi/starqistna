@@ -81,13 +81,60 @@ yarn build
 popd >/dev/null
 
 log "4/4  Restarting services"
-if systemctl list-unit-files | grep -q starqistna-backend; then
-    sudo systemctl restart starqistna-backend
-    echo "  ✓ backend restarted"
-else
-    warn "starqistna-backend systemd unit not found — skipping backend restart."
+
+# Try every common supervisor the operator might have used, in order:
+#   1. systemd unit (any name containing qistna / starqistna / bus / backend)
+#   2. PM2 process
+#   3. supervisord managed process
+#   4. Nothing matched — surface actionable instructions.
+BACKEND_RESTARTED=0
+
+if command -v systemctl >/dev/null 2>&1; then
+    # Look for any systemd unit that plausibly hosts our backend. `list-unit-files`
+    # is enumerated verbatim so we don't miss disabled-but-installed units.
+    CANDIDATE_UNITS=$(systemctl list-unit-files --type=service --no-legend 2>/dev/null \
+        | awk '{print $1}' \
+        | grep -iE '(qistna|starqistna|star-qistna|star_qistna|fastapi|uvicorn|gunicorn|bus-backend|bus_backend)' \
+        | head -3 || true)
+    for unit in $CANDIDATE_UNITS; do
+        if sudo systemctl restart "$unit" 2>/dev/null; then
+            echo "  ✓ backend restarted via systemd: $unit"
+            BACKEND_RESTARTED=1
+            break
+        fi
+    done
 fi
-if systemctl list-unit-files | grep -qE "^nginx(\.service)?\s"; then
+
+if [[ $BACKEND_RESTARTED -eq 0 ]] && command -v pm2 >/dev/null 2>&1; then
+    PM2_TARGET=$(pm2 list 2>/dev/null | awk '/qistna|starqistna|bus|backend|fastapi|uvicorn/ && !/^─/ {print $2; exit}' || true)
+    if [[ -n "$PM2_TARGET" ]]; then
+        pm2 restart "$PM2_TARGET" >/dev/null && \
+            echo "  ✓ backend restarted via pm2: $PM2_TARGET" && BACKEND_RESTARTED=1
+    fi
+fi
+
+if [[ $BACKEND_RESTARTED -eq 0 ]] && command -v supervisorctl >/dev/null 2>&1; then
+    SUP_TARGET=$(sudo supervisorctl status 2>/dev/null \
+        | awk '/qistna|starqistna|backend|bus/ {print $1; exit}' || true)
+    if [[ -n "$SUP_TARGET" ]]; then
+        sudo supervisorctl restart "$SUP_TARGET" >/dev/null && \
+            echo "  ✓ backend restarted via supervisord: $SUP_TARGET" && BACKEND_RESTARTED=1
+    fi
+fi
+
+if [[ $BACKEND_RESTARTED -eq 0 ]]; then
+    warn "Could not auto-detect backend supervisor. Restart manually with ONE of:"
+    echo "     sudo systemctl restart <your-service-name>     # if using systemd"
+    echo "     pm2 restart <your-app-name>                    # if using PM2"
+    echo "     sudo supervisorctl restart <your-program>      # if using supervisord"
+    echo ""
+    echo "  To see what's running:"
+    echo "     sudo systemctl list-units --type=service | grep -iE 'star|qistna|fastapi|uvicorn|gunicorn'"
+    echo "     pm2 list"
+    echo "     sudo supervisorctl status"
+fi
+
+if systemctl list-unit-files 2>/dev/null | grep -qE "^nginx(\.service)?\s"; then
     sudo systemctl reload nginx
     echo "  ✓ nginx reloaded"
 elif command -v nginx >/dev/null 2>&1; then
