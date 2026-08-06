@@ -67,6 +67,9 @@ def _parse_args() -> argparse.Namespace:
                    help="Also run confirmOnlineQR_V2 after successful reserve.")
     p.add_argument("--cancel", action="store_true",
                    help="Also cancel the confirmed ticket at the end.")
+    p.add_argument("--one-shot", action="store_true",
+                   help="Skip reserve/confirm — call getOnlineQR_V2 directly. "
+                        "This is the exact path Phase 2 uses after a Stripe payment.")
     return p.parse_args()
 
 
@@ -93,6 +96,37 @@ async def _run(args: argparse.Namespace) -> int:
     print()
 
     client = GoHubClient(db=None, timeout=20)
+
+    # One-shot getOnlineQR_V2 (Phase 2 code path) — commits the QR immediately.
+    if args.one_shot:
+        print("getOnlineQR_V2  (one-shot — the Phase 2 real-booking path) …")
+        try:
+            out = await client.get_qr(
+                trans_id=trans_id,
+                trip_no=args.trip_no,
+                trip_date=args.boarding_date,
+                depart_date=args.boarding_date,
+                depart_time=args.boarding_time,
+                from_counter=args.from_counter,
+                to_counter=args.to_counter,
+                seats=[seat],
+            )
+            print("    OK ✓")
+            for k, v in out.items():
+                print(f"       {k}: {v}")
+            print()
+            qr = out.get("detail_QR") or out.get("QR") or ""
+            tickno = out.get("detail_tickno") or out.get("tickno") or ""
+            if qr and tickno:
+                print(f"🎉 REAL QR ISSUED: tickno={tickno}  qr={qr[:40]}…")
+            else:
+                print("⚠️  QR / tickno empty — check TBS-side rate configuration.")
+            return 0
+        except GoHubError as e:
+            print(f"    FAIL ✗  [{e.code}] {e.message}")
+            if e.raw:
+                print(f"    RAW:\n{e.raw[:800]}")
+            return 1
 
     # 1) reserveOnlineQR_V2
     print("1/3  reserveOnlineQR_V2 …")
