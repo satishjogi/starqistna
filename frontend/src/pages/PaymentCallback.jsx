@@ -4,7 +4,8 @@ import { QRCodeSVG } from "qrcode.react";
 import api from "../lib/api";
 import { clearFlow } from "../lib/booking-store";
 
-const MAX_POLL = 8;
+const MAX_POLL = 20;   // 20 * 2s = 40 seconds — accommodates GrabPay / FPX settle time
+const POLL_INTERVAL_MS = 2000;
 
 export default function PaymentCallback() {
   const [params] = useSearchParams();
@@ -13,41 +14,67 @@ export default function PaymentCallback() {
 
   const [status, setStatus] = useState("pending"); // pending | paid | failed | timeout
   const [booking, setBooking] = useState(null);
+  const [verifying, setVerifying] = useState(false);
   const attemptsRef = useRef(0);
+  const aliveRef = useRef(true);
+
+  const runPoll = async () => {
+    if (!aliveRef.current) return;
+    if (attemptsRef.current >= MAX_POLL) {
+      setStatus("timeout");
+      return;
+    }
+    attemptsRef.current += 1;
+    try {
+      const { data } = await api.get(`/payments/status/${sessionId}`);
+      if (data.payment_status === "paid") {
+        setStatus("paid");
+        setBooking(data.booking);
+        clearFlow();
+        return;
+      }
+      if (data.status === "expired") {
+        setStatus("failed");
+        return;
+      }
+    } catch {
+      // keep polling
+    }
+    setTimeout(runPoll, POLL_INTERVAL_MS);
+  };
 
   useEffect(() => {
     if (!sessionId) {
       setStatus("failed");
       return;
     }
-    let alive = true;
-    const tick = async () => {
-      if (!alive) return;
-      if (attemptsRef.current >= MAX_POLL) {
-        setStatus("timeout");
-        return;
-      }
-      attemptsRef.current += 1;
-      try {
-        const { data } = await api.get(`/payments/status/${sessionId}`);
-        if (data.payment_status === "paid") {
-          setStatus("paid");
-          setBooking(data.booking);
-          clearFlow();
-          return;
-        }
-        if (data.status === "expired") {
-          setStatus("failed");
-          return;
-        }
-      } catch {
-        // keep polling
-      }
-      setTimeout(tick, 2000);
-    };
-    tick();
-    return () => { alive = false; };
+    aliveRef.current = true;
+    runPoll();
+    return () => { aliveRef.current = false; };
   }, [sessionId]);
+
+  // Manual verification: single extra API call to force a fresh Stripe check.
+  const verifyNow = async () => {
+    if (!sessionId) return;
+    setVerifying(true);
+    try {
+      const { data } = await api.get(`/payments/status/${sessionId}`);
+      if (data.payment_status === "paid") {
+        setStatus("paid");
+        setBooking(data.booking);
+        clearFlow();
+      } else {
+        // Still not paid — restart polling for another round.
+        attemptsRef.current = 0;
+        setStatus("pending");
+        runPoll();
+      }
+    } catch {
+      // no-op — keep the timeout UI so user can retry / contact support
+    } finally {
+      setVerifying(false);
+    }
+  };
 
   return (
     <div className="px-4 md:px-6 lg:px-10 py-16 max-w-3xl mx-auto">
@@ -118,12 +145,27 @@ export default function PaymentCallback() {
           <h1 className="text-4xl font-black tracking-tight">{status === "timeout" ? "Still processing…" : "We couldn't confirm your payment."}</h1>
           <p className="text-zinc-600 mt-3">
             {status === "timeout"
-              ? "Your bank may take a few minutes. Check your booking later; if the charge doesn't settle, it auto-voids."
+              ? "Your bank / GrabPay may take a moment. Click Verify Payment to re-check, or your booking will finalise automatically within a minute."
               : "You were not charged. Try booking again."}
           </p>
-          <div className="mt-6 flex gap-3">
+          {status === "timeout" && sessionId && (
+            <div className="mt-3 text-[10px] font-mono text-zinc-500">
+              Reference: <span className="text-zinc-700">{sessionId.slice(0, 24)}…</span>
+            </div>
+          )}
+          <div className="mt-6 flex gap-3 flex-wrap">
+            {status === "timeout" && (
+              <button
+                onClick={verifyNow}
+                disabled={verifying}
+                className="te-btn-primary"
+                data-testid="verify-payment-btn"
+              >
+                {verifying ? "Verifying…" : "Verify payment now"}
+              </button>
+            )}
             {bookingId && <Link to={`/bookings/${bookingId}`} className="te-btn-outline">Check booking status</Link>}
-            <Link to="/" className="te-btn-primary">Start over</Link>
+            <Link to="/" className={status === "timeout" ? "te-btn-outline" : "te-btn-primary"}>Start over</Link>
           </div>
         </div>
       )}

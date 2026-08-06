@@ -1949,6 +1949,115 @@ async def payment_status(session_id: str, request: Request):
     return {"payment_status": check.payment_status, "status": check.status, "booking": booking}
 
 
+# ---------- Stuck-payment reconciliation --------------------------------
+# The webhook is our primary "payment confirmed" signal, but Stripe can
+# throttle/disable it (e.g. after transient 5xxs) and async methods like
+# GrabPay can settle after the client-side polling window has closed.
+# The reconciler is a belt-and-braces safety net: it re-asks Stripe about
+# every `initiated` transaction older than RECONCILE_MIN_AGE_SECONDS and
+# finalizes any that Stripe now reports as paid.
+RECONCILE_MIN_AGE_SECONDS = 30
+RECONCILE_MAX_AGE_SECONDS = 60 * 60 * 24  # ignore anything older than 24h
+RECONCILE_INTERVAL_SECONDS = 60
+
+
+async def _reconcile_one_transaction(txn: dict) -> dict:
+    """Ask Stripe for the current status of a single session and finalize
+    the booking if it's now paid. Returns a short summary dict for logging."""
+    session_id = txn.get("session_id")
+    if not session_id:
+        return {"session_id": None, "action": "skip_missing_session_id"}
+    if txn.get("booking_finalized"):
+        return {"session_id": session_id, "action": "already_finalized"}
+
+    # Reuse a fresh StripeCheckout — no request needed here.
+    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
+    try:
+        check: CheckoutStatusResponse = await stripe_checkout.get_checkout_status(session_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("reconcile: stripe status fetch failed for %s: %s", session_id, e)
+        return {"session_id": session_id, "action": "stripe_error", "error": str(e)[:200]}
+
+    await db.payment_transactions.update_one(
+        {"session_id": session_id},
+        {"$set": {
+            "status": check.status,
+            "payment_status": check.payment_status,
+            "updated_at": utcnow().isoformat(),
+        }},
+    )
+    if check.payment_status == "paid":
+        await _finalize_booking(txn["booking_id"], session_id)
+        logger.info("reconcile: FINALIZED booking for session=%s", session_id)
+        return {
+            "session_id": session_id, "booking_id": txn.get("booking_id"),
+            "action": "finalized", "stripe_status": check.status,
+        }
+    return {
+        "session_id": session_id, "booking_id": txn.get("booking_id"),
+        "action": "still_pending", "stripe_status": check.status,
+        "stripe_payment_status": check.payment_status,
+    }
+
+
+async def _reconcile_stuck_transactions() -> list[dict]:
+    """Scan for `initiated` transactions in the 30s..24h age band and reconcile each."""
+    now = utcnow()
+    min_created = (now - timedelta(seconds=RECONCILE_MAX_AGE_SECONDS)).isoformat()
+    max_created = (now - timedelta(seconds=RECONCILE_MIN_AGE_SECONDS)).isoformat()
+    cursor = db.payment_transactions.find({
+        "booking_finalized": {"$ne": True},
+        "payment_status": {"$ne": "paid"},
+        "created_at": {"$gte": min_created, "$lte": max_created},
+    }, {"_id": 0}).limit(50)
+    results: list[dict] = []
+    async for txn in cursor:
+        try:
+            results.append(await _reconcile_one_transaction(txn))
+        except Exception as e:  # noqa: BLE001
+            logger.exception("reconcile: unexpected error for %s: %s", txn.get("session_id"), e)
+    return results
+
+
+async def _reconcile_loop() -> None:
+    """Background task: reconcile stuck payments every RECONCILE_INTERVAL_SECONDS."""
+    while True:
+        try:
+            outcomes = await _reconcile_stuck_transactions()
+            actions = [o.get("action") for o in outcomes]
+            finalized = sum(1 for a in actions if a == "finalized")
+            if outcomes:
+                logger.info("reconcile: scanned=%d finalized=%d", len(outcomes), finalized)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("reconcile: loop error: %s", e)
+        await asyncio.sleep(RECONCILE_INTERVAL_SECONDS)
+
+
+@api.post("/admin/payments/reconcile")
+async def admin_reconcile_payments(user: dict = Depends(require_admin)):
+    """Force an immediate reconciliation sweep of all initiated transactions.
+
+    Handy after the Stripe webhook has been disabled or the client-side
+    polling window closed before an async payment (GrabPay/FPX) settled.
+    """
+    outcomes = await _reconcile_stuck_transactions()
+    return {
+        "checked": len(outcomes),
+        "finalized": sum(1 for o in outcomes if o.get("action") == "finalized"),
+        "results": outcomes,
+    }
+
+
+@api.post("/admin/payments/reconcile/{session_id}")
+async def admin_reconcile_one(session_id: str, user: dict = Depends(require_admin)):
+    """Force reconciliation for a single Stripe session — useful when a
+    specific customer complains their paid booking is stuck."""
+    txn = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+    if not txn:
+        raise HTTPException(404, "Transaction not found")
+    return await _reconcile_one_transaction(txn)
+
+
 async def _issue_gohub_tickets(booking_id: str) -> None:
     """After payment confirms, call CTS `getOnlineQR_V2` to fetch the real QR
     ticket(s) for a booking. Fire-and-forget: never crash the caller.
@@ -3893,6 +4002,8 @@ async def on_start():
     await _migrate_operator_names()
     await _diversify_popular_schedules()
     await _seed_promos()
+    # Safety net for Stripe webhook drop-offs / async payment settle delays.
+    asyncio.create_task(_reconcile_loop())
     logger.info("Star Qistna startup complete")
 
 
