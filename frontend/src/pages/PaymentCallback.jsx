@@ -6,6 +6,11 @@ import { clearFlow } from "../lib/booking-store";
 
 const MAX_POLL = 20;   // 20 * 2s = 40 seconds — accommodates GrabPay / FPX settle time
 const POLL_INTERVAL_MS = 2000;
+// Once payment is paid, CTS QR issuance runs as an async background task.
+// We keep polling for up to N extra rounds so the success page can show the
+// branded TBS QR image (fetched from gopass) as soon as it lands, instead of
+// flashing the plain fallback QR first.
+const MAX_CTS_POLL = 6;   // 6 * 2s = 12 extra seconds after "paid"
 
 export default function PaymentCallback() {
   const [params] = useSearchParams();
@@ -16,6 +21,7 @@ export default function PaymentCallback() {
   const [booking, setBooking] = useState(null);
   const [verifying, setVerifying] = useState(false);
   const attemptsRef = useRef(0);
+  const ctsAttemptsRef = useRef(0);
   const aliveRef = useRef(true);
 
   const runPoll = async () => {
@@ -31,6 +37,13 @@ export default function PaymentCallback() {
         setStatus("paid");
         setBooking(data.booking);
         clearFlow();
+        // If CTS hasn't finished issuing branded QRs yet, keep polling in a
+        // short secondary loop so the branded image can populate live.
+        const hasBrandedQr = (data.booking?.gohub_tickets || []).some((t) => t?.qr_image);
+        const ctsDone = ["confirmed", "failed", "skipped"].includes(data.booking?.gohub_status);
+        if (!hasBrandedQr && !ctsDone) {
+          setTimeout(runCtsPoll, POLL_INTERVAL_MS);
+        }
         return;
       }
       if (data.status === "expired") {
@@ -41,6 +54,24 @@ export default function PaymentCallback() {
       // keep polling
     }
     setTimeout(runPoll, POLL_INTERVAL_MS);
+  };
+
+  const runCtsPoll = async () => {
+    if (!aliveRef.current) return;
+    if (ctsAttemptsRef.current >= MAX_CTS_POLL) return;
+    ctsAttemptsRef.current += 1;
+    try {
+      const { data } = await api.get(`/payments/status/${sessionId}`);
+      if (data.booking) {
+        setBooking(data.booking);
+        const hasBrandedQr = (data.booking.gohub_tickets || []).some((t) => t?.qr_image);
+        const ctsDone = ["confirmed", "failed", "skipped"].includes(data.booking.gohub_status);
+        if (hasBrandedQr || ctsDone) return;   // done — stop the CTS poll
+      }
+    } catch {
+      // keep trying
+    }
+    setTimeout(runCtsPoll, POLL_INTERVAL_MS);
   };
 
   useEffect(() => {
