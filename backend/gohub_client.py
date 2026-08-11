@@ -338,7 +338,9 @@ class GoHubClient:
             return None
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                r = await client.get(self.qr_image_url, params={"qrValue": qr_value})
+                # TBS's endpoint accepts qrValue as a POST query-string param
+                # (verified live 2026-08 — GET returns 405 Method Not Allowed).
+                r = await client.post(self.qr_image_url, params={"qrValue": qr_value})
             if r.status_code != 200:
                 logger.warning(
                     "gohub: QR image fetch returned HTTP %s for qr=%s…",

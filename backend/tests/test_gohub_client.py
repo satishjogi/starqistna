@@ -470,7 +470,7 @@ def test_fetch_qr_image_returns_png_bytes(monkeypatch):
     monkeypatch.setenv("GOHUB_OTA_CODE", "X"); monkeypatch.setenv("GOHUB_OTA_PASSWORD", "Y")
     monkeypatch.setenv("GOHUB_OPERATOR_CODE", "Z")
     fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
-    respx.get("http://example/QrCodeWithLogo").mock(return_value=httpx.Response(200, content=fake_png))
+    respx.post("http://example/QrCodeWithLogo").mock(return_value=httpx.Response(200, content=fake_png))
     out = _run(GoHubClient(db=_FakeDB()).fetch_qr_image("NQR,X,y,z,hash"))
     assert out == fake_png
 
@@ -483,7 +483,7 @@ def test_fetch_qr_image_returns_none_on_non_png_body(monkeypatch):
     monkeypatch.setenv("GOHUB_QR_IMAGE_URL", "http://example/QrCodeWithLogo")
     monkeypatch.setenv("GOHUB_OTA_CODE", "X"); monkeypatch.setenv("GOHUB_OTA_PASSWORD", "Y")
     monkeypatch.setenv("GOHUB_OPERATOR_CODE", "Z")
-    respx.get("http://example/QrCodeWithLogo").mock(
+    respx.post("http://example/QrCodeWithLogo").mock(
         return_value=httpx.Response(200, content=b"<html>not a png</html>")
     )
     assert _run(GoHubClient(db=_FakeDB()).fetch_qr_image("some-qr")) is None
@@ -497,7 +497,7 @@ def test_fetch_qr_image_returns_none_on_http_error(monkeypatch):
     monkeypatch.setenv("GOHUB_QR_IMAGE_URL", "http://example/QrCodeWithLogo")
     monkeypatch.setenv("GOHUB_OTA_CODE", "X"); monkeypatch.setenv("GOHUB_OTA_PASSWORD", "Y")
     monkeypatch.setenv("GOHUB_OPERATOR_CODE", "Z")
-    respx.get("http://example/QrCodeWithLogo").mock(return_value=httpx.Response(500))
+    respx.post("http://example/QrCodeWithLogo").mock(return_value=httpx.Response(500))
     assert _run(GoHubClient(db=_FakeDB()).fetch_qr_image("some-qr")) is None
 
 
