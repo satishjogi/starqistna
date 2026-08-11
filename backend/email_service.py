@@ -21,6 +21,20 @@ EMAIL_REPLY_TO = os.environ.get("EMAIL_REPLY_TO", "support@starqistna.com")
 PUBLIC_APP_URL = os.environ.get("PUBLIC_APP_URL", "https://starqistna.com")
 
 
+def _resend_ready() -> bool:
+    """True only when a real-looking Resend key is configured.
+
+    Also rejects the ``re_replace_me`` placeholder from ``.env.example`` so
+    operators don't ship a stale template and wonder why no emails arrive.
+    """
+    key = (resend.api_key or "").strip()
+    if not key:
+        return False
+    if key.lower() in {"re_replace_me", "replace_me", "changeme", "your_key_here"}:
+        return False
+    return key.startswith("re_")
+
+
 def _currency_symbol(ccy: str) -> str:
     return {"myr": "RM", "sgd": "S$", "usd": "$"}.get((ccy or "myr").lower(), ccy.upper())
 
@@ -193,7 +207,7 @@ async def send_booking_confirmation(booking: dict, from_term: dict, to_term: dic
     single booking-reference QR attached as ``cid:qrcode`` so the customer
     can still show something at the counter.
     """
-    if not resend.api_key:
+    if not _resend_ready():
         logger.warning("RESEND_API_KEY not set; skipping email")
         return
     to_email = booking.get("contact_email")
@@ -273,7 +287,7 @@ def _render_password_reset_html(full_name: str, reset_link: str, ttl_minutes: in
 
 async def send_password_reset(to_email: str, full_name: str, reset_link: str, ttl_minutes: int):
     """Non-blocking; logs and swallows delivery errors."""
-    if not resend.api_key:
+    if not _resend_ready():
         logger.warning("RESEND_API_KEY not set; skipping password-reset email to %s", to_email)
         return
     html = _render_password_reset_html(full_name, reset_link, ttl_minutes)
@@ -323,7 +337,7 @@ def _render_admin_invite_html(full_name: str, inviter_name: str, role: str, acce
 
 
 async def send_admin_invite(to_email: str, full_name: str, inviter_name: str, role: str, accept_link: str, ttl_days: int):
-    if not resend.api_key:
+    if not _resend_ready():
         logger.warning("RESEND_API_KEY not set; skipping admin-invite email to %s", to_email)
         return
     html = _render_admin_invite_html(full_name, inviter_name, role, accept_link, ttl_days)
@@ -411,7 +425,7 @@ def _render_feedback_admin_html(fb: dict) -> str:
 
 
 async def send_feedback_confirmation(to_email: str, name: str, reference: str, category: str, message: str):
-    if not resend.api_key:
+    if not _resend_ready():
         logger.warning("RESEND_API_KEY not set; skipping feedback-confirm email to %s", to_email)
         return
     html = _render_feedback_user_html(name, reference, category, message)
@@ -424,7 +438,7 @@ async def send_feedback_confirmation(to_email: str, name: str, reference: str, c
 
 
 async def send_feedback_admin_notification(admin_email: str, feedback: dict):
-    if not resend.api_key:
+    if not _resend_ready():
         logger.warning("RESEND_API_KEY not set; skipping feedback admin notification")
         return
     html = _render_feedback_admin_html(feedback)
@@ -474,7 +488,7 @@ def _render_cancelled_html(booking: dict, from_term: dict, to_term: dict, refund
 
 
 async def send_booking_cancelled(booking: dict, from_term: dict, to_term: dict, refunded: bool, amount: float, currency: str):
-    if not resend.api_key:
+    if not _resend_ready():
         logger.warning("RESEND_API_KEY not set; skipping cancellation email")
         return
     to_email = booking.get("contact_email")
