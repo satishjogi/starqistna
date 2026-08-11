@@ -223,9 +223,17 @@ async def send_booking_confirmation(booking: dict, from_term: dict, to_term: dic
         # One CID per CTS QR — email clients render each inline next to its passenger row.
         for t in gohub_tickets:
             seat = t.get("seat_number", "?")
+            # Prefer the TBS-branded PNG (with gopass logo) if we grabbed it
+            # from CTS; otherwise generate a plain QR locally so the ticket
+            # is never empty.
+            branded = t.get("qr_image", "")
+            if branded.startswith("data:image/png;base64,"):
+                png_b64 = branded.split(",", 1)[1]
+            else:
+                png_b64 = _qr_png_base64(t["qr"])
             attachments.append({
                 "filename": f"boarding-{seat}.png",
-                "content": _qr_png_base64(t["qr"]),
+                "content": png_b64,
                 "content_type": "image/png",
                 "content_id": f"qr-{seat}",
             })

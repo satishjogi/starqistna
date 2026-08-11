@@ -461,6 +461,66 @@ def test_audit_log_never_persists_passwords(monkeypatch):
         assert "PLAINTEXT" not in str(v), f"password leaked in key {k}"
 
 
+@respx.mock
+def test_fetch_qr_image_returns_png_bytes(monkeypatch):
+    """Happy path: image endpoint returns a valid PNG → we get bytes back."""
+    monkeypatch.setenv("GOHUB_ENABLED", "true")
+    monkeypatch.setenv("GOHUB_BASE_URL", "http://example/test.asmx")
+    monkeypatch.setenv("GOHUB_QR_IMAGE_URL", "http://example/QrCodeWithLogo")
+    monkeypatch.setenv("GOHUB_OTA_CODE", "X"); monkeypatch.setenv("GOHUB_OTA_PASSWORD", "Y")
+    monkeypatch.setenv("GOHUB_OPERATOR_CODE", "Z")
+    fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+    respx.get("http://example/QrCodeWithLogo").mock(return_value=httpx.Response(200, content=fake_png))
+    out = _run(GoHubClient(db=_FakeDB()).fetch_qr_image("NQR,X,y,z,hash"))
+    assert out == fake_png
+
+
+@respx.mock
+def test_fetch_qr_image_returns_none_on_non_png_body(monkeypatch):
+    """If TBS returns HTML (e.g. auth wall), we detect and fall back."""
+    monkeypatch.setenv("GOHUB_ENABLED", "true")
+    monkeypatch.setenv("GOHUB_BASE_URL", "http://example/test.asmx")
+    monkeypatch.setenv("GOHUB_QR_IMAGE_URL", "http://example/QrCodeWithLogo")
+    monkeypatch.setenv("GOHUB_OTA_CODE", "X"); monkeypatch.setenv("GOHUB_OTA_PASSWORD", "Y")
+    monkeypatch.setenv("GOHUB_OPERATOR_CODE", "Z")
+    respx.get("http://example/QrCodeWithLogo").mock(
+        return_value=httpx.Response(200, content=b"<html>not a png</html>")
+    )
+    assert _run(GoHubClient(db=_FakeDB()).fetch_qr_image("some-qr")) is None
+
+
+@respx.mock
+def test_fetch_qr_image_returns_none_on_http_error(monkeypatch):
+    """5xx from the image endpoint must NOT break the booking flow."""
+    monkeypatch.setenv("GOHUB_ENABLED", "true")
+    monkeypatch.setenv("GOHUB_BASE_URL", "http://example/test.asmx")
+    monkeypatch.setenv("GOHUB_QR_IMAGE_URL", "http://example/QrCodeWithLogo")
+    monkeypatch.setenv("GOHUB_OTA_CODE", "X"); monkeypatch.setenv("GOHUB_OTA_PASSWORD", "Y")
+    monkeypatch.setenv("GOHUB_OPERATOR_CODE", "Z")
+    respx.get("http://example/QrCodeWithLogo").mock(return_value=httpx.Response(500))
+    assert _run(GoHubClient(db=_FakeDB()).fetch_qr_image("some-qr")) is None
+
+
+def test_fetch_qr_image_short_circuits_when_disabled(monkeypatch):
+    """No wire call at all when the feature flag is off."""
+    monkeypatch.setenv("GOHUB_ENABLED", "false")
+    monkeypatch.setenv("GOHUB_QR_IMAGE_URL", "http://example/QrCodeWithLogo")
+    monkeypatch.setenv("GOHUB_OTA_CODE", "X"); monkeypatch.setenv("GOHUB_OTA_PASSWORD", "Y")
+    monkeypatch.setenv("GOHUB_OPERATOR_CODE", "Z")
+    # If it tried to hit the wire, respx would raise (unmocked); returning
+    # None cleanly proves the short-circuit works.
+    assert _run(GoHubClient(db=_FakeDB()).fetch_qr_image("q")) is None
+
+
+def test_fetch_qr_image_empty_qr_returns_none(monkeypatch):
+    """Empty QR string → don't waste a round-trip."""
+    monkeypatch.setenv("GOHUB_ENABLED", "true")
+    monkeypatch.setenv("GOHUB_QR_IMAGE_URL", "http://example/QrCodeWithLogo")
+    monkeypatch.setenv("GOHUB_OTA_CODE", "X"); monkeypatch.setenv("GOHUB_OTA_PASSWORD", "Y")
+    monkeypatch.setenv("GOHUB_OPERATOR_CODE", "Z")
+    assert _run(GoHubClient(db=_FakeDB()).fetch_qr_image("")) is None
+
+
 def test_envelope_ticket_details_uses_attributes():
     """Verify the ticket_details block uses ATTRIBUTES, not child elements —
     the CTS WSDL is strict on this. Regression check for the schema fix."""

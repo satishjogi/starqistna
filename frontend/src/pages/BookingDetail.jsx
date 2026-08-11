@@ -48,10 +48,14 @@ export default function BookingDetail() {
           {b.status === "confirmed" && (() => {
             // Header QR: prefer the first CTS-issued pass, else the booking reference.
             const firstCts = (b.gohub_tickets || []).find((t) => t?.qr);
-            const value = firstCts?.qr || b.reference;
+            const brandedSrc = firstCts?.qr_image;
             return (
               <div className="bg-white p-2 border border-black/10" data-testid="detail-qr">
-                <QRCodeSVG value={value} size={112} level="M" />
+                {brandedSrc ? (
+                  <img src={brandedSrc} alt="TBS boarding QR" width={112} height={112} className="block" />
+                ) : (
+                  <QRCodeSVG value={firstCts?.qr || b.reference} size={112} level="M" />
+                )}
                 {firstCts && (
                   <div className="mt-1 text-[8px] font-mono uppercase text-emerald-700 text-center tracking-wider">TBS GATE</div>
                 )}
@@ -129,7 +133,11 @@ export default function BookingDetail() {
                   {cts && (
                     <div className="flex flex-col items-center" data-testid={`passenger-qr-${p.seat_number}`}>
                       <div className="bg-white p-1 border border-black/10">
-                        <QRCodeSVG value={cts.qr} size={72} level="M" />
+                        {cts.qr_image ? (
+                          <img src={cts.qr_image} alt={`Boarding QR seat ${p.seat_number}`} width={72} height={72} className="block" />
+                        ) : (
+                          <QRCodeSVG value={cts.qr} size={72} level="M" />
+                        )}
                       </div>
                       {cts.tickno && (
                         <div className="text-[8px] font-mono text-zinc-500 mt-1">{cts.tickno}</div>

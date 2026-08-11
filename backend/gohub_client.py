@@ -310,6 +310,12 @@ class GoHubClient:
     def __init__(self, db=None, timeout: float = 20.0):
         self.enabled = os.environ.get("GOHUB_ENABLED", "false").strip().lower() in ("1", "true", "yes")
         self.base_url = os.environ.get("GOHUB_BASE_URL", "").strip()
+        # CTS's separate image-with-logo endpoint (§6 of spec). Falls back to
+        # the well-known gopass URL if the env var isn't overridden.
+        self.qr_image_url = os.environ.get(
+            "GOHUB_QR_IMAGE_URL",
+            "https://gopassqr.nssit.com.my/QrCodeWithLogo",
+        ).strip()
         self.ota_code = os.environ.get("GOHUB_OTA_CODE", "").strip()
         self.ota_password = os.environ.get("GOHUB_OTA_PASSWORD", "").strip()
         self.operator_code = os.environ.get("GOHUB_OPERATOR_CODE", "").strip()
@@ -317,6 +323,40 @@ class GoHubClient:
         self.db = db  # motor db — used for audit logging
 
     # ---- Public operations ----------------------------------------------------
+
+    async def fetch_qr_image(self, qr_value: str) -> Optional[bytes]:
+        """Fetch the branded (gopass-logo-embedded) PNG for a CTS QR string.
+
+        The image endpoint is a plain HTTP GET separate from the SOAP API.
+        Falls back to ``None`` on ANY failure — callers use their own locally
+        generated QR image in that case. Never raises.
+
+        Returns the raw PNG bytes on success, ``None`` on any error (network,
+        non-200 HTTP, empty body, disabled feature-flag).
+        """
+        if not self.enabled or not qr_value or not self.qr_image_url:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.get(self.qr_image_url, params={"qrValue": qr_value})
+            if r.status_code != 200:
+                logger.warning(
+                    "gohub: QR image fetch returned HTTP %s for qr=%s…",
+                    r.status_code, qr_value[:20],
+                )
+                return None
+            body = r.content
+            # Basic sanity — a PNG must start with the 8-byte signature.
+            if not body.startswith(b"\x89PNG\r\n\x1a\n"):
+                logger.warning(
+                    "gohub: QR image endpoint returned non-PNG (%d bytes) — falling back",
+                    len(body),
+                )
+                return None
+            return body
+        except Exception as e:  # noqa: BLE001 — never break the booking flow
+            logger.warning("gohub: QR image fetch failed: %s", e)
+            return None
 
     async def get_qr(self, *, trans_id: str, trip_no: str, trip_date: str,
                       depart_date: str, depart_time: str,

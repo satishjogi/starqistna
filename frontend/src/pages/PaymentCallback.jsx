@@ -109,10 +109,16 @@ export default function PaymentCallback() {
             </div>
             {(() => {
               const firstCts = (booking.gohub_tickets || []).find((t) => t?.qr);
-              const qrValue = firstCts?.qr || booking.reference;
+              // Prefer the CTS-branded PNG (has gopass logo) if we fetched it;
+              // otherwise render the raw QR string with a locally-generated QR.
+              const brandedSrc = firstCts?.qr_image;
               return (
                 <div className="bg-white p-3 border border-black/10 flex flex-col items-center" data-testid="booking-qr">
-                  <QRCodeSVG value={qrValue} size={128} level="M" />
+                  {brandedSrc ? (
+                    <img src={brandedSrc} alt="TBS boarding QR" width={128} height={128} className="block" />
+                  ) : (
+                    <QRCodeSVG value={firstCts?.qr || booking.reference} size={128} level="M" />
+                  )}
                   {firstCts && (
                     <div className="mt-1 text-[9px] font-mono uppercase text-emerald-700 tracking-wider">TBS GATE</div>
                   )}
@@ -128,7 +134,11 @@ export default function PaymentCallback() {
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                 {booking.gohub_tickets.filter((t) => t?.qr).map((t) => (
                   <div key={t.seat_number} className="bg-white p-2 border border-black/10 flex flex-col items-center" data-testid={`cts-pass-${t.seat_number}`}>
-                    <QRCodeSVG value={t.qr} size={100} level="M" />
+                    {t.qr_image ? (
+                      <img src={t.qr_image} alt={`Boarding QR seat ${t.seat_number}`} width={100} height={100} className="block" />
+                    ) : (
+                      <QRCodeSVG value={t.qr} size={100} level="M" />
+                    )}
                     <div className="mt-1 font-mono font-bold text-xs">SEAT {t.seat_number}</div>
                     {t.tickno && <div className="font-mono text-[9px] text-zinc-500">{t.tickno}</div>}
                   </div>

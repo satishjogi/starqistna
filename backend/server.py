@@ -2188,14 +2188,28 @@ async def _issue_gohub_tickets(booking_id: str) -> None:
     # `_parse_response` flattens `<detail .../>` children as ``detail_<attr>``
     # keys — since CTS returns MULTIPLE `<detail>` we surface only the last
     # one via the flattened dict. The full XML lives in ``gohub_logs``.
+    #
+    # For every seat we also fetch the CTS-branded QR image (with gopass logo)
+    # from their separate image endpoint — in parallel to keep this fast.
+    # If any image fetch fails, we simply don't store one and the frontend
+    # falls back to a locally-generated plain QR.
+    raw_qr = result.get("detail_QR") or result.get("QR") or result.get("qr") or ""
+    image_bytes_list = await asyncio.gather(
+        *(client.fetch_qr_image(raw_qr) for _ in seats)
+    ) if raw_qr else [None] * len(seats)
+
     tickets: list[dict] = []
-    for seat in seats:
-        tickets.append({
+    for seat, img_bytes in zip(seats, image_bytes_list):
+        ticket_entry = {
             "seat_number": seat["seatno"],
             "opetickno": seat["opetickno"],
             "tickno": result.get("detail_tickno") or result.get("tickno") or "",
-            "qr": result.get("detail_QR") or result.get("QR") or result.get("qr") or "",
-        })
+            "qr": raw_qr,
+        }
+        if img_bytes:
+            import base64 as _b64
+            ticket_entry["qr_image"] = "data:image/png;base64," + _b64.b64encode(img_bytes).decode("ascii")
+        tickets.append(ticket_entry)
 
     await db.bookings.update_one(
         {"id": booking_id},

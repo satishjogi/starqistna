@@ -153,6 +153,9 @@ def test_issue_success_persists_tickets(monkeypatch):
                 "detail_tickno": "CTS123456",
                 "detail_QR": "OQR,QISTINA,cts...,ope...,hash",
             }
+        async def fetch_qr_image(self, qr_value):
+            # Return a valid-looking PNG so the ticket entry gets a qr_image data URL.
+            return b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
 
     monkeypatch.setattr("gohub_client.GoHubClient", _FakeClient)
     _run(server._issue_gohub_tickets("BK1"))
@@ -163,6 +166,9 @@ def test_issue_success_persists_tickets(monkeypatch):
     assert len(doc["gohub_tickets"]) == 2  # one per passenger
     assert doc["gohub_tickets"][0]["opetickno"].startswith("SQ-")
     assert doc["gohub_tickets"][0]["qr"].startswith("OQR,")
+    # Branded image was fetched and persisted as a data URL.
+    assert doc["gohub_tickets"][0]["qr_image"].startswith("data:image/png;base64,")
+    assert doc["gohub_tickets"][1]["qr_image"].startswith("data:image/png;base64,")
 
     # Confirm the client got the right per-passenger seats.
     seats = captured["seats"]
@@ -174,6 +180,34 @@ def test_issue_success_persists_tickets(monkeypatch):
     assert captured["from_counter"] == "TBS"
     assert captured["to_counter"] == "GMC"
     assert captured["trip_no"] == "SQ001"
+
+
+def test_issue_success_without_branded_image(monkeypatch):
+    """When TBS's image endpoint fails, we still store the raw QR string
+    and skip the qr_image field so the frontend falls back gracefully."""
+    monkeypatch.setenv("GOHUB_ENABLED", "true")
+    fdb = _bookings_setup()
+    monkeypatch.setattr(server, "db", fdb)
+
+    class _FakeClient:
+        def __init__(self, **_): pass
+        async def get_qr(self, **_):
+            return {
+                "status_code": "0",
+                "detail_QR": "OQR,QISTINA,cts,ope,hash",
+                "detail_tickno": "CTS999",
+            }
+        async def fetch_qr_image(self, qr_value):
+            return None   # simulate image endpoint failure
+
+    monkeypatch.setattr("gohub_client.GoHubClient", _FakeClient)
+    _run(server._issue_gohub_tickets("BK1"))
+
+    doc = fdb.bookings.docs[0]
+    assert doc["gohub_status"] == "confirmed"
+    for t in doc["gohub_tickets"]:
+        assert t["qr"].startswith("OQR,")
+        assert "qr_image" not in t  # skipped when fetch returned None
 
 
 def test_issue_never_raises_on_unexpected_exception(monkeypatch):
