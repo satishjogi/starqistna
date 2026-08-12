@@ -307,6 +307,86 @@ async def send_password_reset(to_email: str, full_name: str, reset_link: str, tt
         logger.exception("Failed to send password-reset email to %s: %s", to_email, e)
 
 
+def _render_schedule_change_html(booking: dict, from_term: dict, to_term: dict,
+                                  old_departure: str, new_departure: str) -> str:
+    ref = booking.get("reference", "")
+    pax_count = len(booking.get("passengers") or [])
+    from_label = (from_term or {}).get("name") or (from_term or {}).get("city") or "your origin"
+    to_label = (to_term or {}).get("name") or (to_term or {}).get("city") or "your destination"
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Star Qistna — Trip time update</title></head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#09090b">
+  <div style="max-width:560px;margin:32px auto;background:#fff;border:1px solid #e4e4e7">
+    <div style="background:#002FA7;color:#fff;padding:22px 28px;font-weight:900;letter-spacing:-.5px;font-size:22px">
+      STAR QISTNA <span style="font-size:11px;letter-spacing:.2em;font-weight:600;opacity:.85;margin-left:10px">TRIP UPDATE</span>
+    </div>
+    <div style="padding:32px 28px">
+      <div style="text-transform:uppercase;letter-spacing:.22em;color:#d97706;font-size:11px;font-weight:700">Departure time changed</div>
+      <h1 style="margin:8px 0 12px;font-size:28px;letter-spacing:-.5px;font-weight:900">Your trip has been rescheduled.</h1>
+      <p style="font-size:14px;color:#52525b;line-height:1.6;margin:0 0 22px">
+        Your Star Qistna trip from <b>{from_label}</b> to <b>{to_label}</b> has been rescheduled.
+        Your seat{'' if pax_count == 1 else 's'} {'is' if pax_count == 1 else 'are'} still confirmed — only the departure time has changed.
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e4e4e7;margin-bottom:22px">
+        <tr>
+          <td style="padding:14px 18px;background:#fef3c7;border-bottom:1px solid #f59e0b">
+            <div style="text-transform:uppercase;letter-spacing:.2em;color:#78350f;font-size:10px;font-weight:700">Old departure</div>
+            <div style="font-family:monospace;font-size:16px;font-weight:700;margin-top:2px;text-decoration:line-through;color:#78350f">{old_departure}</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:14px 18px;background:#ecfdf5">
+            <div style="text-transform:uppercase;letter-spacing:.2em;color:#065f46;font-size:10px;font-weight:700">New departure</div>
+            <div style="font-family:monospace;font-size:18px;font-weight:900;margin-top:2px;color:#065f46">{new_departure}</div>
+          </td>
+        </tr>
+      </table>
+      <div style="background:#f4f4f5;border-left:4px solid #002FA7;padding:14px 18px;margin-bottom:22px">
+        <div style="text-transform:uppercase;letter-spacing:.2em;color:#52525b;font-size:10px;font-weight:700">Booking reference</div>
+        <div style="font-family:monospace;font-weight:900;font-size:24px;letter-spacing:1px;margin-top:4px">{ref}</div>
+      </div>
+      <p style="margin:22px 0">
+        <a href="{PUBLIC_APP_URL}/bookings/{booking.get('id','')}" style="display:inline-block;background:#002FA7;color:#fff;padding:12px 24px;text-decoration:none;font-weight:700;letter-spacing:.05em">View your booking →</a>
+      </p>
+      <p style="font-size:12px;color:#71717a;line-height:1.6;margin-top:22px">
+        Cannot make the new time? Reply to this email or contact <a href="mailto:{EMAIL_REPLY_TO}" style="color:#002FA7">{EMAIL_REPLY_TO}</a> and we'll help you reschedule or refund.
+      </p>
+    </div>
+    <div style="background:#09090b;color:#a1a1aa;padding:16px 28px;font-family:monospace;font-size:10px;letter-spacing:.18em;text-transform:uppercase">
+      © STAR QISTNA · PREMIUM COACH · <a href="{PUBLIC_APP_URL}" style="color:#a1a1aa;text-decoration:none">STARQISTNA.COM</a>
+    </div>
+  </div>
+</body></html>"""
+
+
+async def send_schedule_change(*, booking: dict, from_term: dict, to_term: dict,
+                                old_departure: str, new_departure: str):
+    """Notify a single confirmed booking that its departure time/date changed.
+
+    Fire-and-forget from the caller's perspective — swallows delivery errors so
+    a single bad address doesn't affect the rest of the batch.
+    """
+    if not _resend_ready():
+        logger.warning("RESEND_API_KEY not set; skipping schedule-change email to %s",
+                       booking.get("contact_email"))
+        return
+    to_email = booking.get("contact_email")
+    if not to_email:
+        logger.warning("Booking %s has no contact_email; skipping schedule-change email",
+                       booking.get("id"))
+        return
+    html = _render_schedule_change_html(booking, from_term, to_term, old_departure, new_departure)
+    subject = f"Star Qistna — Trip time updated · {booking.get('reference','')}"
+    try:
+        res = await asyncio.to_thread(_send_sync, to_email, subject, html, None)
+        logger.info(
+            "Sent schedule-change email to %s ref=%s id=%s",
+            to_email, booking.get("reference"), res.get("id"),
+        )
+    except Exception as e:
+        logger.exception("Failed to send schedule-change email to %s: %s", to_email, e)
+
+
 def _render_admin_invite_html(full_name: str, inviter_name: str, role: str, accept_link: str, ttl_days: int) -> str:
     safe_name = (full_name or "there").split()[0]
     role_label = "Super-admin" if role == "super_admin" else "Admin"

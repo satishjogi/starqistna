@@ -2944,6 +2944,9 @@ class ScheduleUpdateBody(BaseModel):
     total_seats: Optional[int] = Field(default=None, ge=12, le=60)
     route_id: Optional[str] = None
     trip_no: Optional[str] = None
+    # When true AND the update changes departure_date or departure_time,
+    # send a notification email to every confirmed passenger on this schedule.
+    notify_passengers: bool = False
 
 
 class BulkScheduleBody(BaseModel):
@@ -3452,13 +3455,77 @@ def _build_bulk_delete_query(f: BulkDeleteScheduleFilter) -> dict:
     return q
 
 
+async def _notify_schedule_change(new_sched: dict, old_sched: dict) -> int:
+    """Send a schedule-change email to every confirmed booking on this schedule.
+
+    Fire-and-forget per booking so a single email failure doesn't block others.
+    Returns the number of confirmed bookings we DISPATCHED emails for (Resend
+    itself may still bounce later — we log each result inside email_service).
+    """
+    from email_service import send_schedule_change  # local import — avoids cycles
+    bookings = await db.bookings.find(
+        {"schedule_id": new_sched["id"], "status": "confirmed"},
+        {"_id": 0},
+    ).to_list(500)
+    if not bookings:
+        return 0
+    from_term, to_term = await asyncio.gather(
+        db.terminals.find_one({"id": new_sched.get("from_terminal_id")}, {"_id": 0}),
+        db.terminals.find_one({"id": new_sched.get("to_terminal_id")}, {"_id": 0}),
+    )
+    old_departure = f"{old_sched.get('departure_date','')} · {old_sched.get('departure_time','')}"
+    new_departure = f"{new_sched.get('departure_date','')} · {new_sched.get('departure_time','')}"
+    for b in bookings:
+        # Each dispatch is fire-and-forget so one failure doesn't cascade.
+        asyncio.create_task(send_schedule_change(
+            booking=b, from_term=from_term, to_term=to_term,
+            old_departure=old_departure, new_departure=new_departure,
+        ))
+    return len(bookings)
+
+
+@api.get("/admin/schedules/{schedule_id}/impact")
+async def admin_schedule_impact(schedule_id: str, user: dict = Depends(require_admin)):
+    """Return a summary of downstream impact BEFORE the admin edits a schedule.
+
+    Used by the frontend edit modal to warn about changes that will affect
+    real customers — number of confirmed bookings, distinct contact emails,
+    and whether any of those bookings already have TBS QR passes issued
+    (which may need reissuing if the departure time changes).
+    """
+    sched = await db.schedules.find_one({"id": schedule_id}, {"_id": 0})
+    if not sched:
+        raise HTTPException(404, "Schedule not found")
+    bookings = await db.bookings.find(
+        {"schedule_id": schedule_id, "status": {"$in": ["confirmed", "pending_payment"]}},
+        {"_id": 0, "reference": 1, "contact_email": 1, "status": 1, "gohub_status": 1,
+         "passengers": 1, "gohub_tickets": 1},
+    ).to_list(500)
+    confirmed = [b for b in bookings if b.get("status") == "confirmed"]
+    with_cts_qr = [b for b in confirmed if (b.get("gohub_status") == "confirmed"
+                                             and (b.get("gohub_tickets") or []))]
+    total_seats = sum(len(b.get("passengers") or []) for b in confirmed)
+    emails = sorted({b.get("contact_email") for b in confirmed if b.get("contact_email")})
+    return {
+        "schedule_id": schedule_id,
+        "confirmed_bookings": len(confirmed),
+        "pending_bookings": sum(1 for b in bookings if b.get("status") == "pending_payment"),
+        "confirmed_passengers": total_seats,
+        "bookings_with_cts_qr": len(with_cts_qr),
+        "distinct_customer_emails": len(emails),
+        "sample_references": [b.get("reference") for b in confirmed[:5]],
+    }
+
+
 @api.patch("/admin/schedules/{schedule_id}")
 async def admin_update_schedule(schedule_id: str, body: ScheduleUpdateBody, request: Request,
                                 user: dict = Depends(require_admin)):
     existing = await db.schedules.find_one({"id": schedule_id})
     if not existing:
         raise HTTPException(404, "Schedule not found")
-    updates = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    payload = body.model_dump(exclude_unset=True)
+    notify = bool(payload.pop("notify_passengers", False))
+    updates = {k: v for k, v in payload.items() if v is not None}
     if "route_id" in updates:
         route = await db.routes.find_one({"id": updates["route_id"]}, {"_id": 0})
         if not route:
@@ -3474,12 +3541,31 @@ async def admin_update_schedule(schedule_id: str, body: ScheduleUpdateBody, requ
         updates["layout_config"] = _layout_for_bus_type(updates["bus_type"])
     if not updates:
         raise HTTPException(400, "No changes provided")
+
+    # Detect a customer-facing time/date change BEFORE the update so we can
+    # notify only the affected trips (fare/seat changes don't warrant an email).
+    time_or_date_changed = any(
+        k in updates and updates[k] != existing.get(k)
+        for k in ("departure_date", "departure_time")
+    )
+
     result = await db.schedules.update_one({"id": schedule_id}, {"$set": updates})
     if result.matched_count == 0:
         raise HTTPException(404, "Schedule not found")
     doc = await db.schedules.find_one({"id": schedule_id}, {"_id": 0})
-    await log_audit(user, "update", "schedule", schedule_id, {"fields": list(updates.keys())}, request)
-    return doc
+    await log_audit(
+        user, "update", "schedule", schedule_id,
+        {"fields": list(updates.keys()), "notify_passengers": notify,
+         "time_or_date_changed": time_or_date_changed},
+        request,
+    )
+
+    notified_count = 0
+    if notify and time_or_date_changed:
+        # Fire-and-forget: never let email failures roll back a legitimate update.
+        notified_count = await _notify_schedule_change(doc, existing)
+
+    return {**doc, "notified_passengers": notified_count}
 
 
 @api.post("/admin/schedules/bulk-delete/preview")

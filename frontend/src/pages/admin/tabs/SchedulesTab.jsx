@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import api from "../../../lib/api";
+import EditScheduleModal from "./EditScheduleModal";
 
-// SchedulesTab — list + Bulk Delete Wizard.
-// The bulk delete uses a two-step confirm flow:
+// SchedulesTab — list + Bulk Delete Wizard + inline edit.
+// Bulk delete uses a two-step confirm flow:
 //   1. Preview (server counts matching + blocked)
 //   2. Execute (safe mode by default; ?force=true to nuke schedules with bookings)
 export default function SchedulesTab() {
@@ -10,6 +11,8 @@ export default function SchedulesTab() {
   const [terminals, setTerminals] = useState([]);
   const [routes, setRoutes] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Edit modal state — which schedule (if any) is being edited right now.
+  const [editing, setEditing] = useState(null);
 
   // Bulk delete state
   const [filter, setFilter] = useState({
@@ -198,10 +201,10 @@ export default function SchedulesTab() {
             const to = terminalById[s.to_terminal_id];
             const route = s.route_id ? routeById[s.route_id] : null;
             return (
-              <div key={s.id} className="te-card p-4 grid grid-cols-12 gap-3 text-sm items-center" data-testid={`sched-row-${s.id}`}>
+              <div key={s.id} className="te-card p-4 grid grid-cols-12 gap-3 text-sm items-center hover:bg-zinc-50" data-testid={`sched-row-${s.id}`}>
                 <div className="col-span-2 font-mono text-xs">{s.departure_date}</div>
                 <div className="col-span-1 font-mono text-xs">{s.departure_time}</div>
-                <div className="col-span-4 text-xs">
+                <div className="col-span-3 text-xs">
                   {from ? `${from.code} → ${to?.code || "?"}` : "?"}
                   <div className="text-[10px] text-zinc-500">{from?.name} → {to?.name}</div>
                 </div>
@@ -217,6 +220,12 @@ export default function SchedulesTab() {
                 <div className="col-span-1 font-mono text-xs">{s.currency?.toUpperCase()} {s.adult_fare?.toFixed(2)}</div>
                 <div className="col-span-1 font-mono text-xs">{s.total_seats}s</div>
                 <div className="col-span-1 text-[10px] text-zinc-400">{s.bus_type}</div>
+                <div className="col-span-1 text-right">
+                  <button onClick={() => setEditing(s)} className="text-xs font-mono font-bold uppercase text-[#002FA7] hover:underline"
+                          data-testid={`edit-schedule-${s.id}`}>
+                    Edit
+                  </button>
+                </div>
               </div>
             );
           })}
@@ -227,6 +236,16 @@ export default function SchedulesTab() {
           )}
         </div>
       </div>
+
+      {editing && (
+        <EditScheduleModal
+          schedule={editing}
+          terminals={terminals}
+          routes={routes}
+          onClose={() => setEditing(null)}
+          onSaved={load}
+        />
+      )}
     </div>
   );
 }
