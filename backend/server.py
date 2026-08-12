@@ -836,6 +836,7 @@ async def register(body: RegisterBody, request: Request):
     }
     await db.users.insert_one(doc)
     user_public = {k: v for k, v in doc.items() if k not in ("password_hash", "_id", "totp_secret")}
+    user_public["has_password"] = bool(doc.get("password_hash"))
     return TokenResponse(access_token=issue_jwt(user_id, doc["email"]), user=user_public)
 
 async def _record_login(user: dict, ip: str) -> dict:
@@ -892,6 +893,7 @@ async def login(body: LoginBody, request: Request):
 
     user = await _record_login(user, ip)
     user_public = {k: v for k, v in user.items() if k not in ("password_hash", "_id", "totp_secret")}
+    user_public["has_password"] = bool(user.get("password_hash"))
     return TokenResponse(access_token=issue_jwt(user["id"], user["email"]), user=user_public)
 
 
@@ -925,6 +927,7 @@ async def verify_2fa(body: TwoFAVerifyBody, request: Request):
     await _clear_auth_attempts(ip, "2fa", identifier=throttle_id)
     user = await _record_login(user, ip)
     user_public = {k: v for k, v in user.items() if k not in ("password_hash", "_id", "totp_secret")}
+    user_public["has_password"] = bool(user.get("password_hash"))
     return TokenResponse(access_token=issue_jwt(user["id"], user["email"]), user=user_public)
 
 
@@ -944,7 +947,10 @@ async def forgot_password(body: ForgotPasswordBody, request: Request):
 
     email = body.email.lower().strip()
     user = await db.users.find_one({"email": email})
-    if user and user.get("password_hash"):
+    # Also serve users who signed up via Google (no password_hash). For them
+    # this becomes a "set password" flow rather than "reset" — but from the
+    # caller's perspective it's the same endpoint + same email + same UI.
+    if user:
         # Invalidate any prior unused tokens for this user so only the newest works.
         await db.password_reset_tokens.update_many(
             {"user_id": user["id"], "used": False},
@@ -1067,12 +1073,54 @@ async def disable_2fa(body: TwoFADisableBody, user: dict = Depends(require_user)
 
 @api.get("/auth/me")
 async def me(user: dict = Depends(require_user)):
+    # Enrich the /me payload with a `has_password` flag so the Dashboard can
+    # show a "Set password" section for users who signed up via Google.
+    full = await db.users.find_one({"id": user["id"]}, {"password_hash": 1})
+    user["has_password"] = bool((full or {}).get("password_hash"))
     return user
 
 
 class ChangePasswordBody(BaseModel):
     current_password: str
     new_password: str = Field(min_length=8)
+
+
+class SetPasswordBody(BaseModel):
+    new_password: str = Field(min_length=8)
+
+
+@api.post("/auth/set-password")
+async def set_password(body: SetPasswordBody, user: dict = Depends(require_user)):
+    """First-time password creation for accounts without one.
+
+    Used by Google-authenticated users who want to also sign in with email +
+    password (dual-auth). Users who already have a password must use
+    ``/auth/change-password`` (which requires the current password).
+    """
+    full = await db.users.find_one({"id": user["id"]})
+    if not full:
+        raise HTTPException(404, "User not found")
+    if full.get("password_hash"):
+        raise HTTPException(
+            409,
+            detail={
+                "message": "This account already has a password. Use change-password instead.",
+                "code": "already_has_password",
+            },
+        )
+    _validate_password_strength(body.new_password)
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {
+            "password_hash": hash_password(body.new_password),
+            "password_changed_at": utcnow().isoformat(),
+        }},
+    )
+    return {
+        "ok": True,
+        "has_password": True,
+        "message": "Password set. You can now sign in with email and password too.",
+    }
 
 
 @api.post("/auth/change-password")
@@ -1238,6 +1286,7 @@ async def google_oauth_callback(body: GoogleCallbackBody):
         return {"requires_2fa": True, "challenge_token": challenge}
 
     user_public = {k: v for k, v in user_doc.items() if k not in ("password_hash", "_id", "totp_secret")}
+    user_public["has_password"] = bool(user_doc.get("password_hash"))
     return TokenResponse(access_token=issue_jwt(user_id, email), user=user_public)
 
 

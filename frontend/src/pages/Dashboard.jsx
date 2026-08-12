@@ -4,6 +4,7 @@ import api from "../lib/api";
 import { useAuth } from "../lib/auth";
 import NextTripWidget from "../components/NextTripWidget";
 import LastLoginBanner from "../components/LastLoginBanner";
+import SetPasswordCard from "../components/SetPasswordCard";
 
 function fmtPrice(v, ccy = "myr") {
   const map = { myr: "RM", sgd: "S$", usd: "$" };
@@ -56,6 +57,8 @@ export default function Dashboard() {
       <p className="text-zinc-600 mt-2">{user.email}</p>
 
       <LastLoginBanner user={user} />
+
+      <SetPasswordCard />
 
       <NextTripWidget bookings={bookings} />
 
