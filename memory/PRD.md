@@ -202,45 +202,94 @@ Build a complete online bus booking system where visitors can search departure t
 
 ## Backlog / next tasks
 ### P0 — Recently resolved
+- **[2026-08-11] Trip stop date (schedule expiry) consolidated on existing `end_date` field.**
+  - Admin can set/clear/edit `end_date` per schedule via the new edit modal — same field the bulk-create form already writes at generation time (no duplicate field).
+  - Public search filters out schedules where `end_date < requested date`. `POST /bookings` returns HTTP 410 (`schedule_retired`) if a customer tries to book a retired schedule directly.
+  - Frontend badge on admin schedule rows: amber `Ends 2026-12-31` (future) / red `Ends 2026-08-01` (past).
+  - Existing bookings on retired schedules stay valid — customers can view their tickets, only new sales blocked.
+
+- **[2026-08-11] Group 2: Edit Existing Trips with Notification (P0 admin pain point).**
+  - `GET /api/admin/schedules/{id}/impact` — returns confirmed booking count, passenger count, count of bookings with CTS QRs already issued, sample refs. UI shows this as a blast-radius banner BEFORE the admin edits.
+  - `PATCH /api/admin/schedules/{id}` extended with `notify_passengers: bool`. When true AND departure_date/time changed, dispatches per-booking emails via new `send_schedule_change()` mailer (old→new time side-by-side, CTA to booking page).
+  - Edit modal in `SchedulesTab` — full field set (times, fares, seats, bus type, route, trip_no, end_date). Notify checkbox appears ONLY when time/date changed AND there are confirmed bookings. Fare/seat-only changes don't trigger emails.
+
+- **[2026-08-11] Group 1: Google users can now set a password (Dashboard prompt).**
+  - `POST /api/auth/set-password` — first-time password creation for authenticated users; 409 if user already has one.
+  - `/auth/me`, `/auth/login`, `/auth/register`, Google callback now all include `has_password: bool`.
+  - `/auth/forgot-password` fixed — Google users can now use it (previously silently skipped when `password_hash` was empty).
+  - Dashboard renders a dismissible `SetPasswordCard` for `has_password: false` users. Non-blocking.
+
+- **[2026-08-11] CTS QR with gopass logo — end-to-end (Phase A polish).**
+  - `GoHubClient.fetch_qr_image(qr_value)` — POSTs to `GOHUB_QR_IMAGE_URL` (default `https://gopassqr.nssit.com.my/QrCodeWithLogo`), returns branded PNG bytes or `None` on any failure.
+  - `_issue_gohub_tickets` fetches per-seat branded image in parallel, persists as `qr_image` (base64 data URL) on each ticket entry.
+  - `BookingDetail.jsx` + `PaymentCallback.jsx` render `<img>` with branded PNG when present, fall back to local `<QRCodeSVG>` otherwise.
+  - Email attachments use branded PNG when available (same CID structure `qr-{seat}`).
+  - `PaymentCallback.jsx` gained a follow-up CTS poll (up to 12s after payment "paid") so the branded QR swaps in live once the background CTS task completes.
+  - **Non-TBS routes** (terminals without `cts_code` OR schedules without `trip_no`) skip CTS entirely — pre-flight `gohub_status='skipped'` sets in immediately, no wait, plain-QR fallback shown.
+
+- **[2026-08-11] Stripe payment reconciliation (webhook-independent safety net).**
+  - Background reconciler task started at app startup: every 60s scans `payment_transactions` where `status='initiated'` and age is 30s..24h; asks Stripe for real status; finalizes any that are `paid` (calls `_finalize_booking` idempotently).
+  - `POST /api/admin/payments/reconcile` — force-sweep on demand. `POST /api/admin/payments/reconcile/{session_id}` — target one.
+  - CLI: `python scripts/reconcile_payments.py [--session cs_XYZ | --booking BK123 | --dry-run]`.
+  - `PaymentCallback.jsx` polling extended 16s → 40s (accommodates GrabPay/FPX settle delay), plus a manual "Verify payment now" button on timeout.
+  - `Passengers.jsx` differentiates between booking-creation vs Stripe-checkout errors; surfaces the exact backend/Stripe message ("Payment method GRABPAY not activated" etc.) instead of a generic "Could not create booking".
+  - `/payments/checkout` now returns HTTP 422 with a friendly message when Stripe rejects a payment method (previously bare 500).
+
+- **[2026-08-11] Email service resilience.**
+  - `_resend_ready()` helper — rejects placeholder keys like `re_replace_me` / `changeme` / non-`re_`-prefixed strings so misconfigured deploys log clear warnings instead of failing at Resend.
+  - All 5 email-send sites (booking confirmation, cancellation, password reset, schedule change, etc.) now guard behind `_resend_ready()`.
+
 - **[2026-08-05] GoHub Phase 1 (spec-compliance) + Phase 2 (Stripe → CTS wiring) shipped.**
-  - Client refactored to full CTS OnlineQR v1.2.11 conformance: dates now `DD/MM/YYYY`, times `HHMMSS`, multi-seat `<detail>` per `<ticket_details>`, mandatory `opetickno` + `name`, one-shot `getOnlineQR_V2` method added.
+  - Client refactored to full CTS OnlineQR v1.2.11 conformance: dates `DD/MM/YYYY`, times `HHMMSS`, multi-seat `<detail>` per `<ticket_details>`, mandatory `opetickno` + `name`, one-shot `getOnlineQR_V2` method added.
   - **`opetickno` format** locked as `SQ-{booking_ref}-{seat_no}` (uppercase, ≤ 20 chars — validated).
-  - **Signature formula verified live** as `md5(OTACode + DD/MM/YYYY + Password)` **lowercase** hex (not the uppercase `YYYYMMDD` the spec implied). Encoded in `_md5_signature()` after live sweep of ~200 variants via `scripts/gohub_sign_sweep.py`.
-  - Origin counter code confirmed as `TBS` (past error 14). Destination code `GMC` currently returns `[12] Online QR rate cannot be found` — pending TBS-side rate configuration upload.
-  - **Phase 2 wiring**: `_finalize_booking` fires `asyncio.create_task(_issue_gohub_tickets(...))` after Stripe webhook. Pre-flight guards: `GOHUB_ENABLED`, `schedule.trip_no`, `terminal.cts_code` on both ends → skips gracefully if any missing. On success persists `booking.gohub_status='confirmed'` + `gohub_tickets=[{seat_number, opetickno, tickno, qr}, ...]`. On `GoHubError`/unexpected exception: `gohub_status='failed'` + `gohub_error={code, message}`. Never propagates back to Stripe webhook (fire-and-forget).
+  - **Signature formula verified live** as `md5(OTACode + DD/MM/YYYY + Password)` **lowercase** hex. Encoded in `_md5_signature()` after live sweep of ~200 variants via `scripts/gohub_sign_sweep.py`.
+  - Origin counter code confirmed as `TBS`. Destination `GMC` verified live in production (real QR `NQR,QISTINA,...` issued for booking `SQFE29FD25` after TBS ops uploaded the rate matrix).
+  - **Phase 2 wiring**: `_finalize_booking` fires `asyncio.create_task(_issue_gohub_tickets(...))` after Stripe webhook. Pre-flight guards: `GOHUB_ENABLED`, `schedule.trip_no`, `terminal.cts_code` on both ends → skips gracefully if any missing. On success persists `booking.gohub_status='confirmed'` + `gohub_tickets=[{seat_number, opetickno, tickno, qr, qr_image}, ...]`. On `GoHubError`/unexpected exception: `gohub_status='failed'` + `gohub_error={code, message}`. Never propagates back to Stripe webhook (fire-and-forget).
   - **Admin retry endpoint**: `POST /api/admin/bookings/{id}/gohub/retry` — for reissuing tickets after TBS uploads the rate.
-  - **48 pytest cases green** (34 client + 7 Phase 2 wiring + 7 Stripe webhook regression) — all offline.
+  - **60 pytest cases green** (35 client + 8 Phase 2 wiring + 7 Stripe webhook + 6 email QR rendering + 4 misc).
+
 - **[2026-02-02] Stripe webhook hardened.** `/api/webhook/stripe` returns 400 only on signature failure; 200 on all business errors (unknown event types acknowledged with `{"ignored": <type>}`). Backed by 7 pytest cases in `test_stripe_webhook.py`.
 
-### P1
-- **TBS rate upload (blocking real QR issuance)** — waiting on TBS ops to upload the CTS rate for `SQ001 · TBS → GMC · 11:30 · 40-seat Executive Coach`. Once done, existing failed bookings can be reissued via `POST /api/admin/bookings/{id}/gohub/retry`.
-- iPay88 integration (need merchant credentials: Merchant Code, Merchant Key, environment)
-- Email ticket delivery (Resend / SendGrid) with QR attached on `payment_status=paid`
-- React Native mobile app — deferred until web system is perfected (user request)
+### P1 — Next up
+- **Group 3: Bus Type management (simple version)** — new `bus_types` collection (name + seat_count + optional image), CRUD tab in admin, dropdown replaces manual seat_count in schedule form. Legacy schedules keep their existing seat count.
+- **Group 4: Admin UI reorganization** — sidebar nav with 4 sections (Operations / Trip Setup / CTS Integration / System), landing Dashboard with today's bookings + revenue + upcoming trips, delete duplicate `stops` tab, merge `add-schedule` into Schedules as a "+ New" button.
+- Email ticket delivery — already working end-to-end (test booking `SQA15D2787` received branded PNG QR).
+- iPay88 integration — parked (Stripe covers Card + GrabPay + FPX; user is happy).
+- React Native mobile app — deferred until web system is perfected (user request).
 
 ### P2
-- **Display GoHub QR** on `BookingDetail.jsx` and inside the Resend email receipt.
-- **`QrCodeWithLogo` PNG fetch** — CTS returns a QR string; a separate CTS endpoint generates the scannable image.
-- **`_WithHandling` variants** (getOnlineQRWithHandling / reserveOnlineQRWithHandling) — v1.2.10 additions with management-fee support.
-- **Route Map Preview** (Leaflet) in Admin Routes editor.
-- Operator portal — skipped (single-company, not needed per user)
-- Promo code per-user usage limit (e.g. "first-time users only")
-- Admin: edit/delete schedules, terminal CRUD, refund handling
-- Multi-language (BM / EN / ZH), push notifications, seat preferences
-- AI Customer Support Chatbot + WhatsApp fallback widget
+- **`_WithHandling` variants** (getOnlineQRWithHandling / reserveOnlineQRWithHandling) — v1.2.10 additions with management-fee support. Not needed until TBS enables handling charges on our operator config.
+- **Route Map Preview** (Leaflet) in Admin Routes editor — visualise boarding/alighting markers.
+- Promo code per-user usage limit (e.g. "first-time users only").
+- Multi-language (BM / EN / ZH), push notifications, seat preferences.
+- AI Customer Support Chatbot + WhatsApp fallback widget.
+- Resend domain verification (SPF/DKIM/DMARC for `starqistna.com`) — currently sending from `onboarding@resend.dev` which will hit spam eventually.
 
 ### P3
-- Failure retry queue for GoHub (`gohub_retry_queue`) — auto-reissue on TBS outage recovery
-- Mobile horizontal scrollable rail for Popular Now widgets
-- Refactor `server.py` into route-based controllers (Auth / Admin / Bookings / Public)
+- Failure retry queue for GoHub (`gohub_retry_queue`) — auto-reissue on TBS outage recovery.
+- Mobile horizontal scrollable rail for Popular Now widgets.
+- Refactor `server.py` into route-based controllers (Auth / Admin / Bookings / Public) — currently >4100 lines.
+- Bulk "retire trip after date X" tool — deletes/expires every future schedule matching a trip_no.
 
 ## Diagnostic tools shipped this session
 - `backend/scripts/gohub_sign_debug.py` — prints signature inputs (masked pw) + all common variants
 - `backend/scripts/gohub_sign_sweep.py` — fires ~200 signature variants live at TBS; identifies the accepted formula
 - `backend/scripts/gohub_dest_sweep.py` — sweeps candidate destination counter codes to find valid CTS routes
-- `backend/scripts/gohub_probe.py` — full reserve → confirm → query → cancel probe
+- `backend/scripts/gohub_probe.py` — full reserve → confirm → query → cancel probe (plus `--one-shot` mode for the Phase 2 getOnlineQR_V2 path)
+- `backend/scripts/reconcile_payments.py` — force-reconcile stuck Stripe payments (all, one session, or one booking; `--dry-run` supported)
+
+## Live production integrations status (2026-08-11)
+| System | Status |
+|---|---|
+| Stripe (Card + GrabPay + FPX) | ✅ live, webhook active, MYR-billing, background reconciler as safety net |
+| Resend (email) | ✅ live via `onboarding@resend.dev`, real API key set on VPS — domain verification pending |
+| Google OAuth | ✅ live, users can now also set a password via Dashboard |
+| TBS CTS OnlineQR | ✅ live for `SQ001 · TBS → GMC` (real branded QR issued end-to-end) |
+| Reconciler background loop | ✅ starts at app startup, sweeps every 60s |
 
 ## Notes
-- Admin login: `admin@transit.my` / `Admin@123` (auto-seeded)
-- Stripe key: `sk_test_emergent` in backend/.env
+- Admin login: `admin@starqistna.com` / `Admin@123` (auto-seeded)
+- Stripe: production keys in VPS `/root/app/backend/.env`
 - CORS open to `*` for MVP — tighten before production
+- VPS: `sq@srv1598663` (Hostinger, `starqistna.com` served via Nginx + `starqistna-backend.service` systemd unit)
+- Deploy on VPS: `cd ~/app && git pull && ./scripts/deploy.sh` (auto-detects systemd/PM2/supervisord)
