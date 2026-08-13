@@ -577,6 +577,15 @@ async def search_schedules(
     if date == today_local_iso:
         query["departure_time"] = {"$gte": now_local.strftime("%H:%M")}
 
+    # Exclude schedules whose operator has set an `active_until` cut-off that's
+    # already in the past. Rows without the field pass through unchanged.
+    query["$or"] = [
+        {"active_until": {"$exists": False}},
+        {"active_until": None},
+        {"active_until": ""},
+        {"active_until": {"$gte": date}},
+    ]
+
     schedules = await db.schedules.find(query, {"_id": 0}).sort("departure_time", 1).to_list(200)
 
     # Enrich with terminal names — for single-stop searches show the picked stop,
@@ -1501,6 +1510,18 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
     sched = await db.schedules.find_one({"id": body.schedule_id}, {"_id": 0})
     if not sched:
         raise HTTPException(404, "Schedule not found")
+
+    # Block new bookings on a schedule the operator has retired via active_until.
+    # Existing bookings on the same schedule remain untouched.
+    active_until = (sched.get("active_until") or "").strip()
+    if active_until and active_until < sched.get("departure_date", ""):
+        raise HTTPException(
+            410,
+            detail={
+                "message": "This departure is no longer available for new bookings.",
+                "code": "schedule_retired",
+            },
+        )
 
     if len(body.passengers) != len(body.seat_assignments):
         raise HTTPException(400, "Passengers and seat assignments must match in count")
@@ -2944,6 +2965,11 @@ class ScheduleUpdateBody(BaseModel):
     total_seats: Optional[int] = Field(default=None, ge=12, le=60)
     route_id: Optional[str] = None
     trip_no: Optional[str] = None
+    # Last date this schedule should appear in public search results. Set this
+    # (rather than deleting the row) when discontinuing a trip — preserves
+    # historical bookings while stopping new sales after the given date.
+    # Send an empty string to CLEAR a previously-set expiry.
+    active_until: Optional[str] = None
     # When true AND the update changes departure_date or departure_time,
     # send a notification email to every confirmed passenger on this schedule.
     notify_passengers: bool = False
@@ -3525,6 +3551,11 @@ async def admin_update_schedule(schedule_id: str, body: ScheduleUpdateBody, requ
         raise HTTPException(404, "Schedule not found")
     payload = body.model_dump(exclude_unset=True)
     notify = bool(payload.pop("notify_passengers", False))
+    # Sentinel handling for `active_until`: empty string = clear the field
+    # (via $unset), an actual date = set it, and omission leaves it alone.
+    clear_active_until = payload.get("active_until") == ""
+    if clear_active_until:
+        payload.pop("active_until")
     updates = {k: v for k, v in payload.items() if v is not None}
     if "route_id" in updates:
         route = await db.routes.find_one({"id": updates["route_id"]}, {"_id": 0})
@@ -3539,7 +3570,7 @@ async def admin_update_schedule(schedule_id: str, body: ScheduleUpdateBody, requ
             raise HTTPException(400, "This schedule's to_terminal is not part of the target route's alighting stops")
     if "bus_type" in updates:
         updates["layout_config"] = _layout_for_bus_type(updates["bus_type"])
-    if not updates:
+    if not updates and not clear_active_until:
         raise HTTPException(400, "No changes provided")
 
     # Detect a customer-facing time/date change BEFORE the update so we can
@@ -3549,13 +3580,19 @@ async def admin_update_schedule(schedule_id: str, body: ScheduleUpdateBody, requ
         for k in ("departure_date", "departure_time")
     )
 
-    result = await db.schedules.update_one({"id": schedule_id}, {"$set": updates})
+    mongo_op: dict = {}
+    if updates:
+        mongo_op["$set"] = updates
+    if clear_active_until:
+        mongo_op.setdefault("$unset", {})["active_until"] = ""
+    result = await db.schedules.update_one({"id": schedule_id}, mongo_op)
     if result.matched_count == 0:
         raise HTTPException(404, "Schedule not found")
     doc = await db.schedules.find_one({"id": schedule_id}, {"_id": 0})
     await log_audit(
         user, "update", "schedule", schedule_id,
-        {"fields": list(updates.keys()), "notify_passengers": notify,
+        {"fields": list(updates.keys()) + (["active_until:cleared"] if clear_active_until else []),
+         "notify_passengers": notify,
          "time_or_date_changed": time_or_date_changed},
         request,
     )

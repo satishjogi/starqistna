@@ -221,6 +221,15 @@ export default function SchedulesTab() {
                 <div className="col-span-1 font-mono text-xs">{s.total_seats}s</div>
                 <div className="col-span-1 text-[10px] text-zinc-400">{s.bus_type}</div>
                 <div className="col-span-1 text-right">
+                  {s.active_until && (
+                    <div className={`inline-block text-[9px] font-mono font-bold uppercase px-1.5 py-0.5 mr-2 ${
+                      s.active_until < s.departure_date
+                        ? "bg-red-100 text-red-700"
+                        : "bg-amber-100 text-amber-700"
+                    }`} title={`Retires after ${s.active_until}`}>
+                      Ends {s.active_until}
+                    </div>
+                  )}
                   <button onClick={() => setEditing(s)} className="text-xs font-mono font-bold uppercase text-[#002FA7] hover:underline"
                           data-testid={`edit-schedule-${s.id}`}>
                     Edit
