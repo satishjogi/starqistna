@@ -22,7 +22,7 @@ export default function EditScheduleModal({ schedule, terminals, routes, onClose
     total_seats: schedule.total_seats ?? 40,
     route_id: schedule.route_id || "",
     trip_no: schedule.trip_no || "",
-    active_until: schedule.active_until || "",
+    end_date: schedule.end_date || "",
   });
   const [notify, setNotify] = useState(false);
   const [impact, setImpact] = useState(null);
@@ -56,9 +56,9 @@ export default function EditScheduleModal({ schedule, terminals, routes, onClose
     const payload = { notify_passengers: notify };
     for (const [k, v] of Object.entries(form)) {
       const originalVal = schedule[k] ?? "";
-      // Special case: for `active_until` an explicit empty string means CLEAR,
+      // Special case: for `end_date` an explicit empty string means CLEAR,
       // so we must forward it (rather than skipping like other empty inputs).
-      if (k === "active_until") {
+      if (k === "end_date") {
         if (String(v) !== String(originalVal)) {
           payload[k] = v;   // "" clears, "YYYY-MM-DD" sets
         }
@@ -203,19 +203,19 @@ export default function EditScheduleModal({ schedule, terminals, routes, onClose
                 </span>
               </label>
               <div className="flex items-center gap-2">
-                <input type="date" className="te-input flex-1" value={form.active_until}
-                       onChange={(e) => setForm({ ...form, active_until: e.target.value })}
-                       data-testid="edit-active-until" />
-                {form.active_until && (
+                <input type="date" className="te-input flex-1" value={form.end_date}
+                       onChange={(e) => setForm({ ...form, end_date: e.target.value })}
+                       data-testid="edit-end-date" />
+                {form.end_date && (
                   <button type="button"
-                          onClick={() => setForm({ ...form, active_until: "" })}
+                          onClick={() => setForm({ ...form, end_date: "" })}
                           className="text-xs font-mono font-bold uppercase text-red-600 hover:underline whitespace-nowrap"
-                          data-testid="clear-active-until">
+                          data-testid="clear-end-date">
                     Clear
                   </button>
                 )}
               </div>
-              {form.active_until && form.active_until < form.departure_date && (
+              {form.end_date && form.end_date < form.departure_date && (
                 <div className="text-xs text-red-600 mt-1">
                   ⚠️ Active-until date is before the departure date — this schedule will be hidden from search immediately.
                 </div>
