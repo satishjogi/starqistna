@@ -39,17 +39,23 @@ export default function SearchResults() {
   }, [from, to, fromCity, toCity, date]);
 
   const selectSchedule = (sched) => {
+    // Pass the SPECIFIC pickup + drop-off (not the city aggregate) so downstream
+    // pages know which stop the passenger is actually boarding at.
     setFlow({
       schedule_id: sched.id,
       schedule: sched,
-      from: data.from,
-      to: data.to,
+      from: sched.from_terminal || data.from,
+      to: sched.to_terminal || data.to,
       date,
       adults,
       children,
     });
     navigate(`/seats/${sched.id}`);
   };
+
+  // City-level search? Then multiple stops per side are on offer and each schedule
+  // may leave from / arrive at a different terminal — surface that explicitly.
+  const isCitySearch = !!(data?.from?.is_city || data?.to?.is_city);
 
   // Build a URL back to Home that preserves the current search mode (stop vs city).
   const homeBackUrl = (() => {
@@ -77,18 +83,31 @@ export default function SearchResults() {
             <div>
               <div className="te-overline">From</div>
               <div className="text-2xl font-black">{data.from.city}</div>
-              <div className="text-xs font-mono text-zinc-500">{data.from.code} · {data.from.name}</div>
+              <div className="text-xs font-mono text-zinc-500">
+                {data.from.is_city
+                  ? `${data.from.stop_count} pickup stop${data.from.stop_count === 1 ? "" : "s"}`
+                  : `${data.from.code} · ${data.from.name}`}
+              </div>
             </div>
             <div className="text-3xl text-[#B5121B] font-black">→</div>
             <div>
               <div className="te-overline">To</div>
               <div className="text-2xl font-black">{data.to.city}</div>
-              <div className="text-xs font-mono text-zinc-500">{data.to.code} · {data.to.name}</div>
+              <div className="text-xs font-mono text-zinc-500">
+                {data.to.is_city
+                  ? `${data.to.stop_count} drop-off point${data.to.stop_count === 1 ? "" : "s"}`
+                  : `${data.to.code} · ${data.to.name}`}
+              </div>
             </div>
             <div className="ml-auto text-right">
               <div className="te-overline">Date / Passengers</div>
               <div className="font-mono text-sm">{date} · {adults}A {children > 0 ? `+ ${children}C` : ""}</div>
             </div>
+          </div>
+        )}
+        {isCitySearch && (
+          <div className="mt-3 text-[11px] font-mono text-zinc-600 border-l-2 border-[#002FA7] pl-3 py-1" data-testid="city-search-hint">
+            City-level search — each trip below shows the specific pickup + drop-off stop.
           </div>
         )}
       </div>
@@ -140,6 +159,8 @@ export default function SearchResults() {
             <div className="grid grid-cols-1 gap-3">
               {data.schedules.map((s) => {
                 const soldOut = s.seats_available <= 0;
+                const pickup = s.from_terminal || data.from;
+                const dropoff = s.to_terminal || data.to;
                 return (
                   <div
                     key={s.id}
@@ -153,14 +174,14 @@ export default function SearchResults() {
                     </div>
                     <div className="col-span-6 md:col-span-4">
                       <div className="flex items-center gap-3">
-                        <div>
+                        <div className="min-w-0">
                           <div className="font-mono text-xl font-black">{s.departure_time}</div>
-                          <div className="text-[10px] font-mono text-zinc-500">{data.from.code}</div>
+                          <div className="text-[10px] font-mono text-zinc-500">{pickup?.code || data.from.code || ""}</div>
                         </div>
                         <div className="flex-1 border-t border-dashed border-black/30" />
-                        <div>
+                        <div className="min-w-0">
                           <div className="font-mono text-xl font-black">{s.arrival_time}</div>
-                          <div className="text-[10px] font-mono text-zinc-500">{data.to.code}</div>
+                          <div className="text-[10px] font-mono text-zinc-500">{dropoff?.code || data.to.code || ""}</div>
                         </div>
                       </div>
                     </div>
@@ -189,6 +210,31 @@ export default function SearchResults() {
                         {soldOut ? "Sold out" : "Select"}
                       </button>
                     </div>
+                    {/* Full-width stop details — always visible so pax knows where to board & alight */}
+                    {pickup && dropoff && (
+                      <div className="col-span-12 grid grid-cols-1 md:grid-cols-2 gap-3 pt-3 mt-1 border-t border-dashed border-black/10" data-testid={`stops-detail-${s.id}`}>
+                        <div className="flex items-start gap-2">
+                          <span className="text-[10px] font-mono uppercase tracking-wider text-emerald-700 border border-emerald-700 px-1.5 py-0.5 mt-0.5 flex-shrink-0">Pickup</span>
+                          <div className="min-w-0">
+                            <div className="font-bold text-sm truncate">{pickup.name}</div>
+                            <div className="text-[11px] font-mono text-zinc-500 truncate">
+                              {pickup.code ? `${pickup.code} · ` : ""}{pickup.city}
+                              {pickup.landmark_address ? ` · ${pickup.landmark_address}` : ""}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-2">
+                          <span className="text-[10px] font-mono uppercase tracking-wider text-[#B5121B] border border-[#B5121B] px-1.5 py-0.5 mt-0.5 flex-shrink-0">Drop-off</span>
+                          <div className="min-w-0">
+                            <div className="font-bold text-sm truncate">{dropoff.name}</div>
+                            <div className="text-[11px] font-mono text-zinc-500 truncate">
+                              {dropoff.code ? `${dropoff.code} · ` : ""}{dropoff.city}
+                              {dropoff.landmark_address ? ` · ${dropoff.landmark_address}` : ""}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}

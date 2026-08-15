@@ -588,6 +588,21 @@ async def search_schedules(
 
     schedules = await db.schedules.find(query, {"_id": 0}).sort("departure_time", 1).to_list(200)
 
+    # Enrich each schedule with the SPECIFIC pickup + drop-off terminal it uses.
+    # Critical for city-level searches ("Any stop in KL → Any stop in SG") where
+    # the user needs to know exactly which terminal to show up at.
+    if schedules:
+        terminal_ids = list({s["from_terminal_id"] for s in schedules} |
+                            {s["to_terminal_id"] for s in schedules})
+        term_docs = await db.terminals.find(
+            {"id": {"$in": terminal_ids}},
+            {"_id": 0, "id": 1, "code": 1, "name": 1, "city": 1, "landmark_address": 1},
+        ).to_list(len(terminal_ids))
+        term_by_id = {t["id"]: t for t in term_docs}
+        for s in schedules:
+            s["from_terminal"] = term_by_id.get(s["from_terminal_id"])
+            s["to_terminal"] = term_by_id.get(s["to_terminal_id"])
+
     # Enrich with terminal names — for single-stop searches show the picked stop,
     # for city-level searches show the city as the label + count of options.
     if from_terminal_id:

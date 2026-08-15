@@ -120,6 +120,23 @@ export default function SeatSelection() {
           <div className="font-mono text-xs text-zinc-500 mt-1">
             {data.schedule.departure_date} · {data.schedule.departure_time} → {data.schedule.arrival_time} · {data.schedule.bus_operator}
           </div>
+          {/* Specific pickup + drop-off stops — critical when the city has multiple stations */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-3 max-w-2xl" data-testid="seat-selection-stops">
+            <div className="flex items-start gap-2 text-xs">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-emerald-700 border border-emerald-700 px-1.5 py-0.5 mt-0.5 flex-shrink-0">Pickup</span>
+              <div className="min-w-0">
+                <div className="font-bold truncate">{data.from.name}</div>
+                {data.from.code && <span className="font-mono text-[10px] text-zinc-500">{data.from.code}</span>}
+              </div>
+            </div>
+            <div className="flex items-start gap-2 text-xs">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-[#B5121B] border border-[#B5121B] px-1.5 py-0.5 mt-0.5 flex-shrink-0">Drop-off</span>
+              <div className="min-w-0">
+                <div className="font-bold truncate">{data.to.name}</div>
+                {data.to.code && <span className="font-mono text-[10px] text-zinc-500">{data.to.code}</span>}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 

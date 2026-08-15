@@ -188,6 +188,14 @@ Build a complete online bus booking system where visitors can search departure t
     - New `RoutesTab.jsx` — list of routes on the left, editor on the right with basic info, side-by-side pickup/dropoff stop pickers (add/remove/re-order by offset minute), and a full **pairings matrix** with per-cell fare editor (A/C/S/O + currency + CTS route code). Bulk actions: "Fill empty cells" (default RM 55), "Clear all".
   - Verified: full CRUD via curl (create → GET → PATCH fare → DUPLICATE guard → validation error → DELETE). Playwright confirmed end-to-end UI flow: login → admin → routes tab → new route form → add pickup + dropoff stops → enable pairing cell.
 
+## Implemented (2026-08-15) — City search shows specific pickup + drop-off
+- Fixed: on city-level searches ("Any stop in KL → Any stop in Singapore") each departure listed the trip time but never told the passenger WHICH specific terminal to board at.
+- Backend `/api/search` now enriches every result schedule with a compact `from_terminal` + `to_terminal` object (`id`, `code`, `name`, `city`, `landmark_address`) via a single batched terminals lookup — no N+1.
+- Search results header now labels city-level context ("4 pickup stops → 2 drop-off points") and displays a blue banner: "City-level search — each trip below shows the specific pickup + drop-off stop."
+- Every schedule row on Search results has full-width green "PICKUP" and red "DROP-OFF" badges with terminal name, code, city and landmark address (when present).
+- Clicking Select now passes the schedule's SPECIFIC pickup + drop-off (not the city aggregate) through `booking-store`, so downstream pages know the exact terminal.
+- Seat Selection page adds the same PICKUP / DROP-OFF badges beneath the trip title so the passenger sees where to board even after they've picked a departure.
+
 ## Implemented (2026-08-15) — Bus Types admin catalog
 - New `bus_types` collection with fields: `id`, `name` (unique), `seat_count` (12–60), `image_url` (optional), `description` (optional), `layout` (auto-derived: names containing "VIP" → 2+1, else 2+2), `created_at`.
 - Endpoints: `GET /api/bus-types` (public — used by schedule forms), `GET/POST/PATCH/DELETE /api/admin/bus-types` (admin-gated + audit-logged).
