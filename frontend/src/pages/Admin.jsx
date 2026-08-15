@@ -16,9 +16,10 @@ const PromoCodesTab = lazy(() => import("./admin/tabs/PromoCodesTab"));
 const FeedbackTab = lazy(() => import("./admin/tabs/FeedbackTab"));
 const AuditLogTab = lazy(() => import("./admin/tabs/AuditLogTab"));
 const AdminsTab = lazy(() => import("./admin/tabs/AdminsTab"));
+const BusTypesTab = lazy(() => import("./admin/tabs/BusTypesTab"));
 
 const TABS = [
-  "add-schedule", "admins", "audit-log", "bookings", "feedback", "gohub-test",
+  "add-schedule", "admins", "audit-log", "bookings", "bus-types", "feedback", "gohub-test",
   "payments", "promo-codes", "routes", "schedules", "stops",
 ];
 
@@ -89,6 +90,7 @@ export default function Admin() {
         {tab === "terminals" && <TerminalsTab />}
         {tab === "stops" && <TerminalsTab />}
         {tab === "routes" && <RoutesTab />}
+        {tab === "bus-types" && <BusTypesTab />}
         {tab === "gohub-test" && <GoHubTestTab />}
         {tab === "promo-codes" && <PromoCodesTab />}
         {tab === "feedback" && <FeedbackTab />}

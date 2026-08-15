@@ -4,6 +4,7 @@ import api from "../../../lib/api";
 export default function AddScheduleTab() {
   const [terminals, setTerminals] = useState([]);
   const [routes, setRoutes] = useState([]);
+  const [busTypes, setBusTypes] = useState([]);
   const [form, setForm] = useState({
     route_id: "", trip_no: "",
     from_terminal_id: "", to_terminal_id: "",
@@ -20,6 +21,7 @@ export default function AddScheduleTab() {
   useEffect(() => {
     api.get("/admin/terminals").then(({ data }) => setTerminals(data)).catch(() => {});
     api.get("/admin/routes").then(({ data }) => setRoutes(data)).catch(() => {});
+    api.get("/bus-types").then(({ data }) => setBusTypes(data)).catch(() => {});
     api.get("/settings").then(({ data }) => {
       setFxRate(data.sgd_to_myr_rate);
       setFxRateInput(String(data.sgd_to_myr_rate));
@@ -203,23 +205,33 @@ export default function AddScheduleTab() {
             <button type="button" className="underline text-zinc-600" onClick={() => setForm({ ...form, days_of_week: [5, 6] })}>Weekends</button>
           </div>
         </div>
-        <div>
-          <label className="te-label">Coach class</label>
-          <div className="grid grid-cols-3 gap-[1px] bg-black/10 border border-black/15" data-testid="coach-class-picker">
-            {["VIP 27", "Executive", "Standard"].map((bt) => {
-              const selected = form.bus_type === bt;
-              return (
-                <button
-                  key={bt}
-                  type="button"
-                  onClick={() => setForm({ ...form, bus_type: bt })}
-                  className={`px-3 py-2.5 text-xs font-bold uppercase tracking-wider transition ${selected ? "bg-[#B5121B] text-white" : "bg-white hover:bg-zinc-50"}`}
-                  data-testid={`coach-class-${bt.replace(" ", "-").toLowerCase()}`}
-                >
-                  {bt}
-                </button>
-              );
-            })}
+        <div className="md:col-span-2">
+          <label className="te-label">Bus type</label>
+          <select
+            className="te-input"
+            value={form.bus_type}
+            onChange={(e) => {
+              const chosenName = e.target.value;
+              const bt = busTypes.find((b) => b.name === chosenName);
+              setForm((prev) => ({
+                ...prev,
+                bus_type: chosenName,
+                total_seats: bt?.seat_count ?? prev.total_seats,
+              }));
+            }}
+            data-testid="sched-bus-type"
+          >
+            {busTypes.length === 0 && (
+              <option value="Standard">Standard (40 seats · fallback)</option>
+            )}
+            {busTypes.map((bt) => (
+              <option key={bt.id} value={bt.name}>
+                {bt.name} · {bt.seat_count} seats · {bt.layout || "2+2"}
+              </option>
+            ))}
+          </select>
+          <div className="text-[10px] font-mono text-zinc-500 mt-1">
+            Pick a bus and seat count fills in automatically. Manage bus types in the "Bus Types" tab.
           </div>
         </div>
         <div>
@@ -238,8 +250,8 @@ export default function AddScheduleTab() {
           <label className="te-label">Arrival time</label>
           <input type="time" className="te-input" value={form.arrival_time} onChange={(e) => setForm({ ...form, arrival_time: e.target.value })} />
         </div>
-        <div>
-          <label className="te-label">Total seats (capacity)</label>
+        <div className="md:col-span-2">
+          <label className="te-label">Total seats (auto-filled from bus type)</label>
           <input
             type="number"
             min="12"
@@ -250,7 +262,7 @@ export default function AddScheduleTab() {
             data-testid="add-sched-total-seats"
           />
           <div className="text-[10px] font-mono text-zinc-500 mt-1">
-            VIP → 2+1 layout (~27 seats) · Standard/Executive → 2+2 layout (~40 seats)
+            Override only if this specific trip uses a different capacity than the bus type default.
           </div>
         </div>
         <div className="md:col-span-2 text-[10px] font-mono text-zinc-500 leading-relaxed border-l-2 border-[#002FA7] pl-3 py-1">

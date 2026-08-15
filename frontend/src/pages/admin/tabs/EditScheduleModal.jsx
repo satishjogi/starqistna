@@ -26,6 +26,7 @@ export default function EditScheduleModal({ schedule, terminals, routes, onClose
   });
   const [notify, setNotify] = useState(false);
   const [impact, setImpact] = useState(null);
+  const [busTypes, setBusTypes] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -35,6 +36,7 @@ export default function EditScheduleModal({ schedule, terminals, routes, onClose
     api.get(`/admin/schedules/${schedule.id}/impact`)
       .then(({ data }) => { if (alive) setImpact(data); })
       .catch(() => { if (alive) setImpact({ confirmed_bookings: 0 }); });
+    api.get("/bus-types").then(({ data }) => { if (alive) setBusTypes(data); }).catch(() => {});
     return () => { alive = false; };
   }, [schedule.id]);
 
@@ -166,10 +168,32 @@ export default function EditScheduleModal({ schedule, terminals, routes, onClose
             <div>
               <label className="te-label">Bus type</label>
               <select className="te-input" value={form.bus_type}
-                      onChange={(e) => setForm({ ...form, bus_type: e.target.value })}>
-                <option>Executive</option>
-                <option>Standard</option>
-                <option>VIP 27</option>
+                      onChange={(e) => {
+                        const chosen = e.target.value;
+                        const bt = busTypes.find((b) => b.name === chosen);
+                        setForm((prev) => ({
+                          ...prev,
+                          bus_type: chosen,
+                          total_seats: bt?.seat_count ?? prev.total_seats,
+                        }));
+                      }}
+                      data-testid="edit-bus-type">
+                {/* Preserve the current value even if the type was later deleted */}
+                {form.bus_type && !busTypes.find((b) => b.name === form.bus_type) && (
+                  <option value={form.bus_type}>{form.bus_type} (legacy)</option>
+                )}
+                {busTypes.map((bt) => (
+                  <option key={bt.id} value={bt.name}>
+                    {bt.name} · {bt.seat_count} seats
+                  </option>
+                ))}
+                {busTypes.length === 0 && (
+                  <>
+                    <option>Executive</option>
+                    <option>Standard</option>
+                    <option>VIP 27</option>
+                  </>
+                )}
               </select>
             </div>
             <div>

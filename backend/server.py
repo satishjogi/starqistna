@@ -2942,7 +2942,7 @@ class CreateScheduleBody(BaseModel):
     departure_time: str
     arrival_time: str
     bus_operator: str = "Qistna Express"
-    bus_type: Literal["VIP 27", "Executive", "Standard"] = "Standard"
+    bus_type: str = "Standard"
     adult_fare: float
     child_fare: float
     total_seats: int = Field(ge=12, le=60, default=40)
@@ -2959,7 +2959,7 @@ class ScheduleUpdateBody(BaseModel):
     departure_time: Optional[str] = None
     arrival_time: Optional[str] = None
     bus_operator: Optional[str] = None
-    bus_type: Optional[Literal["VIP 27", "Executive", "Standard"]] = None
+    bus_type: Optional[str] = None
     adult_fare: Optional[float] = None
     child_fare: Optional[float] = None
     total_seats: Optional[int] = Field(default=None, ge=12, le=60)
@@ -2984,7 +2984,7 @@ class BulkScheduleBody(BaseModel):
     days_of_week: List[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])  # 0=Mon..6=Sun
     departure_time: str
     arrival_time: str
-    bus_type: Literal["VIP 27", "Executive", "Standard"] = "Standard"
+    bus_type: str = "Standard"
     adult_fare: float
     child_fare: float
     total_seats: int = Field(ge=12, le=60, default=40)
@@ -3270,6 +3270,101 @@ async def admin_delete_route(route_id: str, request: Request, user: dict = Depen
         raise HTTPException(404, "Route not found")
     await log_audit(user, "delete", "route", route_id,
                     {"code": (existing or {}).get("code")}, request)
+    return {"deleted": True}
+
+
+# ---------------------------------------------------------------------------
+# Bus Types — simple catalog of vehicle presets (name + seat count + image)
+# so admins pick a bus in one click instead of typing seat counts from memory.
+# ---------------------------------------------------------------------------
+
+class CreateBusTypeBody(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    seat_count: int = Field(ge=12, le=60)
+    image_url: Optional[str] = Field(default=None, max_length=500)
+    description: Optional[str] = Field(default=None, max_length=200)
+
+
+class UpdateBusTypeBody(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=60)
+    seat_count: Optional[int] = Field(default=None, ge=12, le=60)
+    image_url: Optional[str] = Field(default=None, max_length=500)
+    description: Optional[str] = Field(default=None, max_length=200)
+
+
+@api.get("/bus-types")
+async def list_bus_types_public():
+    """Public read — used by the schedule form so admins can pick a bus.
+    Ordered by name for predictable dropdown listing."""
+    items = await db.bus_types.find({}, {"_id": 0}).sort("name", 1).to_list(200)
+    return items
+
+
+@api.get("/admin/bus-types")
+async def admin_list_bus_types(_: dict = Depends(require_admin)):
+    items = await db.bus_types.find({}, {"_id": 0}).sort("name", 1).to_list(200)
+    return items
+
+
+@api.post("/admin/bus-types")
+async def admin_create_bus_type(body: CreateBusTypeBody, request: Request, user: dict = Depends(require_admin)):
+    name = body.name.strip()
+    if await db.bus_types.find_one({"name": name}):
+        raise HTTPException(400, "A bus type with this name already exists.")
+    doc = {
+        "id": new_id(),
+        "name": name,
+        "seat_count": body.seat_count,
+        "image_url": (body.image_url or "").strip() or None,
+        "description": (body.description or "").strip() or None,
+        "layout": _layout_for_bus_type(name),
+        "created_at": utcnow().isoformat(),
+    }
+    await db.bus_types.insert_one(doc)
+    await log_audit(user, "create", "bus_type", doc["id"],
+                    {"name": name, "seat_count": body.seat_count}, request)
+    return {k: v for k, v in doc.items() if k != "_id"}
+
+
+@api.patch("/admin/bus-types/{bus_type_id}")
+async def admin_update_bus_type(bus_type_id: str, body: UpdateBusTypeBody, request: Request, user: dict = Depends(require_admin)):
+    updates: dict = {}
+    if body.name is not None:
+        new_name = body.name.strip()
+        clash = await db.bus_types.find_one({"name": new_name, "id": {"$ne": bus_type_id}})
+        if clash:
+            raise HTTPException(400, "Another bus type already uses this name.")
+        updates["name"] = new_name
+        updates["layout"] = _layout_for_bus_type(new_name)
+    if body.seat_count is not None:
+        updates["seat_count"] = body.seat_count
+    if body.image_url is not None:
+        updates["image_url"] = body.image_url.strip() or None
+    if body.description is not None:
+        updates["description"] = body.description.strip() or None
+    if not updates:
+        raise HTTPException(400, "No fields to update.")
+    result = await db.bus_types.update_one({"id": bus_type_id}, {"$set": updates})
+    if result.matched_count == 0:
+        raise HTTPException(404, "Bus type not found")
+    doc = await db.bus_types.find_one({"id": bus_type_id}, {"_id": 0})
+    await log_audit(user, "update", "bus_type", bus_type_id,
+                    {"fields": list(updates.keys())}, request)
+    return doc
+
+
+@api.delete("/admin/bus-types/{bus_type_id}")
+async def admin_delete_bus_type(bus_type_id: str, request: Request, user: dict = Depends(require_admin)):
+    existing = await db.bus_types.find_one({"id": bus_type_id}, {"_id": 0, "name": 1})
+    if not existing:
+        raise HTTPException(404, "Bus type not found")
+    # Block deletion if any schedule still references this bus type by name.
+    in_use = await db.schedules.count_documents({"bus_type": existing["name"]})
+    if in_use > 0:
+        raise HTTPException(400, f"Cannot delete — {in_use} schedule(s) still use '{existing['name']}'.")
+    await db.bus_types.delete_one({"id": bus_type_id})
+    await log_audit(user, "delete", "bus_type", bus_type_id,
+                    {"name": existing["name"]}, request)
     return {"deleted": True}
 
 
@@ -3972,6 +4067,32 @@ async def _seed_promos():
     logger.info("Seeded %d promo codes", len(samples))
 
 
+async def _seed_bus_types():
+    """Seed the three default bus classes we've been using since day one.
+    Idempotent — skips any name that already exists (admin may have edited seat counts)."""
+    defaults = [
+        {"name": "VIP 27", "seat_count": 27,
+         "description": "Luxury 2+1 layout with massage seats", "image_url": None},
+        {"name": "Executive", "seat_count": 40,
+         "description": "Reclining 2+2 seats · premium comfort", "image_url": None},
+        {"name": "Standard", "seat_count": 40,
+         "description": "Standard 2+2 layout", "image_url": None},
+    ]
+    inserted = 0
+    for bt in defaults:
+        if await db.bus_types.find_one({"name": bt["name"]}):
+            continue
+        await db.bus_types.insert_one({
+            **bt,
+            "id": new_id(),
+            "layout": _layout_for_bus_type(bt["name"]),
+            "created_at": utcnow().isoformat(),
+        })
+        inserted += 1
+    if inserted:
+        logger.info("Seeded %d default bus types", inserted)
+
+
 async def _ensure_indexes():
     # Prevent double booking at DB level: unique (schedule_id, seat_number) for non-released rows.
     # Partial unique index on locked/booked statuses.
@@ -4191,6 +4312,7 @@ async def on_start():
     await _migrate_operator_names()
     await _diversify_popular_schedules()
     await _seed_promos()
+    await _seed_bus_types()
     # Safety net for Stripe webhook drop-offs / async payment settle delays.
     asyncio.create_task(_reconcile_loop())
     logger.info("Qistna Express startup complete")

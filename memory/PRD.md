@@ -188,6 +188,16 @@ Build a complete online bus booking system where visitors can search departure t
     - New `RoutesTab.jsx` — list of routes on the left, editor on the right with basic info, side-by-side pickup/dropoff stop pickers (add/remove/re-order by offset minute), and a full **pairings matrix** with per-cell fare editor (A/C/S/O + currency + CTS route code). Bulk actions: "Fill empty cells" (default RM 55), "Clear all".
   - Verified: full CRUD via curl (create → GET → PATCH fare → DUPLICATE guard → validation error → DELETE). Playwright confirmed end-to-end UI flow: login → admin → routes tab → new route form → add pickup + dropoff stops → enable pairing cell.
 
+## Implemented (2026-08-15) — Bus Types admin catalog
+- New `bus_types` collection with fields: `id`, `name` (unique), `seat_count` (12–60), `image_url` (optional), `description` (optional), `layout` (auto-derived: names containing "VIP" → 2+1, else 2+2), `created_at`.
+- Endpoints: `GET /api/bus-types` (public — used by schedule forms), `GET/POST/PATCH/DELETE /api/admin/bus-types` (admin-gated + audit-logged).
+- Safeguards: unique name enforcement (409-style 400 message), Pydantic `ge/le` on `seat_count`, and DELETE blocked when any schedule still references that bus type name.
+- Startup seed: idempotently adds `VIP 27` (27), `Executive` (40), `Standard` (40) if missing. Existing installations don't lose customised seat counts.
+- Schedule form now uses a single **Bus Type** dropdown — picking a bus auto-fills `total_seats`. Admin can still override manually per trip. The old 3-button "Coach class" picker is retired.
+- `EditScheduleModal` uses the same dropdown; legacy bus_type values not in the current catalog still render (labelled "legacy") so historical schedules aren't clobbered.
+- Backend `bus_type` field switched from a fixed `Literal[...]` to free `str` on both `CreateScheduleBody` and `BulkScheduleBody` — required so custom admin-created bus types are accepted.
+- New tests: 5 pytest cases (`test_bus_types.py`) validating seed, auth, CRUD cycle, duplicate guard, in-use delete guard, and seat-count bounds validation. All green.
+
 ## Implemented (2026-08-15) — Rebrand: Star Qistna → Qistna Express
 - All user-facing text updated across frontend + email tickets from "Star Qistna" to "Qistna Express".
 - Footer copyright changed to `© {YEAR} QISTNA EXPRESS PVT LTD · ALL RIGHTS RESERVED`.
