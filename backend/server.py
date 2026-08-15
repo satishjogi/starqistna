@@ -726,7 +726,7 @@ async def popular_now(limit: int = 6):
                 "currency": sched.get("currency", "myr"),
                 "seats_available": seats_available,
                 "bus_type": sched.get("bus_type"),
-                "operator": sched.get("bus_operator", "Star Qistna"),
+                "operator": sched.get("bus_operator", "Qistna Express"),
             }
         )
 
@@ -1044,7 +1044,7 @@ async def setup_2fa(body: TwoFASetupBody, user: dict = Depends(require_user)):
         raise HTTPException(400, "2FA is already enabled")
     secret = pyotp.random_base32()
     await db.users.update_one({"id": user["id"]}, {"$set": {"totp_secret": secret, "totp_enabled": False}})
-    issuer = "Star Qistna"
+    issuer = "Qistna Express"
     uri = pyotp.TOTP(secret).provisioning_uri(name=user["email"], issuer_name=issuer)
     return {"secret": secret, "otpauth_uri": uri, "issuer": issuer}
 
@@ -2941,7 +2941,7 @@ class CreateScheduleBody(BaseModel):
     departure_date: str
     departure_time: str
     arrival_time: str
-    bus_operator: str = "Star Qistna"
+    bus_operator: str = "Qistna Express"
     bus_type: Literal["VIP 27", "Executive", "Standard"] = "Standard"
     adult_fare: float
     child_fare: float
@@ -3372,7 +3372,7 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
                     "departure_date": cur.isoformat(),
                     "departure_time": body.departure_time,
                     "arrival_time": body.arrival_time,
-                    "bus_operator": "Star Qistna",
+                    "bus_operator": "Qistna Express",
                     "bus_type": body.bus_type,
                     "adult_fare": body.adult_fare,
                     "child_fare": body.child_fare,
@@ -3694,7 +3694,7 @@ async def _seed_terminals():
     logger.info("Seeded %d terminals", len(MALAYSIAN_TERMINALS))
 
 
-OPERATORS = ["Star Qistna"]
+OPERATORS = ["Qistna Express"]
 BUS_TYPES = ["VIP 27", "Executive", "Standard"]
 
 
@@ -3769,13 +3769,13 @@ async def _seed_schedules():
 
 
 async def _migrate_operator_names():
-    """All schedules belong to single operator 'Star Qistna'."""
+    """All schedules belong to single operator 'Qistna Express'."""
     result = await db.schedules.update_many(
-        {"bus_operator": {"$ne": "Star Qistna"}},
-        {"$set": {"bus_operator": "Star Qistna"}},
+        {"bus_operator": {"$ne": "Qistna Express"}},
+        {"$set": {"bus_operator": "Qistna Express"}},
     )
     if result.modified_count:
-        logger.info("Migrated %d schedules to Star Qistna operator", result.modified_count)
+        logger.info("Migrated %d schedules to Qistna Express operator", result.modified_count)
 
 
 async def _diversify_popular_schedules():
@@ -3840,7 +3840,7 @@ async def _diversify_popular_schedules():
                         "departure_date": dep_date,
                         "departure_time": dep_time,
                         "arrival_time": arr_time,
-                        "bus_operator": "Star Qistna",
+                        "bus_operator": "Qistna Express",
                         "bus_type": "Executive",
                         "adult_fare": fare_val,
                         "rows": 10,
@@ -3900,6 +3900,8 @@ async def _seed_admin():
             updates["is_active"] = True
         if not existing.get("is_admin"):
             updates["is_admin"] = True
+        if existing.get("full_name") == "Star Qistna Admin":
+            updates["full_name"] = "Qistna Express Admin"
 
         stored_hash = existing.get("password_hash") or ""
         env_matches_stored = bool(stored_hash) and verify_password(BOOTSTRAP_ADMIN_PASSWORD, stored_hash)
@@ -3939,7 +3941,7 @@ async def _seed_admin():
         {
             "id": new_id(),
             "email": "admin@starqistna.com",
-            "full_name": "Star Qistna Admin",
+            "full_name": "Qistna Express Admin",
             "phone": "+60123456789",
             "password_hash": hash_password(BOOTSTRAP_ADMIN_PASSWORD),
             "is_admin": True,
@@ -4191,7 +4193,7 @@ async def on_start():
     await _seed_promos()
     # Safety net for Stripe webhook drop-offs / async payment settle delays.
     asyncio.create_task(_reconcile_loop())
-    logger.info("Star Qistna startup complete")
+    logger.info("Qistna Express startup complete")
 
 
 @app.on_event("shutdown")

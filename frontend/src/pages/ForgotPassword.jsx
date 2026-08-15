@@ -30,7 +30,7 @@ export default function ForgotPassword() {
         {!submitted ? (
           <form onSubmit={submit} className="te-card p-8 space-y-4" data-testid="forgot-form">
             <p className="text-sm text-zinc-600">
-              Enter the email linked to your Star Qistna account. If we find a match, we'll send a
+              Enter the email linked to your Qistna Express account. If we find a match, we'll send a
               password reset link that stays valid for 60 minutes.
             </p>
             <div>

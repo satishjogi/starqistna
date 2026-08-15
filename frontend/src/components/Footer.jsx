@@ -5,7 +5,7 @@ export default function Footer() {
     <footer className="border-t border-black/10 mt-24 bg-white">
       <div className="px-4 md:px-6 lg:px-10 py-12 grid grid-cols-1 md:grid-cols-4 gap-8">
         <div className="md:col-span-2">
-          <img src="/logo.png" alt="Star Qistna" className="h-14 w-auto" />
+          <img src="/logo.png" alt="Qistna Express" className="h-14 w-auto" />
           <p className="text-sm text-zinc-600 mt-4 max-w-md">
             First class massage coach service across Malaysia & Singapore. Book inter-city rides with confirmed seats, transparent pricing, and zero drama.
           </p>
@@ -29,7 +29,7 @@ export default function Footer() {
         </div>
       </div>
       <div className="border-t border-black/10 px-4 md:px-6 lg:px-10 py-5 flex flex-col sm:flex-row justify-between text-xs font-mono text-zinc-500">
-        <div>© {new Date().getFullYear()} STAR QISTNA · ALL RIGHTS RESERVED</div>
+        <div>© {new Date().getFullYear()} QISTNA EXPRESS PVT LTD · ALL RIGHTS RESERVED</div>
         <div>PAYMENTS BY STRIPE · CARD · GRABPAY · FPX</div>
       </div>
     </footer>

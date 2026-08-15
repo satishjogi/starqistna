@@ -36,7 +36,7 @@ function downloadIcs(b) {
     pad(endDate.getMinutes()) +
     "00";
 
-  const summary = `Star Qistna · ${b.from?.city} → ${b.to?.city}`;
+  const summary = `Qistna Express · ${b.from?.city} → ${b.to?.city}`;
   const desc = [
     `Reference: ${b.reference}`,
     `Seats: ${b.seats.join(", ")}`,
@@ -48,7 +48,7 @@ function downloadIcs(b) {
   const ics = [
     "BEGIN:VCALENDAR",
     "VERSION:2.0",
-    "PRODID:-//Star Qistna//Booking//EN",
+    "PRODID:-//Qistna Express//Booking//EN",
     "BEGIN:VEVENT",
     `UID:${b.reference}@starqistna.com`,
     `DTSTAMP:${dt}`,
@@ -65,7 +65,7 @@ function downloadIcs(b) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `StarQistna-${b.reference}.ics`;
+  a.download = `QistnaExpress-${b.reference}.ics`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -151,7 +151,7 @@ export default function NextTripWidget({ bookings }) {
         </div>
         <div>
           <div className="te-overline text-[9px] text-zinc-400">Operator</div>
-          <div className="font-mono font-bold truncate">{next.operator || "Star Qistna"}</div>
+          <div className="font-mono font-bold truncate">{next.operator || "Qistna Express"}</div>
         </div>
       </div>
 

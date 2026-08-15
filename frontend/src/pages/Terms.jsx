@@ -10,12 +10,12 @@ export default function Terms() {
       <div className="prose prose-zinc max-w-none mt-8 space-y-6 text-sm leading-relaxed">
         <section>
           <h2 className="text-xl font-black mt-6">1. Acceptance</h2>
-          <p>By booking a ticket through Star Qistna ("we", "us", "the Company") at starqistna.com, you ("the Passenger") agree to be bound by these Terms. If you do not agree, do not proceed with the booking.</p>
+          <p>By booking a ticket through Qistna Express ("we", "us", "the Company") at starqistna.com, you ("the Passenger") agree to be bound by these Terms. If you do not agree, do not proceed with the booking.</p>
         </section>
 
         <section>
           <h2 className="text-xl font-black mt-6">2. The Service</h2>
-          <p>Star Qistna provides inter-city coach booking services in Malaysia and Singapore. We act as an operator of coach transportation. Schedules, routes, and fares are subject to availability and may be amended without prior notice.</p>
+          <p>Qistna Express provides inter-city coach booking services in Malaysia and Singapore. We act as an operator of coach transportation. Schedules, routes, and fares are subject to availability and may be amended without prior notice.</p>
         </section>
 
         <section>

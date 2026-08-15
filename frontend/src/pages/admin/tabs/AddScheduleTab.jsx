@@ -254,7 +254,7 @@ export default function AddScheduleTab() {
           </div>
         </div>
         <div className="md:col-span-2 text-[10px] font-mono text-zinc-500 leading-relaxed border-l-2 border-[#002FA7] pl-3 py-1">
-          OPERATOR · STAR QISTNA (single operator)<br/>
+          OPERATOR · QISTNA EXPRESS (single operator)<br/>
           CURRENCY · AUTO-DERIVED FROM ORIGIN TERMINAL COUNTRY (SG → SGD, MY → MYR)<br/>
           LAYOUT · BUS TYPE DETERMINES 2+1 (VIP) OR 2+2 (STANDARD/EXECUTIVE)<br/>
           BULK MODE · CREATES ONE SCHEDULE PER SELECTED WEEKDAY BETWEEN START & END DATES · MAX 180 DAYS

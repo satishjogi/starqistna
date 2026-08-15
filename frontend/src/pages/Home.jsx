@@ -194,7 +194,7 @@ export default function Home() {
                 <span className="text-[#B5121B]">First class coach.</span>
               </h1>
               <p className="mt-6 text-lg text-zinc-600 max-w-xl">
-                Star Qistna runs premium massage-coach service across Malaysia & Singapore. Real seat locks. No overbooking. Pay by Card, GrabPay, or FPX.
+                Qistna Express runs premium massage-coach service across Malaysia & Singapore. Real seat locks. No overbooking. Pay by Card, GrabPay, or FPX.
               </p>
             </div>
             <div className="col-span-12 lg:col-span-5 hidden lg:flex items-end justify-end">

@@ -10,7 +10,7 @@ export default function Privacy() {
       <div className="mt-8 space-y-6 text-sm leading-relaxed">
         <section>
           <h2 className="text-xl font-black mt-6">1. Who we are</h2>
-          <p>Star Qistna ("we", "us") is the data controller for personal information collected via starqistna.com. We comply with the Malaysian Personal Data Protection Act 2010 (PDPA) and Singapore's Personal Data Protection Act 2012 where applicable.</p>
+          <p>Qistna Express ("we", "us") is the data controller for personal information collected via starqistna.com. We comply with the Malaysian Personal Data Protection Act 2010 (PDPA) and Singapore's Personal Data Protection Act 2012 where applicable.</p>
         </section>
 
         <section>

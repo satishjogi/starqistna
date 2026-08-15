@@ -16,7 +16,7 @@ load_dotenv(Path(__file__).parent / ".env")
 logger = logging.getLogger("transit.email")
 
 resend.api_key = os.environ.get("RESEND_API_KEY")
-EMAIL_FROM = os.environ.get("EMAIL_FROM", "Star Qistna <onboarding@resend.dev>")
+EMAIL_FROM = os.environ.get("EMAIL_FROM", "Qistna Express <onboarding@resend.dev>")
 EMAIL_REPLY_TO = os.environ.get("EMAIL_REPLY_TO", "support@starqistna.com")
 PUBLIC_APP_URL = os.environ.get("PUBLIC_APP_URL", "https://starqistna.com")
 
@@ -115,11 +115,11 @@ def _render_ticket_html(booking: dict, from_term: dict, to_term: dict) -> str:
         banner = ""
 
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Your Star Qistna ticket</title></head>
+<html><head><meta charset="utf-8"><title>Your Qistna Express ticket</title></head>
 <body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#09090b">
   <div style="max-width:640px;margin:32px auto;background:#fff;border:1px solid #e4e4e7">
     <div style="background:#002FA7;color:#fff;padding:22px 28px;font-weight:900;letter-spacing:-.5px;font-size:22px">
-      STAR QISTNA <span style="font-size:11px;letter-spacing:.2em;font-weight:600;opacity:.85;margin-left:10px">FIRST CLASS COACH</span>
+      QISTNA EXPRESS <span style="font-size:11px;letter-spacing:.2em;font-weight:600;opacity:.85;margin-left:10px">FIRST CLASS COACH</span>
     </div>
     <div style="padding:28px">
       <div style="text-transform:uppercase;letter-spacing:.22em;color:#16a34a;font-size:11px;font-weight:700">Confirmed</div>
@@ -177,7 +177,7 @@ def _render_ticket_html(booking: dict, from_term: dict, to_term: dict) -> str:
       </div>
     </div>
     <div style="background:#09090b;color:#a1a1aa;padding:16px 28px;font-family:monospace;font-size:10px;letter-spacing:.18em;text-transform:uppercase">
-      © STAR QISTNA · PREMIUM COACH · <a href="{PUBLIC_APP_URL}" style="color:#a1a1aa;text-decoration:none">STARQISTNA.COM</a>
+      © QISTNA EXPRESS · PREMIUM COACH · <a href="{PUBLIC_APP_URL}" style="color:#a1a1aa;text-decoration:none">STARQISTNA.COM</a>
     </div>
   </div>
 </body></html>"""
@@ -215,7 +215,7 @@ async def send_booking_confirmation(booking: dict, from_term: dict, to_term: dic
         logger.warning("Booking %s has no contact_email; skipping email", booking.get("id"))
         return
     html = _render_ticket_html(booking, from_term, to_term)
-    subject = f"Star Qistna — Booking confirmed · {booking.get('reference','')}"
+    subject = f"Qistna Express — Booking confirmed · {booking.get('reference','')}"
 
     attachments: list[dict] = []
     gohub_tickets = [t for t in (booking.get("gohub_tickets") or []) if t.get("qr")]
@@ -260,17 +260,17 @@ async def send_booking_confirmation(booking: dict, from_term: dict, to_term: dic
 def _render_password_reset_html(full_name: str, reset_link: str, ttl_minutes: int) -> str:
     safe_name = (full_name or "there").split()[0]
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Reset your Star Qistna password</title></head>
+<html><head><meta charset="utf-8"><title>Reset your Qistna Express password</title></head>
 <body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#09090b">
   <div style="max-width:560px;margin:32px auto;background:#fff;border:1px solid #e4e4e7">
     <div style="background:#002FA7;color:#fff;padding:22px 28px;font-weight:900;letter-spacing:-.5px;font-size:22px">
-      STAR QISTNA <span style="font-size:11px;letter-spacing:.2em;font-weight:600;opacity:.85;margin-left:10px">FIRST CLASS COACH</span>
+      QISTNA EXPRESS <span style="font-size:11px;letter-spacing:.2em;font-weight:600;opacity:.85;margin-left:10px">FIRST CLASS COACH</span>
     </div>
     <div style="padding:32px 28px">
       <div style="text-transform:uppercase;letter-spacing:.22em;color:#002FA7;font-size:11px;font-weight:700">Account security</div>
       <h1 style="margin:8px 0 12px;font-size:30px;letter-spacing:-.5px;font-weight:900">Reset your password</h1>
       <p style="font-size:14px;color:#52525b;line-height:1.6;margin:0 0 18px">
-        Hi {safe_name}, we received a request to reset the password for your Star Qistna account.
+        Hi {safe_name}, we received a request to reset the password for your Qistna Express account.
         Click the button below to choose a new one — the link expires in <b>{ttl_minutes} minutes</b>.
       </p>
       <p style="margin:24px 0">
@@ -287,7 +287,7 @@ def _render_password_reset_html(full_name: str, reset_link: str, ttl_minutes: in
       </p>
     </div>
     <div style="background:#09090b;color:#a1a1aa;padding:16px 28px;font-family:monospace;font-size:10px;letter-spacing:.18em;text-transform:uppercase">
-      © STAR QISTNA · PREMIUM COACH · <a href="{PUBLIC_APP_URL}" style="color:#a1a1aa;text-decoration:none">STARQISTNA.COM</a>
+      © QISTNA EXPRESS · PREMIUM COACH · <a href="{PUBLIC_APP_URL}" style="color:#a1a1aa;text-decoration:none">STARQISTNA.COM</a>
     </div>
   </div>
 </body></html>"""
@@ -299,7 +299,7 @@ async def send_password_reset(to_email: str, full_name: str, reset_link: str, tt
         logger.warning("RESEND_API_KEY not set; skipping password-reset email to %s", to_email)
         return
     html = _render_password_reset_html(full_name, reset_link, ttl_minutes)
-    subject = "Star Qistna — Reset your password"
+    subject = "Qistna Express — Reset your password"
     try:
         res = await asyncio.to_thread(_send_sync, to_email, subject, html, None)
         logger.info("Sent password-reset email to %s id=%s", to_email, res.get("id"))
@@ -314,17 +314,17 @@ def _render_schedule_change_html(booking: dict, from_term: dict, to_term: dict,
     from_label = (from_term or {}).get("name") or (from_term or {}).get("city") or "your origin"
     to_label = (to_term or {}).get("name") or (to_term or {}).get("city") or "your destination"
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Star Qistna — Trip time update</title></head>
+<html><head><meta charset="utf-8"><title>Qistna Express — Trip time update</title></head>
 <body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#09090b">
   <div style="max-width:560px;margin:32px auto;background:#fff;border:1px solid #e4e4e7">
     <div style="background:#002FA7;color:#fff;padding:22px 28px;font-weight:900;letter-spacing:-.5px;font-size:22px">
-      STAR QISTNA <span style="font-size:11px;letter-spacing:.2em;font-weight:600;opacity:.85;margin-left:10px">TRIP UPDATE</span>
+      QISTNA EXPRESS <span style="font-size:11px;letter-spacing:.2em;font-weight:600;opacity:.85;margin-left:10px">TRIP UPDATE</span>
     </div>
     <div style="padding:32px 28px">
       <div style="text-transform:uppercase;letter-spacing:.22em;color:#d97706;font-size:11px;font-weight:700">Departure time changed</div>
       <h1 style="margin:8px 0 12px;font-size:28px;letter-spacing:-.5px;font-weight:900">Your trip has been rescheduled.</h1>
       <p style="font-size:14px;color:#52525b;line-height:1.6;margin:0 0 22px">
-        Your Star Qistna trip from <b>{from_label}</b> to <b>{to_label}</b> has been rescheduled.
+        Your Qistna Express trip from <b>{from_label}</b> to <b>{to_label}</b> has been rescheduled.
         Your seat{'' if pax_count == 1 else 's'} {'is' if pax_count == 1 else 'are'} still confirmed — only the departure time has changed.
       </p>
       <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e4e4e7;margin-bottom:22px">
@@ -353,7 +353,7 @@ def _render_schedule_change_html(booking: dict, from_term: dict, to_term: dict,
       </p>
     </div>
     <div style="background:#09090b;color:#a1a1aa;padding:16px 28px;font-family:monospace;font-size:10px;letter-spacing:.18em;text-transform:uppercase">
-      © STAR QISTNA · PREMIUM COACH · <a href="{PUBLIC_APP_URL}" style="color:#a1a1aa;text-decoration:none">STARQISTNA.COM</a>
+      © QISTNA EXPRESS · PREMIUM COACH · <a href="{PUBLIC_APP_URL}" style="color:#a1a1aa;text-decoration:none">STARQISTNA.COM</a>
     </div>
   </div>
 </body></html>"""
@@ -376,7 +376,7 @@ async def send_schedule_change(*, booking: dict, from_term: dict, to_term: dict,
                        booking.get("id"))
         return
     html = _render_schedule_change_html(booking, from_term, to_term, old_departure, new_departure)
-    subject = f"Star Qistna — Trip time updated · {booking.get('reference','')}"
+    subject = f"Qistna Express — Trip time updated · {booking.get('reference','')}"
     try:
         res = await asyncio.to_thread(_send_sync, to_email, subject, html, None)
         logger.info(
@@ -391,17 +391,17 @@ def _render_admin_invite_html(full_name: str, inviter_name: str, role: str, acce
     safe_name = (full_name or "there").split()[0]
     role_label = "Super-admin" if role == "super_admin" else "Admin"
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>You've been invited to Star Qistna admin</title></head>
+<html><head><meta charset="utf-8"><title>You've been invited to Qistna Express admin</title></head>
 <body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#09090b">
   <div style="max-width:560px;margin:32px auto;background:#fff;border:1px solid #e4e4e7">
     <div style="background:#002FA7;color:#fff;padding:22px 28px;font-weight:900;letter-spacing:-.5px;font-size:22px">
-      STAR QISTNA <span style="font-size:11px;letter-spacing:.2em;font-weight:600;opacity:.85;margin-left:10px">ADMIN ACCESS</span>
+      QISTNA EXPRESS <span style="font-size:11px;letter-spacing:.2em;font-weight:600;opacity:.85;margin-left:10px">ADMIN ACCESS</span>
     </div>
     <div style="padding:32px 28px">
       <div style="text-transform:uppercase;letter-spacing:.22em;color:#002FA7;font-size:11px;font-weight:700">You're invited</div>
       <h1 style="margin:8px 0 12px;font-size:30px;letter-spacing:-.5px;font-weight:900">Join as {role_label}</h1>
       <p style="font-size:14px;color:#52525b;line-height:1.6;margin:0 0 18px">
-        Hi {safe_name}, <b>{inviter_name}</b> has invited you to join the Star Qistna admin team as <b>{role_label}</b>.
+        Hi {safe_name}, <b>{inviter_name}</b> has invited you to join the Qistna Express admin team as <b>{role_label}</b>.
         Click below to set your password and accept the invite. This link is valid for {ttl_days} days.
       </p>
       <p style="margin:24px 0">
@@ -418,7 +418,7 @@ def _render_admin_invite_html(full_name: str, inviter_name: str, role: str, acce
       </p>
     </div>
     <div style="background:#09090b;color:#a1a1aa;padding:16px 28px;font-family:monospace;font-size:10px;letter-spacing:.18em;text-transform:uppercase">
-      © STAR QISTNA · ADMIN CONSOLE · <a href="{PUBLIC_APP_URL}" style="color:#a1a1aa;text-decoration:none">STARQISTNA.COM</a>
+      © QISTNA EXPRESS · ADMIN CONSOLE · <a href="{PUBLIC_APP_URL}" style="color:#a1a1aa;text-decoration:none">STARQISTNA.COM</a>
     </div>
   </div>
 </body></html>"""
@@ -429,7 +429,7 @@ async def send_admin_invite(to_email: str, full_name: str, inviter_name: str, ro
         logger.warning("RESEND_API_KEY not set; skipping admin-invite email to %s", to_email)
         return
     html = _render_admin_invite_html(full_name, inviter_name, role, accept_link, ttl_days)
-    subject = f"Star Qistna — You're invited as {'Super-admin' if role == 'super_admin' else 'Admin'}"
+    subject = f"Qistna Express — You're invited as {'Super-admin' if role == 'super_admin' else 'Admin'}"
     try:
         res = await asyncio.to_thread(_send_sync, to_email, subject, html, None)
         logger.info("Sent admin-invite email to %s id=%s", to_email, res.get("id"))
@@ -454,7 +454,7 @@ def _render_feedback_user_html(name: str, reference: str, category: str, message
 <body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#09090b">
   <div style="max-width:560px;margin:32px auto;background:#fff;border:1px solid #e4e4e7">
     <div style="background:#002FA7;color:#fff;padding:22px 28px;font-weight:900;letter-spacing:-.5px;font-size:22px">
-      STAR QISTNA <span style="font-size:11px;letter-spacing:.2em;font-weight:600;opacity:.85;margin-left:10px">CUSTOMER SUPPORT</span>
+      QISTNA EXPRESS <span style="font-size:11px;letter-spacing:.2em;font-weight:600;opacity:.85;margin-left:10px">CUSTOMER SUPPORT</span>
     </div>
     <div style="padding:32px 28px">
       <div style="text-transform:uppercase;letter-spacing:.22em;color:#002FA7;font-size:11px;font-weight:700">Feedback received</div>
@@ -473,7 +473,7 @@ def _render_feedback_user_html(name: str, reference: str, category: str, message
       </p>
     </div>
     <div style="background:#09090b;color:#a1a1aa;padding:16px 28px;font-family:monospace;font-size:10px;letter-spacing:.18em;text-transform:uppercase">
-      © STAR QISTNA · <a href="{PUBLIC_APP_URL}" style="color:#a1a1aa;text-decoration:none">STARQISTNA.COM</a>
+      © QISTNA EXPRESS · <a href="{PUBLIC_APP_URL}" style="color:#a1a1aa;text-decoration:none">STARQISTNA.COM</a>
     </div>
   </div>
 </body></html>"""
@@ -517,7 +517,7 @@ async def send_feedback_confirmation(to_email: str, name: str, reference: str, c
         logger.warning("RESEND_API_KEY not set; skipping feedback-confirm email to %s", to_email)
         return
     html = _render_feedback_user_html(name, reference, category, message)
-    subject = f"Star Qistna — We received your feedback ({reference})"
+    subject = f"Qistna Express — We received your feedback ({reference})"
     try:
         res = await asyncio.to_thread(_send_sync, to_email, subject, html, None)
         logger.info("Sent feedback confirmation to %s id=%s", to_email, res.get("id"))
@@ -558,7 +558,7 @@ def _render_cancelled_html(booking: dict, from_term: dict, to_term: dict, refund
     return f"""<!doctype html>
 <html><body style="margin:0;padding:0;background:#fafafa;font-family:Arial,Helvetica,sans-serif;color:#111;">
   <div style="max-width:560px;margin:0 auto;background:#fff;padding:32px 28px;border:1px solid #eee;">
-    <div style="font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-bottom:8px;">Star Qistna · Cancellation</div>
+    <div style="font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-bottom:8px;">Qistna Express · Cancellation</div>
     <h1 style="font-size:26px;margin:0 0 14px 0;color:{accent};">{headline}</h1>
     <p style="font-size:15px;line-height:1.5;margin:0 0 14px 0;">{sub}</p>
     <table style="width:100%;border-collapse:collapse;margin:18px 0;">
@@ -569,7 +569,7 @@ def _render_cancelled_html(booking: dict, from_term: dict, to_term: dict, refund
     <p style="font-size:13px;line-height:1.6;color:#555;margin:0 0 18px 0;">{body_extra}</p>
     <div style="border-top:1px solid #eee;padding-top:16px;font-size:11px;color:#999;line-height:1.6;">
       Need help? Reply to this email and our team will get back to you.<br/>
-      Star Qistna · First Class Massage Coach
+      Qistna Express · First Class Massage Coach
     </div>
   </div>
 </body></html>"""
@@ -583,7 +583,7 @@ async def send_booking_cancelled(booking: dict, from_term: dict, to_term: dict, 
     if not to_email:
         return
     html = _render_cancelled_html(booking, from_term, to_term, refunded, amount, currency)
-    subject = f"Star Qistna — Booking cancelled · {booking.get('reference', '')}"
+    subject = f"Qistna Express — Booking cancelled · {booking.get('reference', '')}"
     try:
         res = await asyncio.to_thread(_send_sync, to_email, subject, html, None)
         logger.info("Sent cancellation email to %s ref=%s id=%s", to_email, booking.get("reference"), res.get("id"))

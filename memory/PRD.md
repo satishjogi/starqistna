@@ -188,6 +188,17 @@ Build a complete online bus booking system where visitors can search departure t
     - New `RoutesTab.jsx` — list of routes on the left, editor on the right with basic info, side-by-side pickup/dropoff stop pickers (add/remove/re-order by offset minute), and a full **pairings matrix** with per-cell fare editor (A/C/S/O + currency + CTS route code). Bulk actions: "Fill empty cells" (default RM 55), "Clear all".
   - Verified: full CRUD via curl (create → GET → PATCH fare → DUPLICATE guard → validation error → DELETE). Playwright confirmed end-to-end UI flow: login → admin → routes tab → new route form → add pickup + dropoff stops → enable pairing cell.
 
+## Implemented (2026-08-15) — Rebrand: Star Qistna → Qistna Express
+- All user-facing text updated across frontend + email tickets from "Star Qistna" to "Qistna Express".
+- Footer copyright changed to `© {YEAR} QISTNA EXPRESS PVT LTD · ALL RIGHTS RESERVED`.
+- HTML title + meta description updated (browser tab + SEO).
+- Calendar .ics file now generates `PRODID:-//Qistna Express//Booking//EN`, download name `QistnaExpress-{ref}.ics`, event summary `Qistna Express · {from} → {to}`.
+- Email templates (booking confirmation, reset password, schedule change, admin invite, feedback, cancellation) all rebranded — headers + subject lines + footer text.
+- TOTP issuer (Authenticator app label) changed from `Star Qistna` → `Qistna Express`.
+- Seed data (`bus_operator`, admin `full_name`, `OPERATORS` list) updated; startup migration `_migrate_operator_names` now migrates existing schedules to `Qistna Express` and updates the seeded admin's `full_name` if it still reads `Star Qistna Admin`.
+- Kept intact (infrastructure): domain `starqistna.com`, email addresses `support@starqistna.com`, admin login email `admin@starqistna.com`, `password-strength.js` blocklist entry `starqistna`, GoHub `STARQISTINA` OTA code (external TBS identity).
+- ⚠️ **Action needed by client**: replace `/app/frontend/public/logo.png` with the new Qistna Express logo image. Header + footer still render the old Star Qistna logo file.
+
 ## Implemented (2026-04-27)
 - **Dashboard "My cancellations" filter** — Dashboard now separates bookings into three tabs: **Upcoming · Past · Cancelled**, each with its own count badge. Cancelled bookings (status `cancelled_refunded` or `cancelled_burned`) are pulled out of the date-based upcoming/past split so they don't clutter live trips. Stats row updated to 4 cards (Upcoming / Past / Cancelled in signal-red / "Plan a trip" CTA). Verified via Playwright: all 3 tabs switch and render their respective list panels.
 - **Admin.jsx refactor + lazy loading** — split the 1,137-line monolith into a slim shell + 9 self-contained tab components under `/app/frontend/src/pages/admin/tabs/` (`BookingsTab`, `PaymentsTab`, `SchedulesTab`, `AddScheduleTab`, `TerminalsTab`, `PromoCodesTab`, `FeedbackTab`, `AuditLogTab`, `AdminsTab`). Each tab owns its own data fetching, local form state, and event handlers. Now wrapped in `React.lazy` + `Suspense` so each tab's JS chunk only downloads when its tab is clicked — initial admin bundle is much smaller. All `data-testid` attributes preserved.

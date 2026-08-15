@@ -43,7 +43,7 @@ export default function Refund() {
         </section>
 
         <section>
-          <h2 className="text-xl font-black mt-6">2. Cancellation by Star Qistna</h2>
+          <h2 className="text-xl font-black mt-6">2. Cancellation by Qistna Express</h2>
           <p>If we cancel your trip or delay it by more than 60 minutes, you are entitled to:</p>
           <ul className="list-disc pl-6 space-y-1">
             <li>A <b>full refund</b> (100%) to the original payment method, OR</li>
