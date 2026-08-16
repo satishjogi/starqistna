@@ -78,20 +78,40 @@ export default function AddScheduleTab() {
     }
   };
 
-  // When a route is picked, narrow the from/to selects to just its boarding/alighting stops.
+  // When a route is picked, the schedule represents ONE physical bus running
+  // the full route (first boarding → last alighting). Sub-segments become
+  // bookable via search — one schedule = one physical bus, seats shared.
   const selectedRoute = form.route_id ? routes.find((r) => r.id === form.route_id) : null;
+  const routeOriginId = selectedRoute
+    ? [...(selectedRoute.boarding_stops || [])].sort((a, b) => (a.offset_min ?? 0) - (b.offset_min ?? 0))[0]?.terminal_id
+    : null;
+  const routeDestinationId = selectedRoute
+    ? [...(selectedRoute.alighting_stops || [])].sort((a, b) => (a.offset_min ?? 0) - (b.offset_min ?? 0)).slice(-1)[0]?.terminal_id
+    : null;
+  // Auto-fill from/to when a route is picked and clear if user un-links.
+  useEffect(() => {
+    if (selectedRoute && routeOriginId && routeDestinationId) {
+      setForm((prev) => ({
+        ...prev,
+        from_terminal_id: routeOriginId,
+        to_terminal_id: routeDestinationId,
+      }));
+    }
+    // If the user JUST cleared a route we intentionally leave the fields alone
+    // (they may want to keep the values they picked).
+  }, [form.route_id, routeOriginId, routeDestinationId, selectedRoute]);
   const fromChoices = selectedRoute
-    ? terminals.filter((t) => selectedRoute.boarding_stops?.some((s) => s.terminal_id === t.id))
+    ? terminals.filter((t) => t.id === routeOriginId)
     : terminals;
   const toChoices = selectedRoute
-    ? terminals.filter((t) => selectedRoute.alighting_stops?.some((s) => s.terminal_id === t.id))
+    ? terminals.filter((t) => t.id === routeDestinationId)
     : terminals;
 
-  // Auto-apply the route's pairing price when both from/to selected.
+  // Auto-apply the route's origin→destination pairing fare when a route is picked.
   useEffect(() => {
-    if (!selectedRoute || !form.from_terminal_id || !form.to_terminal_id) return;
+    if (!selectedRoute || !routeOriginId || !routeDestinationId) return;
     const pair = selectedRoute.pairings?.find(
-      (p) => p.pickup_id === form.from_terminal_id && p.dropoff_id === form.to_terminal_id,
+      (p) => p.pickup_id === routeOriginId && p.dropoff_id === routeDestinationId,
     );
     if (pair) {
       setForm((prev) => ({
@@ -100,7 +120,7 @@ export default function AddScheduleTab() {
         child_fare: pair.child_fare ?? prev.child_fare,
       }));
     }
-  }, [form.route_id, form.from_terminal_id, form.to_terminal_id, selectedRoute]);
+  }, [form.route_id, selectedRoute, routeOriginId, routeDestinationId]);
 
   // fxRate is read in the saveFxRate success message; suppress unused var lint
   void fxRate;
@@ -154,24 +174,46 @@ export default function AddScheduleTab() {
             </div>
           )}
         </div>
+        {selectedRoute && (
+          <div className="md:col-span-2 border-l-2 border-[#002FA7] pl-3 py-1 text-[11px] font-mono text-zinc-700 leading-relaxed" data-testid="route-schedule-banner">
+            This schedule represents <b>ONE physical bus</b> running the full route
+            (origin&nbsp;→&nbsp;final destination). All valid pickup / drop-off combos
+            from the route become bookable segments — seats are SHARED across every
+            segment, so booking any leg blocks the seat for every other search on
+            this same bus.
+          </div>
+        )}
         <div>
-          <label className="te-label">Trip No <span className="text-zinc-400">(CTS, ≤10 chars, opt)</span></label>
-          <input className="te-input font-mono" maxLength={10} value={form.trip_no} onChange={(e) => setForm({ ...form, trip_no: e.target.value.toUpperCase() })} placeholder="SQ001" data-testid="sched-trip-no" />
-        </div>
-        <div /> {/* spacer to keep grid aligned */}
-        <div>
-          <label className="te-label">From Terminal{selectedRoute && <span className="text-emerald-600 text-[10px] ml-1">· narrowed to route</span>}</label>
-          <select className="te-input" required value={form.from_terminal_id} onChange={(e) => setForm({ ...form, from_terminal_id: e.target.value })} data-testid="sched-from">
+          <label className="te-label">From Terminal{selectedRoute && <span className="text-emerald-600 text-[10px] ml-1">· auto-set to route origin</span>}</label>
+          <select
+            className={`te-input ${selectedRoute ? "bg-zinc-100 cursor-not-allowed" : ""}`}
+            required
+            disabled={!!selectedRoute}
+            value={form.from_terminal_id}
+            onChange={(e) => setForm({ ...form, from_terminal_id: e.target.value })}
+            data-testid="sched-from"
+          >
             <option value="">Select</option>
             {fromChoices.map((t) => <option key={t.id} value={t.id}>{t.city} · {t.name}</option>)}
           </select>
         </div>
         <div>
-          <label className="te-label">To Terminal{selectedRoute && <span className="text-emerald-600 text-[10px] ml-1">· narrowed to route</span>}</label>
-          <select className="te-input" required value={form.to_terminal_id} onChange={(e) => setForm({ ...form, to_terminal_id: e.target.value })} data-testid="sched-to">
+          <label className="te-label">To Terminal{selectedRoute && <span className="text-emerald-600 text-[10px] ml-1">· auto-set to route destination</span>}</label>
+          <select
+            className={`te-input ${selectedRoute ? "bg-zinc-100 cursor-not-allowed" : ""}`}
+            required
+            disabled={!!selectedRoute}
+            value={form.to_terminal_id}
+            onChange={(e) => setForm({ ...form, to_terminal_id: e.target.value })}
+            data-testid="sched-to"
+          >
             <option value="">Select</option>
             {toChoices.map((t) => <option key={t.id} value={t.id}>{t.city} · {t.name}</option>)}
           </select>
+        </div>
+        <div className="md:col-span-2">
+          <label className="te-label">Trip No <span className="text-zinc-400">(CTS, ≤10 chars, opt)</span></label>
+          <input className="te-input font-mono" maxLength={10} value={form.trip_no} onChange={(e) => setForm({ ...form, trip_no: e.target.value.toUpperCase() })} placeholder="SQ001" data-testid="sched-trip-no" />
         </div>
         <div>
           <label className="te-label">First trip date</label>

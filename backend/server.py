@@ -24,7 +24,7 @@ from functools import lru_cache
 from cachetools import TTLCache
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict
 from datetime import datetime, timezone, timedelta
 from emergentintegrations.payments.stripe.checkout import (
     StripeCheckout,
@@ -444,6 +444,11 @@ class CreateBookingBody(BaseModel):
     contact_email: EmailStr
     contact_phone: str
     promo_code: Optional[str] = None
+    # When booking a specific segment of a multi-stop route, these override the
+    # schedule's own from/to and switch fare pricing to the route's pairing entry.
+    # If omitted, the schedule's origin→final-destination is assumed (legacy).
+    pickup_terminal_id: Optional[str] = None
+    dropoff_terminal_id: Optional[str] = None
 
 
 class CheckoutBody(BaseModel):
@@ -587,6 +592,61 @@ async def search_schedules(
     ]
 
     schedules = await db.schedules.find(query, {"_id": 0}).sort("departure_time", 1).to_list(200)
+
+    # -------------------------------------------------------------------------
+    # Route-segment matching:
+    #
+    # A route-linked schedule stores from = route.origin, to = route.destination
+    # (the whole physical bus). But customers might want any (pickup, dropoff)
+    # pair the route's pairings advertise — e.g. "Melaka → JB" on a KL→SG bus.
+    #
+    # For each requested (pickup_id, dropoff_id) combination we also find route-
+    # linked schedules whose route offers that pairing, then splice the pairing's
+    # fare + specific segment into the returned row.
+    # -------------------------------------------------------------------------
+    matching_routes = await db.routes.find(
+        {"is_active": {"$ne": False},
+         "pairings.pickup_id": {"$in": from_ids},
+         "pairings.dropoff_id": {"$in": to_ids}},
+        {"_id": 0},
+    ).to_list(200)
+    # Build (pickup_id, dropoff_id) → pairing map per route so we know which segment
+    # to attach for the specific customer query.
+    segment_by_route: Dict[str, dict] = {}
+    for r in matching_routes:
+        for p in r.get("pairings", []):
+            if p.get("pickup_id") in from_ids and p.get("dropoff_id") in to_ids:
+                # Pick the first matching pairing per route (should be unique per pair).
+                segment_by_route.setdefault(r["id"], {"route": r, "pairing": p})
+    if segment_by_route:
+        # Fetch schedules linked to any of these routes on this date.
+        route_ids = list(segment_by_route.keys())
+        seg_query: dict = {
+            "route_id": {"$in": route_ids},
+            "departure_date": date,
+        }
+        if "departure_time" in query:  # today-hides-past filter carries over
+            seg_query["departure_time"] = query["departure_time"]
+        seg_query["$or"] = query["$or"]  # end_date guard
+        existing_ids = {s["id"] for s in schedules}
+        seg_schedules = await db.schedules.find(seg_query, {"_id": 0}).to_list(200)
+        for s in seg_schedules:
+            if s["id"] in existing_ids:
+                continue  # already returned via direct-match branch
+            info = segment_by_route.get(s.get("route_id"))
+            if not info:
+                continue
+            pairing = info["pairing"]
+            # Overlay the sold segment on the row so the frontend renders correctly.
+            s["from_terminal_id"] = pairing["pickup_id"]
+            s["to_terminal_id"] = pairing["dropoff_id"]
+            s["adult_fare"] = float(pairing.get("adult_fare", s.get("adult_fare", 0)))
+            s["child_fare"] = float(pairing.get("child_fare", s.get("child_fare", 0)))
+            s["currency"] = (pairing.get("currency") or s.get("currency") or "myr").lower()
+            s["is_route_segment"] = True
+            schedules.append(s)
+        # Keep the result sorted by departure_time for a natural timeline view.
+        schedules.sort(key=lambda x: x.get("departure_time", ""))
 
     # Enrich each schedule with the SPECIFIC pickup + drop-off terminal it uses.
     # Critical for city-level searches ("Any stop in KL → Any stop in SG") where
@@ -1408,6 +1468,46 @@ def _calc_pricing(sched: dict, passengers: List[dict], promo: Optional[dict] = N
     }
 
 
+async def _resolve_segment_pricing(sched: dict,
+                                   pickup_terminal_id: Optional[str],
+                                   dropoff_terminal_id: Optional[str]) -> dict:
+    """Return a sched-shaped dict whose fare fields reflect the correct segment.
+
+    - If the schedule has no linked route, returns `sched` untouched.
+    - If the caller didn't specify pickup/dropoff, defaults to the schedule's own
+      from/to (which for route-linked schedules is the route's origin→final).
+    - If the requested segment isn't a valid route pairing → HTTP 400.
+    """
+    if not sched.get("route_id"):
+        return sched
+    # Route-linked. Default to the schedule's own from/to if caller didn't specify.
+    pickup_id = pickup_terminal_id or sched["from_terminal_id"]
+    dropoff_id = dropoff_terminal_id or sched["to_terminal_id"]
+    # If the requested segment matches the schedule's own from/to and the schedule
+    # already stores a fare, keep the schedule's fare (it was set at creation).
+    if pickup_id == sched.get("from_terminal_id") and dropoff_id == sched.get("to_terminal_id"):
+        return sched
+    route = await db.routes.find_one({"id": sched["route_id"]}, {"_id": 0})
+    if not route:
+        raise HTTPException(400, "Linked route not found — cannot resolve segment fare.")
+    pairing = next(
+        (p for p in route.get("pairings", [])
+         if p.get("pickup_id") == pickup_id and p.get("dropoff_id") == dropoff_id),
+        None,
+    )
+    if not pairing:
+        raise HTTPException(400, "Requested pickup/drop-off pair is not offered on this route.")
+    # Return a shallow copy with the pairing's fare + currency baked in so that
+    # `_calc_pricing` and the booking record reflect the sold segment.
+    seg = dict(sched)
+    seg["from_terminal_id"] = pickup_id
+    seg["to_terminal_id"] = dropoff_id
+    seg["adult_fare"] = float(pairing.get("adult_fare", sched.get("adult_fare")))
+    seg["child_fare"] = float(pairing.get("child_fare", sched.get("child_fare", 0)))
+    seg["currency"] = (pairing.get("currency") or sched.get("currency") or "myr").lower()
+    return seg
+
+
 async def _find_valid_promo(code: str, currency: str) -> dict:
     promo = await db.promo_codes.find_one({"code": code.upper().strip()}, {"_id": 0})
     if not promo:
@@ -1552,10 +1652,17 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
     if missing:
         raise HTTPException(409, detail={"message": "Seat locks missing or expired", "seats": missing})
 
+    # Resolve the specific segment (pickup/drop-off + fare) — for route-linked
+    # schedules this returns a sched-shaped dict with pairing fares; otherwise
+    # returns `sched` unchanged.
+    segment = await _resolve_segment_pricing(
+        sched, body.pickup_terminal_id, body.dropoff_terminal_id,
+    )
+
     pricing_promo = None
     if body.promo_code:
-        pricing_promo = await _find_valid_promo(body.promo_code, sched.get("currency", "myr"))
-    pricing = _calc_pricing(sched, [p.model_dump() for p in body.passengers], pricing_promo)
+        pricing_promo = await _find_valid_promo(body.promo_code, segment.get("currency", "myr"))
+    pricing = _calc_pricing(segment, [p.model_dump() for p in body.passengers], pricing_promo)
 
     booking_id = new_id()
     # Build passenger <-> seat mapping
@@ -1571,8 +1678,10 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
         "id": booking_id,
         "reference": booking_ref,
         "schedule_id": body.schedule_id,
-        "from_terminal_id": sched["from_terminal_id"],
-        "to_terminal_id": sched["to_terminal_id"],
+        # The from/to on the booking always reflect the SOLD segment (pickup/drop-off
+        # the passenger actually chose), NOT the physical bus endpoints.
+        "from_terminal_id": segment["from_terminal_id"],
+        "to_terminal_id": segment["to_terminal_id"],
         "departure_date": sched["departure_date"],
         "departure_time": sched["departure_time"],
         "user_id": user["id"] if user else None,
@@ -3385,22 +3494,35 @@ async def admin_delete_bus_type(bus_type_id: str, request: Request, user: dict =
 
 @api.post("/admin/schedules")
 async def admin_create_schedule(body: CreateScheduleBody, request: Request, user: dict = Depends(require_admin)):
+    # If a route is linked, force from = first boarding stop, to = last alighting
+    # stop. This encodes the rule: one schedule = one physical bus running the
+    # full route. Sub-segments become bookable via the search flow.
+    if body.route_id:
+        route = await db.routes.find_one({"id": body.route_id}, {"_id": 0})
+        if not route:
+            raise HTTPException(400, "Linked route_id does not exist")
+        boarding = sorted(route.get("boarding_stops", []) or [], key=lambda s: s.get("offset_min", 0))
+        alighting = sorted(route.get("alighting_stops", []) or [], key=lambda s: s.get("offset_min", 0))
+        if not boarding or not alighting:
+            raise HTTPException(400, "Linked route must have at least one boarding and one alighting stop.")
+        body.from_terminal_id = boarding[0]["terminal_id"]
+        body.to_terminal_id = alighting[-1]["terminal_id"]
     # Auto-derive currency from origin terminal country (SG → SGD, else MYR)
     origin = await db.terminals.find_one({"id": body.from_terminal_id}, {"_id": 0})
     if not origin:
         raise HTTPException(400, "Invalid from_terminal_id")
     derived_currency = COUNTRY_TO_CURRENCY.get(origin.get("country", "MY"), "myr")
-    # If a route is linked, validate it exists and matches the from/to terminals.
+    # Guard against duplicate physical-bus schedules on the same route+date+time.
     if body.route_id:
-        route = await db.routes.find_one({"id": body.route_id}, {"_id": 0})
-        if not route:
-            raise HTTPException(400, "Linked route_id does not exist")
-        boarding_ids = {s["terminal_id"] for s in route.get("boarding_stops", [])}
-        alighting_ids = {s["terminal_id"] for s in route.get("alighting_stops", [])}
-        if body.from_terminal_id not in boarding_ids:
-            raise HTTPException(400, "from_terminal_id must be one of the route's boarding stops")
-        if body.to_terminal_id not in alighting_ids:
-            raise HTTPException(400, "to_terminal_id must be one of the route's alighting stops")
+        dupe = await db.schedules.find_one({
+            "route_id": body.route_id,
+            "departure_date": body.departure_date,
+            "departure_time": body.departure_time,
+        })
+        if dupe:
+            raise HTTPException(400,
+                f"A schedule already exists for this route on {body.departure_date} at {body.departure_time}. "
+                "One route can only have one physical bus per departure slot.")
     doc = body.model_dump()
     doc["currency"] = derived_currency
     doc["id"] = new_id()
@@ -3447,17 +3569,19 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
         raise HTTPException(400, "From and To terminals must differ")
     derived_currency = COUNTRY_TO_CURRENCY.get(origin.get("country", "MY"), "myr")
 
-    # Validate optional route link once, up front.
+    # Validate optional route link once, up front. When a route is linked,
+    # force from = first boarding stop, to = last alighting stop (one physical
+    # bus per route+date+time).
     if body.route_id:
         route = await db.routes.find_one({"id": body.route_id}, {"_id": 0})
         if not route:
             raise HTTPException(400, "Linked route_id does not exist")
-        boarding_ids = {s["terminal_id"] for s in route.get("boarding_stops", [])}
-        alighting_ids = {s["terminal_id"] for s in route.get("alighting_stops", [])}
-        if body.from_terminal_id not in boarding_ids:
-            raise HTTPException(400, "from_terminal_id must be one of the route's boarding stops")
-        if body.to_terminal_id not in alighting_ids:
-            raise HTTPException(400, "to_terminal_id must be one of the route's alighting stops")
+        boarding = sorted(route.get("boarding_stops", []) or [], key=lambda s: s.get("offset_min", 0))
+        alighting = sorted(route.get("alighting_stops", []) or [], key=lambda s: s.get("offset_min", 0))
+        if not boarding or not alighting:
+            raise HTTPException(400, "Linked route must have at least one boarding and one alighting stop.")
+        body.from_terminal_id = boarding[0]["terminal_id"]
+        body.to_terminal_id = alighting[-1]["terminal_id"]
 
     dow_set = set(body.days_of_week)
     created = 0
@@ -3465,13 +3589,23 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
     cur = start
     while cur <= end:
         if cur.weekday() in dow_set:
-            # Avoid exact duplicates (same route + date + time)
-            existing = await db.schedules.find_one({
-                "from_terminal_id": body.from_terminal_id,
-                "to_terminal_id": body.to_terminal_id,
-                "departure_date": cur.isoformat(),
-                "departure_time": body.departure_time,
-            })
+            # Duplicate detection:
+            # - route-linked: enforce ONE physical bus per (route_id, date, time)
+            # - unlinked: keep legacy (from + to + date + time) uniqueness
+            if body.route_id:
+                dupe_filter = {
+                    "route_id": body.route_id,
+                    "departure_date": cur.isoformat(),
+                    "departure_time": body.departure_time,
+                }
+            else:
+                dupe_filter = {
+                    "from_terminal_id": body.from_terminal_id,
+                    "to_terminal_id": body.to_terminal_id,
+                    "departure_date": cur.isoformat(),
+                    "departure_time": body.departure_time,
+                }
+            existing = await db.schedules.find_one(dupe_filter)
             if existing:
                 skipped += 1
             else:
@@ -4126,6 +4260,13 @@ async def _ensure_indexes():
     await db.schedules.create_index(
         [("from_terminal_id", ASCENDING), ("to_terminal_id", ASCENDING),
          ("departure_date", ASCENDING), ("departure_time", ASCENDING)]
+    )
+    # One physical bus per route+date+time: enforce uniqueness for route-linked schedules.
+    await db.schedules.create_index(
+        [("route_id", ASCENDING), ("departure_date", ASCENDING), ("departure_time", ASCENDING)],
+        unique=True,
+        partialFilterExpression={"route_id": {"$type": "string"}},
+        name="uniq_route_departure",
     )
     await db.payment_transactions.create_index([("session_id", ASCENDING)], unique=True)
     await db.promo_codes.create_index([("code", ASCENDING)], unique=True)
