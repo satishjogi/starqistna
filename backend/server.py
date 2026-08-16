@@ -4262,12 +4262,31 @@ async def _ensure_indexes():
          ("departure_date", ASCENDING), ("departure_time", ASCENDING)]
     )
     # One physical bus per route+date+time: enforce uniqueness for route-linked schedules.
-    await db.schedules.create_index(
-        [("route_id", ASCENDING), ("departure_date", ASCENDING), ("departure_time", ASCENDING)],
-        unique=True,
-        partialFilterExpression={"route_id": {"$type": "string"}},
-        name="uniq_route_departure",
-    )
+    # If legacy data already has duplicates the index build will fail — log a big
+    # warning but let the backend keep starting. Run `scripts/find_duplicate_physical_buses.py`
+    # (or delete/merge manually) to resolve, then restart to build the index.
+    try:
+        await db.schedules.create_index(
+            [("route_id", ASCENDING), ("departure_date", ASCENDING), ("departure_time", ASCENDING)],
+            unique=True,
+            partialFilterExpression={"route_id": {"$type": "string"}},
+            name="uniq_route_departure",
+        )
+    except DuplicateKeyError as e:
+        logger.warning(
+            "\n" + ("=" * 78) + "\n"
+            "  Legacy duplicate schedules detected — uniq_route_departure index NOT built.\n"
+            "  Existing data has multiple schedules for the SAME (route_id, date, time).\n"
+            "  Backend will keep running (new duplicate protection still enforced in code),\n"
+            "  but the DB-level guard is off until legacy dupes are cleaned up.\n"
+            "\n"
+            "  To fix:\n"
+            "    cd ~/app/backend && python scripts/find_duplicate_physical_buses.py\n"
+            "    (add --fix to keep the oldest per group and delete the rest)\n"
+            "\n"
+            f"  First conflict: {e.details.get('keyValue') if hasattr(e, 'details') else str(e)[:150]}\n"
+            + ("=" * 78)
+        )
     await db.payment_transactions.create_index([("session_id", ASCENDING)], unique=True)
     await db.promo_codes.create_index([("code", ASCENDING)], unique=True)
     await db.audit_logs.create_index([("created_at", ASCENDING)])
