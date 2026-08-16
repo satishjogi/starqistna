@@ -677,16 +677,19 @@ async def search_schedules(
                    "is_city": True, "stop_count": len(to_ids)}
 
     # Single aggregation for booked-seat counts across ALL schedules in this result.
-    # Replaces an N+1 pattern (1 count_documents per schedule) with one round-trip.
+    # Now grouped by bus_instance_id — sibling schedules on the same physical bus
+    # share the same seat pool, so seats_available reflects that shared count.
     if schedules:
-        sched_ids = [s["id"] for s in schedules]
+        bus_keys = list({(s.get("bus_instance_id") or s["id"]) for s in schedules})
         pipeline = [
-            {"$match": {"schedule_id": {"$in": sched_ids}, "status": {"$in": ["locked", "booked"]}}},
-            {"$group": {"_id": "$schedule_id", "count": {"$sum": 1}}},
+            {"$match": {"bus_instance_id": {"$in": bus_keys},
+                        "status": {"$in": ["locked", "booked"]}}},
+            {"$group": {"_id": "$bus_instance_id", "count": {"$sum": 1}}},
         ]
         counts = {row["_id"]: row["count"] async for row in db.seat_locks.aggregate(pipeline)}
         for s in schedules:
-            s["seats_available"] = s["total_seats"] - counts.get(s["id"], 0)
+            key = s.get("bus_instance_id") or s["id"]
+            s["seats_available"] = s["total_seats"] - counts.get(key, 0)
 
     return {
         "from": from_meta,
@@ -770,9 +773,10 @@ async def popular_now(limit: int = 6):
         if not sched:
             continue
 
-        # Seats remaining
+        # Seats remaining — count against bus_instance to reflect shared pool.
+        bus_key = sched.get("bus_instance_id") or sched["id"]
         booked_count = await db.seat_locks.count_documents(
-            {"schedule_id": sched["id"], "status": {"$in": ["locked", "booked"]}}
+            {"bus_instance_id": bus_key, "status": {"$in": ["locked", "booked"]}}
         )
         seats_available = sched["total_seats"] - booked_count
 
@@ -825,9 +829,12 @@ async def get_schedule(schedule_id: str):
     from_term = await db.terminals.find_one({"id": sched["from_terminal_id"]}, {"_id": 0})
     to_term = await db.terminals.find_one({"id": sched["to_terminal_id"]}, {"_id": 0})
 
-    # seat states
+    # Seat states — count locks against the SHARED bus_instance so seats
+    # already sold on sibling schedules (e.g. KL→Melaka for a KL→JB search)
+    # show as booked here too. Legacy schedules fall back to their own id.
+    bus_key = sched.get("bus_instance_id") or sched["id"]
     locks = await db.seat_locks.find(
-        {"schedule_id": schedule_id, "status": {"$in": ["locked", "booked"]}},
+        {"bus_instance_id": bus_key, "status": {"$in": ["locked", "booked"]}},
         {"_id": 0},
     ).to_list(500)
     booked_seats = {lk["seat_number"]: lk["status"] for lk in locks}
@@ -1382,6 +1389,10 @@ async def lock_seats(body: SeatLockBody, user: Optional[dict] = Depends(current_
     if not sched:
         raise HTTPException(404, "Schedule not found")
 
+    # bus_instance_id groups sibling schedules (same physical bus). Legacy /
+    # unlinked schedules fall back to their own id so behaviour is unchanged.
+    bus_instance_id = sched.get("bus_instance_id") or sched["id"]
+
     lock_token = new_id()
     expires_at = utcnow() + timedelta(minutes=10)
     owner = user["id"] if user else f"guest:{lock_token}"
@@ -1389,11 +1400,12 @@ async def lock_seats(body: SeatLockBody, user: Optional[dict] = Depends(current_
     acquired = []
     failed = []
     for sn in body.seat_numbers:
-        # Try to insert; unique index on (schedule_id, seat_number) for non-released seats prevents duplicates.
+        # Try to insert; unique index on (bus_instance_id, seat_number) for
+        # non-released seats prevents duplicates across sibling schedules too.
         # Strategy: delete any expired locks for this seat first, then insert.
         await db.seat_locks.delete_many(
             {
-                "schedule_id": body.schedule_id,
+                "bus_instance_id": bus_instance_id,
                 "seat_number": sn,
                 "status": "locked",
                 "expires_at": {"$lt": utcnow().isoformat()},
@@ -1404,6 +1416,7 @@ async def lock_seats(body: SeatLockBody, user: Optional[dict] = Depends(current_
                 {
                     "id": new_id(),
                     "schedule_id": body.schedule_id,
+                    "bus_instance_id": bus_instance_id,
                     "seat_number": sn,
                     "status": "locked",
                     "owner": owner,
@@ -3494,38 +3507,53 @@ async def admin_delete_bus_type(bus_type_id: str, request: Request, user: dict =
 
 @api.post("/admin/schedules")
 async def admin_create_schedule(body: CreateScheduleBody, request: Request, user: dict = Depends(require_admin)):
-    # If a route is linked, force from = first boarding stop, to = last alighting
-    # stop. This encodes the rule: one schedule = one physical bus running the
-    # full route. Sub-segments become bookable via the search flow.
+    # Validate route link (if any) — from/to must be one of the route's stops.
     if body.route_id:
         route = await db.routes.find_one({"id": body.route_id}, {"_id": 0})
         if not route:
             raise HTTPException(400, "Linked route_id does not exist")
-        boarding = sorted(route.get("boarding_stops", []) or [], key=lambda s: s.get("offset_min", 0))
-        alighting = sorted(route.get("alighting_stops", []) or [], key=lambda s: s.get("offset_min", 0))
-        if not boarding or not alighting:
-            raise HTTPException(400, "Linked route must have at least one boarding and one alighting stop.")
-        body.from_terminal_id = boarding[0]["terminal_id"]
-        body.to_terminal_id = alighting[-1]["terminal_id"]
+        boarding_ids = {s["terminal_id"] for s in route.get("boarding_stops", [])}
+        alighting_ids = {s["terminal_id"] for s in route.get("alighting_stops", [])}
+        if body.from_terminal_id not in boarding_ids:
+            raise HTTPException(400, "from_terminal_id must be one of the route's boarding stops")
+        if body.to_terminal_id not in alighting_ids:
+            raise HTTPException(400, "to_terminal_id must be one of the route's alighting stops")
     # Auto-derive currency from origin terminal country (SG → SGD, else MYR)
     origin = await db.terminals.find_one({"id": body.from_terminal_id}, {"_id": 0})
     if not origin:
         raise HTTPException(400, "Invalid from_terminal_id")
     derived_currency = COUNTRY_TO_CURRENCY.get(origin.get("country", "MY"), "myr")
-    # Guard against duplicate physical-bus schedules on the same route+date+time.
+    # Resolve bus_instance_id — same physical bus per (route_id, date, time).
+    # Route-linked schedules SHARE the seat pool with any sibling schedules for
+    # the same physical bus. Legacy (unlinked) schedules use their own id.
+    bus_instance_id = new_id()
     if body.route_id:
-        dupe = await db.schedules.find_one({
+        sibling = await db.schedules.find_one({
             "route_id": body.route_id,
             "departure_date": body.departure_date,
             "departure_time": body.departure_time,
+        }, {"_id": 0, "bus_instance_id": 1})
+        if sibling and sibling.get("bus_instance_id"):
+            bus_instance_id = sibling["bus_instance_id"]
+        # Block admins from creating exactly the SAME segment twice on the same
+        # physical bus (would just duplicate the row for no reason). Different
+        # from/to combos are allowed and expected.
+        exact = await db.schedules.find_one({
+            "route_id": body.route_id,
+            "departure_date": body.departure_date,
+            "departure_time": body.departure_time,
+            "from_terminal_id": body.from_terminal_id,
+            "to_terminal_id": body.to_terminal_id,
         })
-        if dupe:
+        if exact:
             raise HTTPException(400,
-                f"A schedule already exists for this route on {body.departure_date} at {body.departure_time}. "
-                "One route can only have one physical bus per departure slot.")
+                "A schedule for this exact segment already exists on this physical bus.")
     doc = body.model_dump()
     doc["currency"] = derived_currency
     doc["id"] = new_id()
+    # Legacy schedules use their own id as bus_instance_id; route-linked ones
+    # inherit from siblings (or mint their own if first of the group).
+    doc["bus_instance_id"] = bus_instance_id if body.route_id else doc["id"]
     doc["layout_config"] = _layout_for_bus_type(doc.get("bus_type", "Standard"))
     doc["created_at"] = utcnow().isoformat()
     await db.schedules.insert_one(doc)
@@ -3569,19 +3597,19 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
         raise HTTPException(400, "From and To terminals must differ")
     derived_currency = COUNTRY_TO_CURRENCY.get(origin.get("country", "MY"), "myr")
 
-    # Validate optional route link once, up front. When a route is linked,
-    # force from = first boarding stop, to = last alighting stop (one physical
-    # bus per route+date+time).
+    # Validate optional route link once, up front. from/to must be among the
+    # route's stops (but NOT force-set — admin picks which segment this schedule
+    # sells). Sibling schedules for the same physical bus SHARE bus_instance_id.
     if body.route_id:
         route = await db.routes.find_one({"id": body.route_id}, {"_id": 0})
         if not route:
             raise HTTPException(400, "Linked route_id does not exist")
-        boarding = sorted(route.get("boarding_stops", []) or [], key=lambda s: s.get("offset_min", 0))
-        alighting = sorted(route.get("alighting_stops", []) or [], key=lambda s: s.get("offset_min", 0))
-        if not boarding or not alighting:
-            raise HTTPException(400, "Linked route must have at least one boarding and one alighting stop.")
-        body.from_terminal_id = boarding[0]["terminal_id"]
-        body.to_terminal_id = alighting[-1]["terminal_id"]
+        boarding_ids = {s["terminal_id"] for s in route.get("boarding_stops", [])}
+        alighting_ids = {s["terminal_id"] for s in route.get("alighting_stops", [])}
+        if body.from_terminal_id not in boarding_ids:
+            raise HTTPException(400, "from_terminal_id must be one of the route's boarding stops")
+        if body.to_terminal_id not in alighting_ids:
+            raise HTTPException(400, "to_terminal_id must be one of the route's alighting stops")
 
     dow_set = set(body.days_of_week)
     created = 0
@@ -3589,28 +3617,38 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
     cur = start
     while cur <= end:
         if cur.weekday() in dow_set:
-            # Duplicate detection:
-            # - route-linked: enforce ONE physical bus per (route_id, date, time)
-            # - unlinked: keep legacy (from + to + date + time) uniqueness
+            # Dedup by EXACT segment (route_id + from + to + date + time). Multiple
+            # segments per physical bus are allowed and expected.
+            dupe_filter = {
+                "from_terminal_id": body.from_terminal_id,
+                "to_terminal_id": body.to_terminal_id,
+                "departure_date": cur.isoformat(),
+                "departure_time": body.departure_time,
+            }
             if body.route_id:
-                dupe_filter = {
-                    "route_id": body.route_id,
-                    "departure_date": cur.isoformat(),
-                    "departure_time": body.departure_time,
-                }
-            else:
-                dupe_filter = {
-                    "from_terminal_id": body.from_terminal_id,
-                    "to_terminal_id": body.to_terminal_id,
-                    "departure_date": cur.isoformat(),
-                    "departure_time": body.departure_time,
-                }
+                dupe_filter["route_id"] = body.route_id
             existing = await db.schedules.find_one(dupe_filter)
             if existing:
                 skipped += 1
             else:
+                # Look up a sibling schedule (same physical bus) to inherit its
+                # bus_instance_id; otherwise mint a new one. Legacy (unlinked)
+                # schedules use their own id — same as the migration path.
+                sched_id = new_id()
+                bus_instance_id = sched_id
+                if body.route_id:
+                    sibling = await db.schedules.find_one({
+                        "route_id": body.route_id,
+                        "departure_date": cur.isoformat(),
+                        "departure_time": body.departure_time,
+                    }, {"_id": 0, "bus_instance_id": 1})
+                    if sibling and sibling.get("bus_instance_id"):
+                        bus_instance_id = sibling["bus_instance_id"]
+                    else:
+                        bus_instance_id = new_id()
                 doc = {
-                    "id": new_id(),
+                    "id": sched_id,
+                    "bus_instance_id": bus_instance_id,
                     "from_terminal_id": body.from_terminal_id,
                     "to_terminal_id": body.to_terminal_id,
                     "departure_date": cur.isoformat(),
@@ -4022,6 +4060,67 @@ async def _migrate_operator_names():
         logger.info("Migrated %d schedules to Qistna Express operator", result.modified_count)
 
 
+async def _migrate_bus_instance_ids():
+    """Backfill `bus_instance_id` on schedules + seat_locks.
+
+    Rule: schedules that share (route_id, departure_date, departure_time) are the
+    same physical bus and MUST share a seat pool. Admin can create multiple
+    schedule rows per physical bus (one per pickup/drop-off segment) — they all
+    resolve to the same bus_instance_id so a seat booked on any of them blocks
+    the seat on all siblings.
+
+    Legacy (unlinked) schedules use their own `id` as bus_instance_id — no
+    behaviour change, just makes the index key uniform across the collection.
+    """
+    updated_scheds = 0
+    # 1. Legacy / unlinked schedules → bus_instance_id = id
+    async for s in db.schedules.find(
+        {"$or": [{"route_id": None}, {"route_id": {"$exists": False}}],
+         "bus_instance_id": {"$exists": False}},
+        {"_id": 0, "id": 1},
+    ):
+        await db.schedules.update_one({"id": s["id"]}, {"$set": {"bus_instance_id": s["id"]}})
+        updated_scheds += 1
+    # 2. Route-linked schedules → group by (route_id, date, time), share one id
+    pipeline = [
+        {"$match": {"route_id": {"$ne": None, "$exists": True},
+                    "bus_instance_id": {"$exists": False}}},
+        {"$group": {"_id": {"r": "$route_id", "d": "$departure_date", "t": "$departure_time"},
+                    "ids": {"$push": "$id"}}},
+    ]
+    async for g in db.schedules.aggregate(pipeline):
+        instance_id = new_id()
+        await db.schedules.update_many(
+            {"id": {"$in": g["ids"]}},
+            {"$set": {"bus_instance_id": instance_id}},
+        )
+        updated_scheds += len(g["ids"])
+    if updated_scheds:
+        logger.info("Migrated %d schedules to bus_instance_id keys", updated_scheds)
+
+    # 3. Backfill seat_locks: bus_instance_id from parent schedule.
+    #    We do this in one aggregation-style batch to avoid N round-trips.
+    missing = await db.seat_locks.count_documents({"bus_instance_id": {"$exists": False}})
+    if missing:
+        # Load a schedule_id → bus_instance_id map (small; 5k rows).
+        sched_map: Dict[str, str] = {}
+        async for s in db.schedules.find({}, {"_id": 0, "id": 1, "bus_instance_id": 1}):
+            sched_map[s["id"]] = s.get("bus_instance_id") or s["id"]
+        updated_locks = 0
+        async for lock in db.seat_locks.find(
+            {"bus_instance_id": {"$exists": False}}, {"_id": 0, "schedule_id": 1},
+        ):
+            bi = sched_map.get(lock["schedule_id"], lock["schedule_id"])
+            await db.seat_locks.update_many(
+                {"schedule_id": lock["schedule_id"], "bus_instance_id": {"$exists": False}},
+                {"$set": {"bus_instance_id": bi}},
+            )
+            updated_locks += 1
+            if updated_locks >= missing:
+                break
+        logger.info("Backfilled bus_instance_id on %d seat_locks", missing)
+
+
 async def _diversify_popular_schedules():
     """For each popular city pair, ensure varied departure times over the next 14 days
     so the 'Popular right now' section shows genuinely different countdowns per route
@@ -4243,13 +4342,31 @@ async def _seed_bus_types():
 
 
 async def _ensure_indexes():
-    # Prevent double booking at DB level: unique (schedule_id, seat_number) for non-released rows.
-    # Partial unique index on locked/booked statuses.
+    # Legacy uniqueness on (schedule_id, seat_number) — replaced by
+    # (bus_instance_id, seat_number) below (which for legacy schedules falls
+    # back to schedule_id, so the guarantee is stronger, not weaker). We drop
+    # the old index if it still exists so both don't coexist.
+    for stale in ("uniq_schedule_seat_active",):
+        try:
+            await db.seat_locks.drop_index(stale)
+        except Exception:
+            pass
+    # Also drop the earlier attempt at uniq_route_departure on schedules —
+    # we now WANT multiple sibling schedules per (route, date, time) and rely
+    # on bus_instance_id to link them, so this index is no longer valid.
+    for stale in ("uniq_route_departure",):
+        try:
+            await db.schedules.drop_index(stale)
+        except Exception:
+            pass
+    # Prevent double booking at DB level: unique (bus_instance_id, seat_number)
+    # for non-released rows. All rows now have bus_instance_id after startup
+    # migration (falls back to schedule_id for legacy schedules).
     await db.seat_locks.create_index(
-        [("schedule_id", ASCENDING), ("seat_number", ASCENDING)],
+        [("bus_instance_id", ASCENDING), ("seat_number", ASCENDING)],
         unique=True,
         partialFilterExpression={"status": {"$in": ["locked", "booked"]}},
-        name="uniq_schedule_seat_active",
+        name="uniq_bus_instance_seat_active",
     )
     await db.users.create_index([("email", ASCENDING)], unique=True)
     await db.bookings.create_index([("user_id", ASCENDING)])
@@ -4261,32 +4378,8 @@ async def _ensure_indexes():
         [("from_terminal_id", ASCENDING), ("to_terminal_id", ASCENDING),
          ("departure_date", ASCENDING), ("departure_time", ASCENDING)]
     )
-    # One physical bus per route+date+time: enforce uniqueness for route-linked schedules.
-    # If legacy data already has duplicates the index build will fail — log a big
-    # warning but let the backend keep starting. Run `scripts/find_duplicate_physical_buses.py`
-    # (or delete/merge manually) to resolve, then restart to build the index.
-    try:
-        await db.schedules.create_index(
-            [("route_id", ASCENDING), ("departure_date", ASCENDING), ("departure_time", ASCENDING)],
-            unique=True,
-            partialFilterExpression={"route_id": {"$type": "string"}},
-            name="uniq_route_departure",
-        )
-    except DuplicateKeyError as e:
-        logger.warning(
-            "\n" + ("=" * 78) + "\n"
-            "  Legacy duplicate schedules detected — uniq_route_departure index NOT built.\n"
-            "  Existing data has multiple schedules for the SAME (route_id, date, time).\n"
-            "  Backend will keep running (new duplicate protection still enforced in code),\n"
-            "  but the DB-level guard is off until legacy dupes are cleaned up.\n"
-            "\n"
-            "  To fix:\n"
-            "    cd ~/app/backend && python scripts/find_duplicate_physical_buses.py\n"
-            "    (add --fix to keep the oldest per group and delete the rest)\n"
-            "\n"
-            f"  First conflict: {e.details.get('keyValue') if hasattr(e, 'details') else str(e)[:150]}\n"
-            + ("=" * 78)
-        )
+    # Shared seat pool per physical bus — see _migrate_bus_instance_ids docstring.
+    await db.schedules.create_index([("bus_instance_id", ASCENDING)])
     await db.payment_transactions.create_index([("session_id", ASCENDING)], unique=True)
     await db.promo_codes.create_index([("code", ASCENDING)], unique=True)
     await db.audit_logs.create_index([("created_at", ASCENDING)])
@@ -4479,12 +4572,15 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def on_start():
-    await _ensure_indexes()
+    # Run bus_instance_id backfill BEFORE _ensure_indexes so the new unique
+    # index on (bus_instance_id, seat_number) has valid data to key on.
     await _seed_terminals()
     await _seed_admin()
     await _seed_schedules()
     await _migrate_sg_schedules()
     await _migrate_operator_names()
+    await _migrate_bus_instance_ids()
+    await _ensure_indexes()
     await _diversify_popular_schedules()
     await _seed_promos()
     await _seed_bus_types()
