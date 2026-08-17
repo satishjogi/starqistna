@@ -4342,15 +4342,6 @@ async def _seed_bus_types():
 
 
 async def _ensure_indexes():
-    # Legacy uniqueness on (schedule_id, seat_number) — replaced by
-    # (bus_instance_id, seat_number) below (which for legacy schedules falls
-    # back to schedule_id, so the guarantee is stronger, not weaker). We drop
-    # the old index if it still exists so both don't coexist.
-    for stale in ("uniq_schedule_seat_active",):
-        try:
-            await db.seat_locks.drop_index(stale)
-        except Exception:
-            pass
     # Also drop the earlier attempt at uniq_route_departure on schedules —
     # we now WANT multiple sibling schedules per (route, date, time) and rely
     # on bus_instance_id to link them, so this index is no longer valid.
@@ -4360,14 +4351,46 @@ async def _ensure_indexes():
         except Exception:
             pass
     # Prevent double booking at DB level: unique (bus_instance_id, seat_number)
-    # for non-released rows. All rows now have bus_instance_id after startup
+    # for non-released rows. All rows have bus_instance_id after startup
     # migration (falls back to schedule_id for legacy schedules).
-    await db.seat_locks.create_index(
-        [("bus_instance_id", ASCENDING), ("seat_number", ASCENDING)],
-        unique=True,
-        partialFilterExpression={"status": {"$in": ["locked", "booked"]}},
-        name="uniq_bus_instance_seat_active",
-    )
+    #
+    # If legacy data has duplicate seat locks that now collide under
+    # bus_instance_id (e.g. seat 5A locked on two sibling schedules that used
+    # to be independent), the index build fails. In that case: log a warning,
+    # keep the legacy `uniq_schedule_seat_active` index in place, and let the
+    # operator resolve manually with `scripts/find_duplicate_seat_locks.py`.
+    new_lock_index_ok = False
+    try:
+        await db.seat_locks.create_index(
+            [("bus_instance_id", ASCENDING), ("seat_number", ASCENDING)],
+            unique=True,
+            partialFilterExpression={"status": {"$in": ["locked", "booked"]}},
+            name="uniq_bus_instance_seat_active",
+        )
+        new_lock_index_ok = True
+    except DuplicateKeyError as e:
+        logger.warning(
+            "\n" + ("=" * 78) + "\n"
+            "  Legacy duplicate seat_locks detected — uniq_bus_instance_seat_active NOT built.\n"
+            "  Backend will keep running with the legacy (schedule_id, seat_number) index.\n"
+            "  Cross-sibling seat sharing is enforced in application code — DB-level guard\n"
+            "  is off until conflicts are resolved.\n"
+            "\n"
+            "  To inspect + fix:\n"
+            "    cd ~/app/backend && python scripts/find_duplicate_seat_locks.py\n"
+            "    (add --release-expired to unlock stale non-booked locks; use --help for more)\n"
+            "\n"
+            f"  First conflict: {e.details.get('keyValue') if hasattr(e, 'details') else str(e)[:150]}\n"
+            + ("=" * 78)
+        )
+    # Only drop the legacy index if the new one was built — otherwise we'd
+    # leave the seat-locks collection with NO uniqueness at all.
+    if new_lock_index_ok:
+        for stale in ("uniq_schedule_seat_active",):
+            try:
+                await db.seat_locks.drop_index(stale)
+            except Exception:
+                pass
     await db.users.create_index([("email", ASCENDING)], unique=True)
     await db.bookings.create_index([("user_id", ASCENDING)])
     await db.bookings.create_index([("reference", ASCENDING)], unique=True)
