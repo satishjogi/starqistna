@@ -434,16 +434,26 @@ class PassengerInput(BaseModel):
 
 class SeatLockBody(BaseModel):
     schedule_id: str
-    seat_numbers: List[str]
+    # Cap seats per lock request — a booking party larger than this should
+    # contact ops, and the cap blocks whole-bus lock abuse.
+    seat_numbers: List[str] = Field(min_length=1, max_length=10)
+
+
+class SeatAssignment(BaseModel):
+    seat_number: str = Field(min_length=1, max_length=8)
+    passenger_index: int = Field(ge=0)
 
 
 class CreateBookingBody(BaseModel):
     schedule_id: str
-    seat_assignments: List[dict]  # [{seat_number, passenger_index}]
+    seat_assignments: List[SeatAssignment]
     passengers: List[PassengerInput]
     contact_email: EmailStr
     contact_phone: str
     promo_code: Optional[str] = None
+    # Bind the booking to the lock issued at seat-selection time, so a caller
+    # can't complete a booking on seats another customer is mid-checkout on.
+    lock_token: Optional[str] = None
     # When booking a specific segment of a multi-stop route, these override the
     # schedule's own from/to and switch fare pricing to the route's pairing entry.
     # If omitted, the schedule's origin→final-destination is assumed (legacy).
@@ -480,6 +490,18 @@ class BoardingValidateBody(BaseModel):
     reference: str
     gate: Optional[str] = None
     mark_boarded: bool = True
+
+
+def _active_seat_filter(**extra) -> dict:
+    """Query filter matching seat_locks that genuinely block a seat: status
+    `booked` (no expiry) OR `locked` and not yet expired. Expired locks are
+    swept by the background sweeper, but filtering here too keeps availability
+    accurate in the gap between expiry and the next sweep."""
+    now_iso = utcnow().isoformat()
+    return {**extra, "$or": [
+        {"status": "booked"},
+        {"status": "locked", "expires_at": {"$gte": now_iso}},
+    ]}
 
 
 # ---------- Search & Terminals ----------
@@ -682,8 +704,7 @@ async def search_schedules(
     if schedules:
         bus_keys = list({(s.get("bus_instance_id") or s["id"]) for s in schedules})
         pipeline = [
-            {"$match": {"bus_instance_id": {"$in": bus_keys},
-                        "status": {"$in": ["locked", "booked"]}}},
+            {"$match": _active_seat_filter(bus_instance_id={"$in": bus_keys})},
             {"$group": {"_id": "$bus_instance_id", "count": {"$sum": 1}}},
         ]
         counts = {row["_id"]: row["count"] async for row in db.seat_locks.aggregate(pipeline)}
@@ -776,7 +797,7 @@ async def popular_now(limit: int = 6):
         # Seats remaining — count against bus_instance to reflect shared pool.
         bus_key = sched.get("bus_instance_id") or sched["id"]
         booked_count = await db.seat_locks.count_documents(
-            {"bus_instance_id": bus_key, "status": {"$in": ["locked", "booked"]}}
+            _active_seat_filter(bus_instance_id=bus_key)
         )
         seats_available = sched["total_seats"] - booked_count
 
@@ -834,7 +855,7 @@ async def get_schedule(schedule_id: str):
     # show as booked here too. Legacy schedules fall back to their own id.
     bus_key = sched.get("bus_instance_id") or sched["id"]
     locks = await db.seat_locks.find(
-        {"bus_instance_id": bus_key, "status": {"$in": ["locked", "booked"]}},
+        _active_seat_filter(bus_instance_id=bus_key),
         {"_id": 0},
     ).to_list(500)
     booked_seats = {lk["seat_number"]: lk["status"] for lk in locks}
@@ -1382,12 +1403,48 @@ async def google_oauth_callback(body: GoogleCallbackBody):
 
 
 # ---------- Seat locks (prevents double booking) ----------
+def _valid_seat_numbers(sched: dict) -> set:
+    """Compute the set of seat labels that actually exist on this schedule's
+    layout (e.g. {"1A","1B","1C","1D", ...}). Mirrors the layout generation in
+    GET /schedules/{id} — 2+2 (A,B|C,D) or 2+1 (A,B|C), partial last row OK."""
+    layout_config = sched.get("layout_config") or _layout_for_bus_type(sched.get("bus_type", "Standard"))
+    cols = ("A", "B", "C", "D") if layout_config == "2+2" else ("A", "B", "C")
+    per_row = len(cols)
+    total_seats = int(sched.get("total_seats") or (sched.get("rows", 10) * 4))
+    valid: set = set()
+    r, remaining = 1, total_seats
+    while remaining > 0:
+        for col in cols:
+            if remaining <= 0:
+                break
+            valid.add(f"{r}{col}")
+            remaining -= 1
+        r += 1
+    return valid
+
+
 @api.post("/seats/lock")
-async def lock_seats(body: SeatLockBody, user: Optional[dict] = Depends(current_user)):
+async def lock_seats(body: SeatLockBody, request: Request, user: Optional[dict] = Depends(current_user)):
     """Attempts to lock given seats for 10 minutes using unique index. Returns failed seats if any."""
+    # Throttle: seat locks gate the purchasable inventory — without a limit a
+    # script can lock every seat on every schedule in a loop (inventory DoS).
+    ip = _client_ip(request)
+    await _check_auth_throttle(ip, "seat_lock", max_attempts=30, window_seconds=600,
+                                label="seat lock")
+    await _record_auth_failure(ip, "seat_lock", window_seconds=600)
+
     sched = await db.schedules.find_one({"id": body.schedule_id})
     if not sched:
         raise HTTPException(404, "Schedule not found")
+
+    # Validate seat labels against the actual layout — reject junk like "99Z"
+    # that would otherwise pollute the seat_locks collection.
+    requested = [str(sn).strip().upper() for sn in body.seat_numbers]
+    if len(set(requested)) != len(requested):
+        raise HTTPException(400, "Duplicate seat numbers in request")
+    invalid = [sn for sn in requested if sn not in _valid_seat_numbers(sched)]
+    if invalid:
+        raise HTTPException(400, f"Invalid seat number(s) for this bus: {', '.join(invalid)}")
 
     # bus_instance_id groups sibling schedules (same physical bus). Legacy /
     # unlinked schedules fall back to their own id so behaviour is unchanged.
@@ -1399,7 +1456,7 @@ async def lock_seats(body: SeatLockBody, user: Optional[dict] = Depends(current_
 
     acquired = []
     failed = []
-    for sn in body.seat_numbers:
+    for sn in requested:
         # Try to insert; unique index on (bus_instance_id, seat_number) for
         # non-released seats prevents duplicates across sibling schedules too.
         # Strategy: delete any expired locks for this seat first, then insert.
@@ -1542,7 +1599,13 @@ async def _find_valid_promo(code: str, currency: str) -> dict:
 
 # ---------- Promo Codes ----------
 @api.post("/promo/validate")
-async def validate_promo(body: PromoValidateBody):
+async def validate_promo(body: PromoValidateBody, request: Request):
+    # Throttle: unauthenticated promo-code probing would otherwise allow
+    # enumerating every valid code by brute force.
+    ip = _client_ip(request)
+    await _check_auth_throttle(ip, "promo_validate", max_attempts=20, window_seconds=600,
+                                label="promo validation")
+    await _record_auth_failure(ip, "promo_validate", window_seconds=600)
     sched = await db.schedules.find_one({"id": body.schedule_id}, {"_id": 0})
     if not sched:
         raise HTTPException(404, "Schedule not found")
@@ -1598,10 +1661,34 @@ async def delete_promo_code(code_id: str, request: Request, user: dict = Depends
 
 
 # ---------- Boarding gate validation (for existing QR readers) ----------
+# Shared secret gate-scanners must present as the `X-Boarding-Key` header.
+# When unset (local dev) the endpoint still works but logs a loud warning —
+# NEVER run production without it: booking references are short and enumerable,
+# and this endpoint returns passenger data.
+BOARDING_API_KEY = os.environ.get("BOARDING_API_KEY", "").strip()
+_BOARDING_KEY_WARNED = False
+
+
 @api.post("/boarding/validate")
-async def boarding_validate(body: BoardingValidateBody):
-    """Endpoint for existing gate-scanners. QR encodes only the booking `reference` (plain text).
-    The scanner posts the reference here; we return booking details and atomically mark as boarded."""
+async def boarding_validate(body: BoardingValidateBody, request: Request):
+    """Endpoint for gate-scanners. QR encodes only the booking `reference` (plain text).
+    The scanner posts the reference here; we return boarding details and atomically
+    mark as boarded. Requires the `X-Boarding-Key` header when BOARDING_API_KEY is
+    configured, and is rate-limited per IP to slow reference enumeration."""
+    global _BOARDING_KEY_WARNED
+    if BOARDING_API_KEY:
+        if (request.headers.get("x-boarding-key") or "") != BOARDING_API_KEY:
+            raise HTTPException(401, "Invalid or missing boarding API key")
+    elif not _BOARDING_KEY_WARNED:
+        _BOARDING_KEY_WARNED = True
+        logger.warning("BOARDING_API_KEY is not set — /api/boarding/validate is OPEN. "
+                       "Set it before production use.")
+
+    ip = _client_ip(request)
+    await _check_auth_throttle(ip, "boarding", max_attempts=60, window_seconds=600,
+                                label="boarding validation")
+    await _record_auth_failure(ip, "boarding", window_seconds=600)
+
     ref = body.reference.strip().upper()
     booking = await db.bookings.find_one({"reference": ref}, {"_id": 0})
     if not booking:
@@ -1618,12 +1705,29 @@ async def boarding_validate(body: BoardingValidateBody):
         )
         booking["boarded_at"] = utcnow().isoformat()
         booking["boarded_gate"] = body.gate
+    # Return only what a gate reader needs — never IC/passport numbers or
+    # contact details (PDPA minimisation).
+    slim_schedule = None
+    if sched:
+        slim_schedule = {
+            "id": sched.get("id"),
+            "from_terminal_id": sched.get("from_terminal_id"),
+            "to_terminal_id": sched.get("to_terminal_id"),
+            "departure_date": sched.get("departure_date"),
+            "departure_time": sched.get("departure_time"),
+            "bus_type": sched.get("bus_type"),
+            "bus_operator": sched.get("bus_operator"),
+        }
+    slim_passengers = [
+        {"name": p.get("name"), "category": p.get("category"), "seat_number": p.get("seat_number")}
+        for p in booking.get("passengers", [])
+    ]
     return {
         "valid": True,
         "already_boarded": already,
         "reference": ref,
-        "schedule": sched,
-        "passengers": booking.get("passengers", []),
+        "schedule": slim_schedule,
+        "passengers": slim_passengers,
         "seats": booking.get("seats", []),
         "from_terminal_id": booking.get("from_terminal_id"),
         "to_terminal_id": booking.get("to_terminal_id"),
@@ -1654,8 +1758,19 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
     if len(body.passengers) != len(body.seat_assignments):
         raise HTTPException(400, "Passengers and seat assignments must match in count")
 
-    seats = [sa["seat_number"] for sa in body.seat_assignments]
-    # verify locks exist (any owner) and aren't booked yet -- must belong to this session ideally
+    seats = [sa.seat_number.strip().upper() for sa in body.seat_assignments]
+    if len(set(seats)) != len(seats):
+        raise HTTPException(400, "Duplicate seat assignments")
+    for sa in body.seat_assignments:
+        if sa.passenger_index >= len(body.passengers):
+            raise HTTPException(400, f"seat_assignments references passenger_index {sa.passenger_index} "
+                                     f"but only {len(body.passengers)} passenger(s) provided")
+
+    # The booking MUST be bound to the lock token issued by /seats/lock —
+    # otherwise anyone could complete a booking on seats another customer is
+    # mid-checkout on ("seat sniping").
+    if not body.lock_token:
+        raise HTTPException(400, "lock_token is required — obtain it from /seats/lock first")
     current_locks = await db.seat_locks.find(
         {"schedule_id": body.schedule_id, "seat_number": {"$in": seats}},
         {"_id": 0},
@@ -1664,6 +1779,10 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
     missing = [s for s in seats if s not in lock_map or lock_map[s]["status"] != "locked"]
     if missing:
         raise HTTPException(409, detail={"message": "Seat locks missing or expired", "seats": missing})
+    not_mine = [s for s in seats if lock_map[s].get("lock_token") != body.lock_token]
+    if not_mine:
+        raise HTTPException(409, detail={"message": "These seats are locked by another session",
+                                         "seats": not_mine})
 
     # Resolve the specific segment (pickup/drop-off + fare) — for route-linked
     # schedules this returns a sched-shaped dict with pairing fares; otherwise
@@ -1681,9 +1800,8 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
     # Build passenger <-> seat mapping
     pax_with_seat = []
     for sa in body.seat_assignments:
-        idx = sa["passenger_index"]
-        p = body.passengers[idx].model_dump()
-        p["seat_number"] = sa["seat_number"]
+        p = body.passengers[sa.passenger_index].model_dump()
+        p["seat_number"] = sa.seat_number.strip().upper()
         pax_with_seat.append(p)
 
     booking_ref = "SQ" + booking_id.replace("-", "")[:8].upper()
@@ -1709,9 +1827,11 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
     }
     await db.bookings.insert_one(doc)
 
-    # Attach booking_id to locks
+    # Attach booking_id to OUR locks only (token-scoped — never touch other
+    # sessions' lock rows).
     await db.seat_locks.update_many(
-        {"schedule_id": body.schedule_id, "seat_number": {"$in": seats}},
+        {"schedule_id": body.schedule_id, "seat_number": {"$in": seats},
+         "lock_token": body.lock_token},
         {"$set": {"booking_id": booking_id}},
     )
 
@@ -1916,6 +2036,38 @@ async def cancel_booking(booking_id: str, user: dict = Depends(require_user)):
         }},
     )
 
+    # Void any CTS/TBS boarding passes issued for this booking — otherwise a
+    # refunded customer keeps a valid gate QR. Best-effort: failures are
+    # recorded on the booking so ops can retry (CTS cancel returns the refund
+    # amount on their side too, useful for reconciliation with TBS).
+    gohub_tickets = b.get("gohub_tickets") or []
+    opeticknos = [t["opetickno"] for t in gohub_tickets if t.get("opetickno")]
+    if b.get("gohub_status") == "confirmed" and opeticknos:
+        try:
+            from gohub_client import GoHubClient, GoHubError
+            client = GoHubClient(db=db, timeout=20)
+            cancel_res = await client.cancel_qr(
+                trans_id=b.get("reference") or booking_id[:8].upper(),
+                opeticknos=opeticknos,
+            )
+            await db.bookings.update_one(
+                {"id": booking_id},
+                {"$set": {"gohub_status": "cancelled",
+                          "gohub_cancelled_at": utcnow().isoformat(),
+                          "gohub_cancel_response": {k: v for k, v in cancel_res.items()
+                                                    if k in ("status_code", "status_msg", "detail_refundamnt")}}},
+            )
+            logger.info("gohub: voided %d CTS ticket(s) for cancelled booking %s",
+                        len(opeticknos), b.get("reference"))
+        except Exception as e:  # noqa: BLE001 — cancellation itself already committed
+            logger.exception("gohub: CTS void FAILED for booking %s — manual void needed", booking_id)
+            await db.bookings.update_one(
+                {"id": booking_id},
+                {"$set": {"gohub_cancel_failed": True,
+                          "gohub_cancel_error": str(e)[:250],
+                          "needs_ops_action": True}},
+            )
+
     # Best-effort email
     try:
         from_term = await db.terminals.find_one({"id": b["from_terminal_id"]}, {"_id": 0})
@@ -2016,6 +2168,12 @@ async def payment_options(
 
 @api.post("/payments/checkout")
 async def create_checkout(body: CheckoutBody, request: Request, user: Optional[dict] = Depends(current_user)):
+    # Throttle checkout session creation — each call creates a real Stripe
+    # Checkout Session, so unthrottled abuse pollutes the Stripe dashboard.
+    ip = _client_ip(request)
+    await _check_auth_throttle(ip, "checkout", max_attempts=30, window_seconds=600,
+                                label="checkout")
+    await _record_auth_failure(ip, "checkout", window_seconds=600)
     booking = await db.bookings.find_one({"id": body.booking_id}, {"_id": 0})
     if not booking:
         raise HTTPException(404, "Booking not found")
@@ -2391,27 +2549,43 @@ async def _issue_gohub_tickets(booking_id: str) -> None:
         await _send_email_with_current_state()
         return
 
-    # Parse per-passenger detail rows out of the flattened response.
-    # `_parse_response` flattens `<detail .../>` children as ``detail_<attr>``
-    # keys — since CTS returns MULTIPLE `<detail>` we surface only the last
-    # one via the flattened dict. The full XML lives in ``gohub_logs``.
+    # Parse per-passenger detail rows. CTS returns ONE <detail> per seat in
+    # multi-seat bookings — `_parse_response` now preserves them all in
+    # `detail_rows` (keyed here by opetickno). Fall back to the legacy
+    # flattened single-QR behaviour when the response has no per-seat rows
+    # (e.g. older ops or single-seat responses).
     #
     # For every seat we also fetch the CTS-branded QR image (with gopass logo)
     # from their separate image endpoint — in parallel to keep this fast.
     # If any image fetch fails, we simply don't store one and the frontend
     # falls back to a locally-generated plain QR.
-    raw_qr = result.get("detail_QR") or result.get("QR") or result.get("qr") or ""
+    detail_rows = result.get("detail_rows") or []
+    row_by_opetickno = {}
+    for row in detail_rows:
+        key = (row.get("opetickno") or row.get("newopetickno") or "").upper()
+        if key:
+            row_by_opetickno[key] = row
+    fallback_qr = result.get("detail_QR") or result.get("QR") or result.get("qr") or ""
+    fallback_tickno = result.get("detail_tickno") or result.get("tickno") or ""
+
+    per_seat_qr: list[str] = []
+    for seat in seats:
+        row = row_by_opetickno.get(seat["opetickno"].upper(), {})
+        per_seat_qr.append(
+            row.get("QR") or row.get("qr") or row.get("Qr") or fallback_qr
+        )
     image_bytes_list = await asyncio.gather(
-        *(client.fetch_qr_image(raw_qr) for _ in seats)
-    ) if raw_qr else [None] * len(seats)
+        *(client.fetch_qr_image(qr) if qr else asyncio.sleep(0) for qr in per_seat_qr)
+    )
 
     tickets: list[dict] = []
-    for seat, img_bytes in zip(seats, image_bytes_list):
+    for seat, img_bytes, seat_qr in zip(seats, image_bytes_list, per_seat_qr):
+        row = row_by_opetickno.get(seat["opetickno"].upper(), {})
         ticket_entry = {
             "seat_number": seat["seatno"],
             "opetickno": seat["opetickno"],
-            "tickno": result.get("detail_tickno") or result.get("tickno") or "",
-            "qr": raw_qr,
+            "tickno": row.get("tickno") or fallback_tickno,
+            "qr": seat_qr,
         }
         if img_bytes:
             import base64 as _b64
@@ -2430,32 +2604,130 @@ async def _issue_gohub_tickets(booking_id: str) -> None:
     await _send_email_with_current_state()
 
 
-async def _finalize_booking(booking_id: str, session_id: str):
+async def _finalize_booking(booking_id: str, session_id: str) -> bool:
     """Idempotent: mark seats booked, confirm booking, increment promo use, mark txn finalized.
+
+    Two safety properties:
+
+    1. ATOMIC CLAIM — the ``booking_finalized`` flag is flipped via a single
+       ``find_one_and_update`` guarded on its previous value. If the webhook,
+       the client status-poll and the background reconciler all fire at once,
+       exactly ONE caller wins; the others get ``False`` and stop. This kills
+       the double-promo-increment / double-email / double-CTS-call race.
+
+    2. SEAT RE-VERIFICATION — seat locks expire after 10 minutes, but async
+       payment methods (GrabPay/FPX) can settle hours later. If a lock row was
+       swept and the seat re-sold in the meantime, we must NOT blindly confirm.
+       For each seat we first try to flip our own lock to ``booked``; if the
+       row is gone we try to re-claim the seat via a fresh insert (the partial
+       unique index on (bus_instance_id, seat_number) makes this atomic). A
+       seat that fails both was re-sold → the booking is marked
+       ``seat_conflict`` (paid but NOT confirmed) for ops to refund, instead of
+       double-booking the seat.
 
     The confirmation email is dispatched from inside ``_issue_gohub_tickets``
     once the CTS attempt completes — so the email always reflects the final
     boarding-pass state (real CTS QR vs. fallback).
     """
-    await db.seat_locks.update_many(
-        {"booking_id": booking_id, "status": "locked"},
-        {"$set": {"status": "booked", "expires_at": None}},
+    # --- 1. Atomic claim ------------------------------------------------------
+    claimed = await db.payment_transactions.find_one_and_update(
+        {"session_id": session_id, "booking_finalized": {"$ne": True}},
+        {"$set": {"booking_finalized": True, "finalized_at": utcnow().isoformat(),
+                  "payment_status": "paid", "status": "complete",
+                  "updated_at": utcnow().isoformat()}},
     )
+    if not claimed:
+        logger.info("finalize: session=%s already finalized by another path — skipping", session_id)
+        return False
+
+    # --- 2. Seat re-verification ----------------------------------------------
+    booking = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    if not booking:
+        logger.error("finalize: booking %s missing for paid session=%s", booking_id, session_id)
+        return False
+
+    sched = await db.schedules.find_one({"id": booking.get("schedule_id")}, {"_id": 0})
+    bus_instance_id = (sched or {}).get("bus_instance_id") or booking.get("schedule_id")
+    lost_seats: list = []
+    for sn in booking.get("seats", []):
+        res = await db.seat_locks.update_one(
+            {"booking_id": booking_id, "seat_number": sn, "status": "locked"},
+            {"$set": {"status": "booked", "expires_at": None}},
+        )
+        if res.matched_count:
+            continue  # normal path — our lock was still alive
+        # Lock row is gone (expired + swept). If a booked lock for this booking
+        # already exists, we're done (idempotent retry). Otherwise re-claim.
+        existing = await db.seat_locks.find_one(
+            {"booking_id": booking_id, "seat_number": sn, "status": "booked"})
+        if existing:
+            continue
+        try:
+            await db.seat_locks.insert_one({
+                "id": new_id(),
+                "schedule_id": booking["schedule_id"],
+                "bus_instance_id": bus_instance_id,
+                "seat_number": sn,
+                "status": "booked",
+                "owner": booking.get("user_id") or f"guest:{booking.get('contact_email')}",
+                "booking_id": booking_id,
+                "expires_at": None,
+                "created_at": utcnow().isoformat(),
+                "reclaimed_at_finalize": True,
+            })
+            logger.warning("finalize: re-claimed expired seat %s for booking %s", sn, booking_id)
+        except DuplicateKeyError:
+            lost_seats.append(sn)
+
+    if lost_seats:
+        # Paid, but the seat was re-sold while the lock lapsed. Do NOT confirm —
+        # flag for ops to refund + reseat. The unique index guarantees we never
+        # double-book; this booking simply can't be honoured as-is.
+        await db.bookings.update_one(
+            {"id": booking_id},
+            {"$set": {"status": "seat_conflict",
+                      "payment_status": "paid",
+                      "seat_conflict_seats": lost_seats,
+                      "needs_ops_action": True,
+                      "seat_conflict_at": utcnow().isoformat()}},
+        )
+        logger.critical(
+            "finalize: SEAT CONFLICT booking=%s session=%s lost_seats=%s — customer PAID but seat "
+            "was re-sold. Refund/reseat required.", booking_id, session_id, lost_seats)
+        return False
+
+    # --- 3. Confirm -----------------------------------------------------------
     await db.bookings.update_one(
         {"id": booking_id},
         {"$set": {"status": "confirmed", "payment_status": "paid", "paid_at": utcnow().isoformat()}},
     )
-    booking = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
     promo = (booking or {}).get("pricing", {}).get("promo")
     if promo and promo.get("code"):
         await db.promo_codes.update_one({"code": promo["code"]}, {"$inc": {"used_count": 1}})
-    await db.payment_transactions.update_one(
-        {"session_id": session_id},
-        {"$set": {"booking_finalized": True, "payment_status": "paid", "status": "complete"}},
-    )
-    if booking:
-        # Fire-and-forget CTS QR issuance — includes the confirmation email dispatch.
-        asyncio.create_task(_issue_gohub_tickets(booking_id))
+    # Fire-and-forget CTS QR issuance — includes the confirmation email dispatch.
+    asyncio.create_task(_issue_gohub_tickets(booking_id))
+    return True
+
+
+async def _seat_lock_sweeper() -> None:
+    """Background task: delete expired `locked` seat_locks every minute.
+
+    Locks carry a 10-minute TTL, but without a sweeper an abandoned checkout
+    would keep its seats showing as unavailable until someone happened to try
+    locking the exact same seat (lazy cleanup in /seats/lock). This keeps
+    displayed availability honest. (`booked` rows have expires_at=None and are
+    never touched.)
+    """
+    while True:
+        try:
+            res = await db.seat_locks.delete_many(
+                {"status": "locked", "expires_at": {"$lt": utcnow().isoformat()}}
+            )
+            if res.deleted_count:
+                logger.info("seat-lock sweeper: purged %d expired lock(s)", res.deleted_count)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("seat-lock sweeper error: %s", e)
+        await asyncio.sleep(60)
 
 
 @api.post("/webhook/stripe")
@@ -2494,7 +2766,13 @@ async def stripe_webhook(request: Request):
             logger.exception("stripe_webhook: verification error: %s", e)
             return JSONResponse(status_code=400, content={"error": "verification_error"})
     else:
-        # No secret configured (dev/preview). Parse JSON but skip verification.
+        # No secret configured. In production this is a hard misconfiguration —
+        # fail CLOSED (503 so Stripe keeps retrying and ops notices) rather
+        # than accepting forgeable events. In dev/preview, accept unverified
+        # so local testing works without a signing secret.
+        if os.environ.get("APP_ENV", "").strip().lower() == "production":
+            logger.error("stripe_webhook: STRIPE_WEBHOOK_SECRET missing in production — refusing event")
+            return JSONResponse(status_code=503, content={"error": "webhook_not_configured"})
         logger.warning(
             "stripe_webhook: STRIPE_WEBHOOK_SECRET is not set — accepting event without verification"
         )
@@ -4599,16 +4877,24 @@ async def on_start():
     # index on (bus_instance_id, seat_number) has valid data to key on.
     await _seed_terminals()
     await _seed_admin()
-    await _seed_schedules()
+    # Demo schedule/promo seeding is OPT-IN. These routines create *bookable*
+    # inventory with hardcoded fares — fine for a dev box, dangerous in
+    # production where customers would pay for buses that don't exist.
+    if os.environ.get("SEED_DEMO_DATA", "").strip().lower() in ("1", "true", "yes"):
+        await _seed_schedules()
+        await _diversify_popular_schedules()
+        await _seed_promos()
+        logger.warning("SEED_DEMO_DATA=true — demo schedules/promos seeded. Do NOT use in production.")
     await _migrate_sg_schedules()
     await _migrate_operator_names()
     await _migrate_bus_instance_ids()
     await _ensure_indexes()
-    await _diversify_popular_schedules()
-    await _seed_promos()
     await _seed_bus_types()
     # Safety net for Stripe webhook drop-offs / async payment settle delays.
     asyncio.create_task(_reconcile_loop())
+    # Sweeper: purge expired seat locks so abandoned checkouts don't suppress
+    # availability (complements the lazy per-seat cleanup in /seats/lock).
+    asyncio.create_task(_seat_lock_sweeper())
     logger.info("Qistna Express startup complete")
 
 

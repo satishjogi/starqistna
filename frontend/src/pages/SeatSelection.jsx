@@ -58,7 +58,9 @@ export default function SeatSelection() {
   const pricing = useMemo(() => {
     if (!data) return null;
     const adultFare = data.schedule.adult_fare;
-    const childFare = +(adultFare * 0.5).toFixed(2);
+    // Use the schedule's real child fare when set (matches server-side
+    // pricing); 50% of adult is only a legacy fallback.
+    const childFare = data.schedule.child_fare ?? +(adultFare * 0.5).toFixed(2);
     const adults = selected.filter((s) => s.category === "adult").length;
     const children = selected.filter((s) => s.category === "child").length;
     const total = +(adults * adultFare + children * childFare).toFixed(2);
