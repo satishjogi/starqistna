@@ -76,8 +76,18 @@ fi
 
 log "3/4  Building frontend"
 pushd "$REPO_ROOT/frontend" >/dev/null
-yarn install --frozen-lockfile
-yarn build
+# npm ci installs EXACTLY what package-lock.json pins (reproducible builds).
+# --legacy-peer-deps is required because react-scripts@5 declares eslint@8-era
+# peers while the repo also carries newer plugins — the lockfile already
+# encodes a consistent tree.
+if [[ -f package-lock.json ]]; then
+    npm ci --legacy-peer-deps
+elif command -v yarn >/dev/null 2>&1 && [[ -f yarn.lock ]]; then
+    yarn install --frozen-lockfile
+else
+    npm install --legacy-peer-deps
+fi
+npm run build
 popd >/dev/null
 
 log "4/4  Restarting services"
