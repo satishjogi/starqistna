@@ -2,19 +2,14 @@
 Transit E1 - Bus Booking System Backend
 FastAPI + MongoDB. API-first so future mobile (React Native) uses same endpoints.
 """
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, status
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ASCENDING
 from pymongo.errors import DuplicateKeyError
 import os
 import logging
-import uuid
 import asyncio
-import hashlib
 import re
 import secrets
 import bcrypt
@@ -22,8 +17,7 @@ import jwt
 import pyotp
 from functools import lru_cache
 from cachetools import TTLCache
-from pathlib import Path
-from pydantic import BaseModel, Field, EmailStr, ConfigDict
+from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Literal, Dict
 from datetime import datetime, timezone, timedelta
 from emergentintegrations.payments.stripe.checkout import (
@@ -37,108 +31,53 @@ import httpx
 from email_service import (
     send_booking_confirmation,
     send_password_reset,
-    send_admin_invite,
-    send_feedback_confirmation,
-    send_feedback_admin_notification,
 )
-
-# ---------- Setup ----------
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / ".env")
-
-mongo_url = os.environ["MONGO_URL"]
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ["DB_NAME"]]
-
-JWT_SECRET = os.environ["JWT_SECRET"]
-JWT_ALG = os.environ.get("JWT_ALGORITHM", "HS256")
-JWT_EXPIRE_HOURS = int(os.environ.get("JWT_EXPIRE_HOURS", "168"))
-STRIPE_API_KEY = os.environ["STRIPE_API_KEY"]
-STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
-BOOTSTRAP_ADMIN_PASSWORD = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD", "").strip()
-if not BOOTSTRAP_ADMIN_PASSWORD:
-    raise RuntimeError(
-        "BOOTSTRAP_ADMIN_PASSWORD env var is required. Set a strong password in backend/.env"
-    )
+from core.config import (  # noqa: F401  (re-exported for tests/back-compat)
+    client,
+    db,
+    JWT_SECRET,
+    JWT_ALG,
+    STRIPE_API_KEY,
+    STRIPE_WEBHOOK_SECRET,
+    BOOTSTRAP_ADMIN_PASSWORD,
+    logger,
+)
+from core.utils import utcnow, new_id
+from core.security import (
+    hash_password,
+    verify_password,
+    issue_jwt,
+    current_user,
+    require_user,
+    require_admin,
+    _fingerprint,
+    _client_ip,
+    _check_auth_throttle,
+    _record_auth_failure,
+    _clear_auth_attempts,
+    _validate_password_strength,
+)
+from core.audit import log_audit
+from core.pricing import _calc_pricing
+from routers import feedback as feedback_router
+from routers import promo as promo_router
+from routers import terminals as terminals_router
+from routers import admin_users as admin_users_router
+from routers.promo import _find_valid_promo
 
 app = FastAPI(title="Transit E1 - Bus Booking API")
 api = APIRouter(prefix="/api")
-bearer = HTTPBearer(auto_error=False)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("transit")
 
 # In-process TTL caches (single-instance VPS friendly).
 # When we move to multi-worker, swap the backing store for Redis using the same
 # get/set pattern.
-_terminals_cache: TTLCache = TTLCache(maxsize=8, ttl=300)   # 5 min
 _popular_cache: TTLCache = TTLCache(maxsize=8, ttl=30)      # 30 sec
 _settings_cache: TTLCache = TTLCache(maxsize=2, ttl=60)     # 1 min
 
 
 # ---------- Helpers ----------
-def utcnow():
-    return datetime.now(timezone.utc)
-
-
-def new_id() -> str:
-    return str(uuid.uuid4())
-
-
-def hash_password(plain: str) -> str:
-    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-
-
-def _fingerprint(token: str) -> str:
-    """Fast deterministic SHA256 hex digest for indexed token lookup.
-
-    We still bcrypt-verify the candidate for constant-time defence in depth, but the
-    fingerprint lets us O(1)-locate the row instead of scanning + bcrypt-checking
-    every active token (which would be O(N × bcrypt_cost) and slow at scale).
-    """
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def verify_password(plain: str, hashed: str) -> bool:
-    try:
-        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
-    except Exception:
-        return False
-
-
-def issue_jwt(user_id: str, email: str) -> str:
-    payload = {
-        "sub": user_id,
-        "email": email,
-        "exp": utcnow() + timedelta(hours=JWT_EXPIRE_HOURS),
-        "iat": utcnow(),
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
-
-
-async def current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)) -> Optional[dict]:
-    """Returns user dict or None (guest). Raises if token is malformed."""
-    if not creds or not creds.credentials:
-        return None
-    try:
-        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALG])
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(401, "Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(401, "Invalid token")
-    user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0, "totp_secret": 0})
-    return user
-
-
-async def require_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)) -> dict:
-    user = await current_user(creds)
-    if not user:
-        raise HTTPException(401, "Authentication required")
-    if user.get("is_active") is False:
-        raise HTTPException(403, "This account has been deactivated")
-    return user
-
-
 def _layout_for_bus_type(bus_type: str) -> str:
     """Map a bus class name to a seat-column layout. VIP = luxury 2+1, everything else = 2+2."""
     bt = (bus_type or "").strip().lower()
@@ -147,63 +86,10 @@ def _layout_for_bus_type(bus_type: str) -> str:
     return "2+2"
 
 
-async def require_admin(user: dict = Depends(require_user)) -> dict:
-    if not user.get("is_admin"):
-        raise HTTPException(403, "Admin access required")
-    return user
-
-
-async def require_super_admin(user: dict = Depends(require_admin)) -> dict:
-    """Super-admins manage other admins. Regular admins cannot."""
-    if user.get("role") != "super_admin":
-        raise HTTPException(403, "Super-admin access required")
-    return user
-
-
-async def log_audit(
-    user: dict,
-    action: str,
-    resource: str,
-    resource_id: Optional[str] = None,
-    details: Optional[dict] = None,
-    request: Optional[Request] = None,
-):
-    """Record an admin action to the audit_logs collection."""
-    ip = None
-    if request is not None:
-        # Respect X-Forwarded-For if present (behind proxy/ingress)
-        fwd = request.headers.get("x-forwarded-for")
-        ip = (fwd.split(",")[0].strip() if fwd else None) or (request.client.host if request.client else None)
-    try:
-        await db.audit_logs.insert_one({
-            "id": new_id(),
-            "actor_id": user.get("id"),
-            "actor_email": user.get("email"),
-            "action": action,           # e.g. "create", "update", "delete", "toggle"
-            "resource": resource,       # e.g. "terminal", "schedule", "promo_code"
-            "resource_id": resource_id,
-            "details": details or {},
-            "ip": ip,
-            "created_at": utcnow().isoformat(),
-        })
-    except Exception as e:
-        # Audit logging must never break the main request
-        logger.warning("audit log failed: %s", e)
-
-
 # ---------- Login rate limiting (brute-force protection) ----------
 LOGIN_MAX_ATTEMPTS_PER_IDENTIFIER = 5   # same IP + email within window
 LOGIN_MAX_ATTEMPTS_PER_IP = 20          # same IP across all emails within window
 LOGIN_WINDOW_SECONDS = 15 * 60          # 15 minutes
-
-
-def _client_ip(request: Optional[Request]) -> str:
-    if request is None:
-        return "unknown"
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
 
 
 async def _check_login_rate_limit(ip: str, email: str):
@@ -253,92 +139,6 @@ async def _clear_login_attempts(ip: str, email: str):
         logger.warning("clear_login_attempts failed: %s", e)
 
 
-# Generic throttle for other auth actions (register, 2FA). Uses `auth_throttle`
-# collection with per-document TTL via `expires_at`, so each scope can have its
-# own window without clashing with the login rate-limit collection.
-async def _check_auth_throttle(ip: str, scope: str, max_attempts: int, window_seconds: int,
-                               label: str, identifier: Optional[str] = None):
-    query: dict = {
-        "ip": ip,
-        "scope": scope,
-        "failed_at": {"$gte": utcnow() - timedelta(seconds=window_seconds)},
-    }
-    if identifier:
-        query["identifier"] = identifier
-    count = await db.auth_throttle.count_documents(query)
-    if count >= max_attempts:
-        raise HTTPException(
-            429,
-            detail=f"Too many {label} attempts. Please try again in {max(1, window_seconds // 60)} minutes.",
-            headers={"Retry-After": str(window_seconds)},
-        )
-
-
-async def _record_auth_failure(ip: str, scope: str, window_seconds: int,
-                               identifier: Optional[str] = None):
-    try:
-        now = utcnow()
-        await db.auth_throttle.insert_one({
-            "ip": ip,
-            "scope": scope,
-            "identifier": identifier,
-            "failed_at": now,
-            "expires_at": now + timedelta(seconds=window_seconds),
-        })
-    except Exception as e:
-        logger.warning("record_auth_failure failed: %s", e)
-
-
-async def _clear_auth_attempts(ip: str, scope: str, identifier: Optional[str] = None):
-    try:
-        q: dict = {"ip": ip, "scope": scope}
-        if identifier:
-            q["identifier"] = identifier
-        await db.auth_throttle.delete_many(q)
-    except Exception as e:
-        logger.warning("clear_auth_attempts failed: %s", e)
-
-
-# ---------- Password strength ----------
-# Compact list of passwords banned outright — covers SecLists top-100 + common
-# local variants. Comparison is case-insensitive.
-COMMON_PASSWORDS = {
-    "123456", "123456789", "12345678", "12345", "1234567", "1234567890",
-    "password", "password1", "password123", "qwerty", "qwerty123", "qwertyuiop",
-    "abc123", "111111", "123123", "000000", "iloveyou", "admin", "admin123",
-    "administrator", "letmein", "welcome", "welcome1", "monkey", "dragon",
-    "master", "sunshine", "princess", "football", "baseball", "superman",
-    "batman", "trustno1", "starwars", "passw0rd", "1q2w3e4r", "1qaz2wsx",
-    "zaq12wsx", "qazwsx", "asdfgh", "asdfghjkl", "qwerty1", "qwertyu",
-    "pokemon", "hello", "hello123", "hello1", "charlie", "whatever",
-    "shadow", "ashley", "michael", "jennifer", "thomas", "jordan", "jessica",
-    "robert", "daniel", "andrew", "joshua", "matthew", "nicole", "amanda",
-    "taylor", "hunter", "buster", "soccer", "hockey", "killer", "george",
-    "sexy", "andrea", "michelle", "love", "login", "test", "test123",
-    "guest", "user", "root", "toor", "changeme", "qwer1234", "qwer123",
-    "p@ssw0rd", "p@ssword", "pa55word", "pass123", "pass1234", "pass12345",
-    "starqistna", "starqistna123", "bus123", "ticket123",
-    "malaysia", "malaysia123", "kuala", "singapore",
-}
-
-
-def _validate_password_strength(password: str) -> None:
-    """Raise HTTPException(400) with a user-friendly message if the password is
-    too weak. Enforced rules: min 8 chars, 1 upper, 1 lower, 1 digit, not on
-    the common-password blocklist."""
-    pw = password or ""
-    if len(pw) < 8:
-        raise HTTPException(400, "Password must be at least 8 characters long.")
-    if not any(c.isupper() for c in pw):
-        raise HTTPException(400, "Password must contain at least one uppercase letter.")
-    if not any(c.islower() for c in pw):
-        raise HTTPException(400, "Password must contain at least one lowercase letter.")
-    if not any(c.isdigit() for c in pw):
-        raise HTTPException(400, "Password must contain at least one number.")
-    if pw.lower() in COMMON_PASSWORDS:
-        raise HTTPException(400, "This password is too common. Please pick something unique.")
-
-
 # ---------- Models ----------
 class RegisterBody(BaseModel):
     email: EmailStr
@@ -379,51 +179,10 @@ class ResetPasswordBody(BaseModel):
     new_password: str = Field(min_length=8)
 
 
-class AdminInviteBody(BaseModel):
-    email: EmailStr
-    full_name: str = Field(min_length=1, max_length=120)
-    role: Literal["admin", "super_admin"] = "admin"
-
-
-class AdminAcceptInviteBody(BaseModel):
-    token: str = Field(min_length=16)
-    password: str = Field(min_length=8)
-
-
-class AdminRoleUpdateBody(BaseModel):
-    role: Literal["admin", "super_admin"]
-
-
-class AdminActiveUpdateBody(BaseModel):
-    is_active: bool
-
-
-class FeedbackBody(BaseModel):
-    name: Optional[str] = Field(default=None, max_length=120)
-    email: EmailStr
-    category: Literal["general", "booking_issue", "complaint", "suggestion", "praise"] = "general"
-    booking_reference: Optional[str] = Field(default=None, max_length=40)
-    rating: Optional[int] = Field(default=None, ge=1, le=5)
-    message: str = Field(min_length=10, max_length=4000)
-
-
-class FeedbackStatusBody(BaseModel):
-    status: Literal["new", "in_progress", "resolved"]
-
-
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: dict
-
-
-class TerminalModel(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str
-    city: str
-    name: str
-    code: str
-    state: Optional[str] = None
 
 
 class PassengerInput(BaseModel):
@@ -457,25 +216,6 @@ class CheckoutBody(BaseModel):
     gateway: str = "card"  # stripe payment_method_types: card | grabpay | fpx
 
 
-class PromoValidateBody(BaseModel):
-    code: str
-    schedule_id: str
-    passenger_count: int = Field(ge=1)
-    adults: int = Field(ge=0)
-    children: int = Field(ge=0)
-
-
-class PromoCreateBody(BaseModel):
-    code: str = Field(min_length=2, max_length=32)
-    type: Literal["percent", "flat"]
-    value: float = Field(gt=0)
-    currency: str = "myr"
-    max_uses: Optional[int] = None
-    valid_until: Optional[str] = None  # ISO date
-    active: bool = True
-    description: Optional[str] = None
-
-
 class BoardingValidateBody(BaseModel):
     reference: str
     gate: Optional[str] = None
@@ -483,39 +223,6 @@ class BoardingValidateBody(BaseModel):
 
 
 # ---------- Search & Terminals ----------
-@api.get("/terminals")
-async def list_terminals(q: Optional[str] = None):
-    # Cache the unfiltered list (hot path on every search page).
-    cache_key = "all"
-    query = {}
-    if q:
-        # Escape user input to prevent ReDoS / regex injection. Cap length to
-        # protect against pathological patterns and DB load.
-        safe_q = re.escape(q.strip()[:64])
-        query = {
-            "$or": [
-                {"city": {"$regex": safe_q, "$options": "i"}},
-                {"name": {"$regex": safe_q, "$options": "i"}},
-                {"code": {"$regex": safe_q, "$options": "i"}},
-            ]
-        }
-        cache_key = None  # don't cache filtered results
-
-    if cache_key and cache_key in _terminals_cache:
-        return _terminals_cache[cache_key]
-
-    terminals = await db.terminals.find(query, {"_id": 0}).sort("city", 1).to_list(500)
-    # Group by city for UI
-    by_city: dict = {}
-    for t in terminals:
-        by_city.setdefault(t["city"], []).append(t)
-    grouped = [{"city": city, "terminals": sorted(items, key=lambda x: x["name"])} for city, items in sorted(by_city.items())]
-    payload = {"grouped": grouped, "all": terminals}
-    if cache_key:
-        _terminals_cache[cache_key] = payload
-    return payload
-
-
 @api.get("/search")
 async def search_schedules(
     date: str,  # YYYY-MM-DD
@@ -1444,43 +1151,6 @@ async def release_seats(lock_token: str):
 
 
 # ---------- Bookings ----------
-def _calc_pricing(sched: dict, passengers: List[dict], promo: Optional[dict] = None) -> dict:
-    adult_fare = float(sched["adult_fare"])
-    # Prefer per-schedule child fare; fallback to half of adult for legacy schedules.
-    child_fare = float(sched["child_fare"]) if sched.get("child_fare") is not None else round(adult_fare * 0.5, 2)
-    adults = sum(1 for p in passengers if p["category"] == "adult")
-    children = sum(1 for p in passengers if p["category"] == "child")
-    subtotal = round(adults * adult_fare + children * child_fare, 2)
-
-    discount = 0.0
-    promo_info = None
-    if promo:
-        if promo["type"] == "percent":
-            discount = round(subtotal * (promo["value"] / 100.0), 2)
-        else:
-            discount = min(round(float(promo["value"]), 2), subtotal)
-        discount = max(0.0, min(discount, subtotal))
-        promo_info = {
-            "code": promo["code"],
-            "type": promo["type"],
-            "value": promo["value"],
-            "discount_amount": discount,
-        }
-
-    total = round(subtotal - discount, 2)
-    return {
-        "adult_fare": adult_fare,
-        "child_fare": child_fare,
-        "adults": adults,
-        "children": children,
-        "subtotal": subtotal,
-        "discount": discount,
-        "promo": promo_info,
-        "total": total,
-        "currency": sched.get("currency", "myr"),
-    }
-
-
 async def _resolve_segment_pricing(sched: dict,
                                    pickup_terminal_id: Optional[str],
                                    dropoff_terminal_id: Optional[str]) -> dict:
@@ -1519,82 +1189,6 @@ async def _resolve_segment_pricing(sched: dict,
     seg["child_fare"] = float(pairing.get("child_fare", sched.get("child_fare", 0)))
     seg["currency"] = (pairing.get("currency") or sched.get("currency") or "myr").lower()
     return seg
-
-
-async def _find_valid_promo(code: str, currency: str) -> dict:
-    promo = await db.promo_codes.find_one({"code": code.upper().strip()}, {"_id": 0})
-    if not promo:
-        raise HTTPException(404, "Promo code not found")
-    if not promo.get("active", True):
-        raise HTTPException(400, "Promo code is inactive")
-    if promo.get("currency") and promo["currency"].lower() != currency.lower():
-        raise HTTPException(400, f"Promo code only valid for {promo['currency'].upper()}")
-    if promo.get("valid_until"):
-        try:
-            if datetime.fromisoformat(promo["valid_until"]).date() < datetime.now(timezone.utc).date():
-                raise HTTPException(400, "Promo code has expired")
-        except ValueError:
-            pass
-    if promo.get("max_uses") is not None and promo.get("used_count", 0) >= promo["max_uses"]:
-        raise HTTPException(400, "Promo code usage limit reached")
-    return promo
-
-
-# ---------- Promo Codes ----------
-@api.post("/promo/validate")
-async def validate_promo(body: PromoValidateBody):
-    sched = await db.schedules.find_one({"id": body.schedule_id}, {"_id": 0})
-    if not sched:
-        raise HTTPException(404, "Schedule not found")
-    if (body.adults + body.children) != body.passenger_count:
-        raise HTTPException(400, "Passenger breakdown mismatch")
-    promo = await _find_valid_promo(body.code, sched.get("currency", "myr"))
-    fake_pax = [{"category": "adult"}] * body.adults + [{"category": "child"}] * body.children
-    pricing = _calc_pricing(sched, fake_pax, promo)
-    return {"valid": True, "promo": pricing["promo"], "pricing": pricing}
-
-
-@api.get("/admin/promo-codes")
-async def list_promo_codes(user: dict = Depends(require_admin)):
-    items = await db.promo_codes.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
-    return items
-
-
-@api.post("/admin/promo-codes")
-async def create_promo_code(body: PromoCreateBody, request: Request, user: dict = Depends(require_admin)):
-    doc = body.model_dump()
-    doc["code"] = doc["code"].upper().strip()
-    existing = await db.promo_codes.find_one({"code": doc["code"]})
-    if existing:
-        raise HTTPException(400, "Code already exists")
-    doc["id"] = new_id()
-    doc["used_count"] = 0
-    doc["created_at"] = utcnow().isoformat()
-    await db.promo_codes.insert_one(doc)
-    doc.pop("_id", None)
-    await log_audit(user, "create", "promo_code", doc["id"],
-                    {"code": doc["code"], "type": doc.get("type"), "value": doc.get("value")}, request)
-    return doc
-
-
-@api.patch("/admin/promo-codes/{code_id}")
-async def toggle_promo_code(code_id: str, active: bool, request: Request, user: dict = Depends(require_admin)):
-    result = await db.promo_codes.update_one({"id": code_id}, {"$set": {"active": active}})
-    if result.matched_count == 0:
-        raise HTTPException(404, "Promo code not found")
-    await log_audit(user, "toggle", "promo_code", code_id, {"active": active}, request)
-    return {"updated": True}
-
-
-@api.delete("/admin/promo-codes/{code_id}")
-async def delete_promo_code(code_id: str, request: Request, user: dict = Depends(require_admin)):
-    existing = await db.promo_codes.find_one({"id": code_id}, {"_id": 0, "code": 1})
-    result = await db.promo_codes.delete_one({"id": code_id})
-    if result.deleted_count == 0:
-        raise HTTPException(404, "Promo code not found")
-    await log_audit(user, "delete", "promo_code", code_id,
-                    {"code": (existing or {}).get("code")}, request)
-    return {"deleted": True}
 
 
 # ---------- Boarding gate validation (for existing QR readers) ----------
@@ -2671,238 +2265,6 @@ async def admin_audit_logs(
     return {"total": len(items), "items": items}
 
 
-# ---------- Admin management ----------
-ADMIN_INVITE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
-
-
-def _admin_public(u: dict) -> dict:
-    """Strip secrets before returning an admin record."""
-    return {
-        "id": u.get("id"),
-        "email": u.get("email"),
-        "full_name": u.get("full_name"),
-        "role": u.get("role") or ("super_admin" if u.get("email") == "admin@starqistna.com" else "admin"),
-        "is_active": u.get("is_active", True),
-        "created_at": u.get("created_at"),
-        "last_login_at": u.get("last_login_at"),
-    }
-
-
-@api.get("/admin/admins")
-async def list_admins(user: dict = Depends(require_admin)):
-    """Any admin may view the admin roster."""
-    users = await db.users.find({"is_admin": True}, {"_id": 0}).sort("created_at", 1).to_list(200)
-    invites = await db.admin_invites.find(
-        {"accepted_at": None, "revoked_at": None, "expires_at": {"$gte": utcnow()}},
-        {"_id": 0, "token_hash": 0},
-    ).sort("created_at", -1).to_list(100)
-    return {
-        "admins": [_admin_public(u) for u in users],
-        "pending_invites": invites,
-    }
-
-
-@api.post("/admin/admins/invite")
-async def invite_admin(body: AdminInviteBody, request: Request, user: dict = Depends(require_super_admin)):
-    email = body.email.lower().strip()
-    existing = await db.users.find_one({"email": email})
-    if existing and existing.get("is_admin") and existing.get("is_active", True):
-        raise HTTPException(400, "This user is already an active admin")
-
-    # Expire any prior open invites for this email
-    await db.admin_invites.update_many(
-        {"email": email, "accepted_at": None, "revoked_at": None},
-        {"$set": {"revoked_at": utcnow()}},
-    )
-
-    raw_token = secrets.token_urlsafe(32)
-    token_hash = bcrypt.hashpw(raw_token.encode(), bcrypt.gensalt()).decode()
-    now = utcnow()
-    invite_id = new_id()
-    await db.admin_invites.insert_one({
-        "id": invite_id,
-        "email": email,
-        "full_name": body.full_name.strip(),
-        "role": body.role,
-        "token_hash": token_hash,
-        "token_fp": _fingerprint(raw_token),
-        "invited_by_id": user["id"],
-        "invited_by_email": user["email"],
-        "created_at": now,
-        "expires_at": now + timedelta(seconds=ADMIN_INVITE_TTL_SECONDS),
-        "accepted_at": None,
-        "revoked_at": None,
-    })
-
-    public_url = os.environ.get("PUBLIC_APP_URL", "").rstrip("/") or "https://starqistna.com"
-    accept_link = f"{public_url}/admin-invite?token={raw_token}"
-    try:
-        await send_admin_invite(
-            to_email=email,
-            full_name=body.full_name,
-            inviter_name=user.get("full_name") or user.get("email"),
-            role=body.role,
-            accept_link=accept_link,
-            ttl_days=ADMIN_INVITE_TTL_SECONDS // 86400,
-        )
-    except Exception as e:
-        logger.warning("admin invite email failed for %s: %s", email, e)
-
-    await log_audit(user, "invite", "admin", invite_id,
-                    {"email": email, "role": body.role}, request)
-    return {"ok": True, "invite_id": invite_id, "expires_in_days": ADMIN_INVITE_TTL_SECONDS // 86400}
-
-
-@api.post("/admin/admins/accept-invite")
-async def accept_admin_invite(body: AdminAcceptInviteBody, request: Request):
-    """Public endpoint. Bcrypt-compare token, upsert the user as admin, set password."""
-    ip = _client_ip(request)
-    await _check_auth_throttle(ip, "admin_invite_accept", max_attempts=10, window_seconds=3600,
-                                label="admin invite acceptance")
-
-    _validate_password_strength(body.password)
-
-    fp = _fingerprint(body.token)
-    matched = await db.admin_invites.find_one(
-        {"token_fp": fp, "accepted_at": None, "revoked_at": None,
-         "expires_at": {"$gte": utcnow()}},
-        {"_id": 0},
-    )
-    if matched and not bcrypt.checkpw(body.token.encode(), matched["token_hash"].encode()):
-        matched = None  # fingerprint collision → reject
-    if not matched:
-        await _record_auth_failure(ip, "admin_invite_accept", window_seconds=3600)
-        raise HTTPException(400, "Invite link is invalid, already used, or expired.")
-
-    email = matched["email"]
-    pw_hash = hash_password(body.password)
-    now = utcnow()
-    existing = await db.users.find_one({"email": email})
-    if existing:
-        await db.users.update_one(
-            {"id": existing["id"]},
-            {"$set": {
-                "password_hash": pw_hash,
-                "is_admin": True,
-                "role": matched["role"],
-                "is_active": True,
-                "full_name": existing.get("full_name") or matched["full_name"],
-            }},
-        )
-        user_id = existing["id"]
-    else:
-        user_id = new_id()
-        await db.users.insert_one({
-            "id": user_id,
-            "email": email,
-            "full_name": matched["full_name"],
-            "phone": None,
-            "password_hash": pw_hash,
-            "is_admin": True,
-            "role": matched["role"],
-            "is_active": True,
-            "created_at": now.isoformat(),
-        })
-
-    await db.admin_invites.update_one(
-        {"id": matched["id"]},
-        {"$set": {"accepted_at": now, "accepted_user_id": user_id}},
-    )
-    # Audit this as a system action (no authenticated actor at this point).
-    await log_audit({"id": user_id, "email": email}, "accept_invite", "admin", user_id,
-                    {"role": matched["role"], "invited_by": matched.get("invited_by_email")}, request)
-
-    return {"ok": True, "email": email}
-
-
-@api.patch("/admin/admins/{admin_id}/role")
-async def update_admin_role(admin_id: str, body: AdminRoleUpdateBody, request: Request,
-                             user: dict = Depends(require_super_admin)):
-    target = await db.users.find_one({"id": admin_id, "is_admin": True})
-    if not target:
-        raise HTTPException(404, "Admin not found")
-
-    if target["id"] == user["id"] and body.role != "super_admin":
-        raise HTTPException(400, "You cannot demote yourself — ask another super-admin.")
-
-    # Prevent demoting the last super-admin
-    if body.role != "super_admin" and target.get("role") == "super_admin":
-        remaining = await db.users.count_documents({
-            "is_admin": True, "role": "super_admin", "is_active": {"$ne": False},
-            "id": {"$ne": admin_id},
-        })
-        if remaining == 0:
-            raise HTTPException(400, "Cannot demote the last super-admin.")
-
-    await db.users.update_one({"id": admin_id}, {"$set": {"role": body.role}})
-    await log_audit(user, "update_role", "admin", admin_id,
-                    {"email": target["email"], "new_role": body.role}, request)
-    return {"ok": True}
-
-
-@api.patch("/admin/admins/{admin_id}/active")
-async def update_admin_active(admin_id: str, body: AdminActiveUpdateBody, request: Request,
-                               user: dict = Depends(require_super_admin)):
-    target = await db.users.find_one({"id": admin_id, "is_admin": True})
-    if not target:
-        raise HTTPException(404, "Admin not found")
-
-    if target["id"] == user["id"] and not body.is_active:
-        raise HTTPException(400, "You cannot deactivate yourself.")
-
-    # Prevent deactivating the last active super-admin
-    if not body.is_active and target.get("role") == "super_admin":
-        remaining = await db.users.count_documents({
-            "is_admin": True, "role": "super_admin",
-            "is_active": {"$ne": False},
-            "id": {"$ne": admin_id},
-        })
-        if remaining == 0:
-            raise HTTPException(400, "Cannot deactivate the last active super-admin.")
-
-    await db.users.update_one({"id": admin_id}, {"$set": {"is_active": body.is_active}})
-    await log_audit(user, "deactivate" if not body.is_active else "reactivate",
-                    "admin", admin_id, {"email": target["email"]}, request)
-    return {"ok": True}
-
-
-@api.delete("/admin/admins/{admin_id}")
-async def revoke_admin(admin_id: str, request: Request, user: dict = Depends(require_super_admin)):
-    """Revoke admin rights (keeps the user account, flips is_admin to False)."""
-    target = await db.users.find_one({"id": admin_id, "is_admin": True})
-    if not target:
-        raise HTTPException(404, "Admin not found")
-
-    if target["id"] == user["id"]:
-        raise HTTPException(400, "You cannot revoke your own admin access.")
-
-    if target.get("role") == "super_admin":
-        remaining = await db.users.count_documents({
-            "is_admin": True, "role": "super_admin",
-            "is_active": {"$ne": False},
-            "id": {"$ne": admin_id},
-        })
-        if remaining == 0:
-            raise HTTPException(400, "Cannot revoke the last super-admin.")
-
-    await db.users.update_one({"id": admin_id}, {"$set": {"is_admin": False, "role": None}})
-    await log_audit(user, "revoke", "admin", admin_id, {"email": target["email"]}, request)
-    return {"ok": True}
-
-
-@api.delete("/admin/admins/invites/{invite_id}")
-async def cancel_admin_invite(invite_id: str, request: Request, user: dict = Depends(require_super_admin)):
-    result = await db.admin_invites.update_one(
-        {"id": invite_id, "accepted_at": None, "revoked_at": None},
-        {"$set": {"revoked_at": utcnow()}},
-    )
-    if result.matched_count == 0:
-        raise HTTPException(404, "Invite not found or already handled")
-    await log_audit(user, "cancel_invite", "admin", invite_id, {}, request)
-    return {"ok": True}
-
-
-
 # ---------- App settings (currency rate, etc.) ----------
 DEFAULT_SGD_TO_MYR = 3.50
 
@@ -2945,124 +2307,6 @@ async def update_settings(body: AppSettingsBody, request: Request, user: dict = 
     await log_audit(user, "update", "settings", "global",
                     {"sgd_to_myr_rate": body.sgd_to_myr_rate}, request)
     return {"ok": True, "sgd_to_myr_rate": body.sgd_to_myr_rate}
-
-
-
-# ---------- Customer feedback ----------
-FEEDBACK_ADMIN_EMAIL = "admin@starqistna.com"
-
-
-def _feedback_ref() -> str:
-    """Short, human-friendly reference e.g. F-7X2M9K."""
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no ambiguous chars
-    return "F-" + "".join(secrets.choice(alphabet) for _ in range(6))
-
-
-@api.post("/feedback")
-async def submit_feedback(body: FeedbackBody, request: Request):
-    ip = _client_ip(request)
-    # Throttle: 3/hour/IP
-    await _check_auth_throttle(ip, "feedback", max_attempts=3, window_seconds=3600,
-                                label="feedback")
-    await _record_auth_failure(ip, "feedback", window_seconds=3600)
-
-    # Authenticated? link it
-    user_id = None
-    auth = request.headers.get("authorization")
-    if auth and auth.lower().startswith("bearer "):
-        try:
-            payload = jwt.decode(auth.split()[1], JWT_SECRET, algorithms=[JWT_ALG])
-            user_id = payload.get("sub")
-        except Exception:
-            pass
-
-    ref = _feedback_ref()
-    now = utcnow()
-    doc = {
-        "id": new_id(),
-        "reference": ref,
-        "name": (body.name or "").strip() or None,
-        "email": body.email.lower().strip(),
-        "category": body.category,
-        "booking_reference": (body.booking_reference or "").strip().upper() or None,
-        "rating": body.rating,
-        "message": body.message.strip(),
-        "status": "new",
-        "user_id": user_id,
-        "ip": ip,
-        "created_at": now.isoformat(),
-        "resolved_at": None,
-    }
-    await db.feedback.insert_one(doc)
-    doc.pop("_id", None)
-
-    # Fire-and-forget emails
-    try:
-        await send_feedback_confirmation(
-            to_email=doc["email"],
-            name=doc["name"] or "there",
-            reference=ref,
-            category=doc["category"],
-            message=doc["message"],
-        )
-    except Exception as e:
-        logger.warning("feedback confirmation email failed: %s", e)
-    try:
-        await send_feedback_admin_notification(
-            admin_email=FEEDBACK_ADMIN_EMAIL,
-            feedback=doc,
-        )
-    except Exception as e:
-        logger.warning("feedback admin notification failed: %s", e)
-
-    return {"ok": True, "reference": ref}
-
-
-@api.get("/admin/feedback")
-async def admin_list_feedback(
-    status_filter: Optional[str] = None,
-    category: Optional[str] = None,
-    user: dict = Depends(require_admin),
-):
-    query: dict = {}
-    if status_filter and status_filter != "all":
-        query["status"] = status_filter
-    if category and category != "all":
-        query["category"] = category
-    items = await db.feedback.find(query, {"_id": 0}).sort("created_at", -1).to_list(500)
-    # Run summary counts concurrently
-    total_n, new_n, prog_n, done_n = await asyncio.gather(
-        db.feedback.count_documents({}),
-        db.feedback.count_documents({"status": "new"}),
-        db.feedback.count_documents({"status": "in_progress"}),
-        db.feedback.count_documents({"status": "resolved"}),
-    )
-    summary = {
-        "total": total_n,
-        "new": new_n,
-        "in_progress": prog_n,
-        "resolved": done_n,
-    }
-    return {"summary": summary, "items": items}
-
-
-@api.patch("/admin/feedback/{feedback_id}")
-async def admin_update_feedback_status(feedback_id: str, body: FeedbackStatusBody, request: Request,
-                                        user: dict = Depends(require_admin)):
-    existing = await db.feedback.find_one({"id": feedback_id}, {"_id": 0})
-    if not existing:
-        raise HTTPException(404, "Feedback not found")
-    updates: dict = {"status": body.status}
-    if body.status == "resolved":
-        updates["resolved_at"] = utcnow()
-        updates["resolved_by"] = user.get("email")
-    await db.feedback.update_one({"id": feedback_id}, {"$set": updates})
-    await log_audit(user, "update_status", "feedback", feedback_id,
-                    {"status": body.status, "reference": existing.get("reference")}, request)
-    return {"ok": True}
-
-
-
 
 
 
@@ -3146,113 +2390,6 @@ class BulkDeleteScheduleFilter(BaseModel):
 
 
 # (AppSettingsBody is defined alongside the settings endpoints earlier in the file.)
-
-
-class TerminalCreateBody(BaseModel):
-    city: str = Field(min_length=1)
-    name: str = Field(min_length=1)
-    code: str = Field(min_length=2, max_length=8)
-    state: Optional[str] = None
-    country: Literal["MY", "SG"] = "MY"
-    # New optional fields — used by the routes builder to display map + generate GoHub QRs.
-    landmark_address: Optional[str] = None
-    lat: Optional[float] = None
-    lng: Optional[float] = None
-    cts_code: Optional[str] = None
-    is_pickup: bool = True
-    is_dropoff: bool = True
-
-
-class TerminalUpdateBody(BaseModel):
-    city: Optional[str] = None
-    name: Optional[str] = None
-    code: Optional[str] = None
-    state: Optional[str] = None
-    country: Optional[Literal["MY", "SG"]] = None
-    landmark_address: Optional[str] = None
-    lat: Optional[float] = None
-    lng: Optional[float] = None
-    cts_code: Optional[str] = None
-    is_pickup: Optional[bool] = None
-    is_dropoff: Optional[bool] = None
-
-
-@api.get("/admin/terminals")
-async def admin_list_terminals(user: dict = Depends(require_admin)):
-    items = await db.terminals.find({}, {"_id": 0}).sort("city", 1).to_list(500)
-    # attach schedule counts for delete safety
-    for t in items:
-        t["schedule_count"] = await db.schedules.count_documents(
-            {"$or": [{"from_terminal_id": t["id"]}, {"to_terminal_id": t["id"]}]}
-        )
-    return items
-
-
-@api.post("/admin/terminals")
-async def admin_create_terminal(body: TerminalCreateBody, request: Request, user: dict = Depends(require_admin)):
-    code = body.code.upper().strip()
-    if await db.terminals.find_one({"code": code}):
-        raise HTTPException(400, f"Terminal code {code} already exists")
-    doc = {
-        "id": new_id(),
-        "city": body.city.strip(),
-        "name": body.name.strip(),
-        "code": code,
-        "state": (body.state or "").strip() or None,
-        "country": body.country,
-        "landmark_address": (body.landmark_address or "").strip() or None,
-        "lat": body.lat,
-        "lng": body.lng,
-        "cts_code": (body.cts_code or "").strip() or None,
-        "is_pickup": body.is_pickup,
-        "is_dropoff": body.is_dropoff,
-    }
-    await db.terminals.insert_one(doc)
-    doc.pop("_id", None)
-    _terminals_cache.clear()  # bust cache so /api/terminals reflects the new row
-    await log_audit(user, "create", "terminal", doc["id"],
-                    {"code": doc["code"], "city": doc["city"], "name": doc["name"]}, request)
-    return doc
-
-
-@api.patch("/admin/terminals/{terminal_id}")
-async def admin_update_terminal(terminal_id: str, body: TerminalUpdateBody, request: Request, user: dict = Depends(require_admin)):
-    updates = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
-    if "code" in updates:
-        updates["code"] = updates["code"].upper().strip()
-        clash = await db.terminals.find_one({"code": updates["code"], "id": {"$ne": terminal_id}})
-        if clash:
-            raise HTTPException(400, "Another terminal already uses this code")
-    for field in ("landmark_address", "cts_code"):
-        if field in updates and isinstance(updates[field], str):
-            updates[field] = updates[field].strip() or None
-    if not updates:
-        raise HTTPException(400, "No changes provided")
-    result = await db.terminals.update_one({"id": terminal_id}, {"$set": updates})
-    if result.matched_count == 0:
-        raise HTTPException(404, "Terminal not found")
-    _terminals_cache.clear()
-    updated = await db.terminals.find_one({"id": terminal_id}, {"_id": 0})
-    await log_audit(user, "update", "terminal", terminal_id, {"changes": updates}, request)
-    return updated
-
-
-@api.delete("/admin/terminals/{terminal_id}")
-async def admin_delete_terminal(terminal_id: str, request: Request, user: dict = Depends(require_admin)):
-    # Block delete if any schedule references this terminal
-    count = await db.schedules.count_documents(
-        {"$or": [{"from_terminal_id": terminal_id}, {"to_terminal_id": terminal_id}]}
-    )
-    if count > 0:
-        raise HTTPException(400, f"Cannot delete — {count} schedule(s) reference this terminal")
-    existing = await db.terminals.find_one({"id": terminal_id}, {"_id": 0, "code": 1, "city": 1})
-    result = await db.terminals.delete_one({"id": terminal_id})
-    if result.deleted_count == 0:
-        raise HTTPException(404, "Terminal not found")
-    _terminals_cache.clear()
-    await log_audit(user, "delete", "terminal", terminal_id,
-                    {"code": (existing or {}).get("code"), "city": (existing or {}).get("city")}, request)
-    return {"deleted": True}
 
 
 # ---------- Routes (city-to-city trip templates with pickup/dropoff pairings) ----------
@@ -4579,6 +3716,10 @@ async def health():
     return {"status": "ok", "time": utcnow().isoformat()}
 
 
+api.include_router(terminals_router.router)
+api.include_router(promo_router.router)
+api.include_router(feedback_router.router)
+api.include_router(admin_users_router.router)
 app.include_router(api)
 
 app.add_middleware(
