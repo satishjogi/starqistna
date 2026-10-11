@@ -16,21 +16,29 @@ class CreateBusTypeBody(BaseModel):
     seat_count: int = Field(ge=12, le=60)
     image_url: Optional[str] = Field(default=None, max_length=500)
     description: Optional[str] = Field(default=None, max_length=200)
+
+
 class UpdateBusTypeBody(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=60)
     seat_count: Optional[int] = Field(default=None, ge=12, le=60)
     image_url: Optional[str] = Field(default=None, max_length=500)
     description: Optional[str] = Field(default=None, max_length=200)
+
+
 @router.get("/bus-types")
 async def list_bus_types_public():
     """Public read — used by the schedule form so admins can pick a bus.
     Ordered by name for predictable dropdown listing."""
     items = await db.bus_types.find({}, {"_id": 0}).sort("name", 1).to_list(200)
     return items
+
+
 @router.get("/admin/bus-types")
 async def admin_list_bus_types(_: dict = Depends(require_admin)):
     items = await db.bus_types.find({}, {"_id": 0}).sort("name", 1).to_list(200)
     return items
+
+
 @router.post("/admin/bus-types")
 async def admin_create_bus_type(body: CreateBusTypeBody, request: Request, user: dict = Depends(require_admin)):
     name = body.name.strip()
@@ -49,6 +57,8 @@ async def admin_create_bus_type(body: CreateBusTypeBody, request: Request, user:
     await log_audit(user, "create", "bus_type", doc["id"],
                     {"name": name, "seat_count": body.seat_count}, request)
     return {k: v for k, v in doc.items() if k != "_id"}
+
+
 @router.patch("/admin/bus-types/{bus_type_id}")
 async def admin_update_bus_type(bus_type_id: str, body: UpdateBusTypeBody, request: Request, user: dict = Depends(require_admin)):
     updates: dict = {}
@@ -74,6 +84,8 @@ async def admin_update_bus_type(bus_type_id: str, body: UpdateBusTypeBody, reque
     await log_audit(user, "update", "bus_type", bus_type_id,
                     {"fields": list(updates.keys())}, request)
     return doc
+
+
 @router.delete("/admin/bus-types/{bus_type_id}")
 async def admin_delete_bus_type(bus_type_id: str, request: Request, user: dict = Depends(require_admin)):
     existing = await db.bus_types.find_one({"id": bus_type_id}, {"_id": 0, "name": 1})

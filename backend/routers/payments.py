@@ -1,8 +1,7 @@
 """Stripe payment, webhook, reconciliation, and admin reporting endpoints."""
 import asyncio
-import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from functools import lru_cache
 from typing import Optional
 
@@ -18,7 +17,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from core.audit import log_audit
-from core.config import db, logger, STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET, JWT_SECRET, JWT_ALG
+from core.config import db, logger, STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET
 from core.security import current_user, require_admin
 from core.utils import new_id, utcnow
 from services.gohub import _issue_gohub_tickets as issue_gohub_tickets
@@ -30,6 +29,8 @@ class CheckoutBody(BaseModel):
     booking_id: str
     origin_url: str
     gateway: str = "card"  # stripe payment_method_types: card | grabpay | fpx
+
+
 @lru_cache(maxsize=8)
 def _payment_options_for(currency: str) -> list:
     """Return list of payment method options based on currency.
@@ -69,6 +70,8 @@ def _payment_options_for(currency: str) -> list:
             "note": None,
         })
     return opts
+
+
 @router.get("/payments/options/{booking_id}")
 async def payment_options(
     booking_id: str,
@@ -96,6 +99,8 @@ async def payment_options(
         "amount": booking.get("pricing", {}).get("total", 0),
         "options": _payment_options_for(currency),
     }
+
+
 @router.post("/payments/checkout")
 async def create_checkout(body: CheckoutBody, request: Request, user: Optional[dict] = Depends(current_user)):
     booking = await db.bookings.find_one({"id": body.booking_id}, {"_id": 0})
@@ -195,6 +200,8 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
     )
 
     return {"url": session.url, "session_id": session.session_id}
+
+
 @router.get("/payments/status/{session_id}")
 async def payment_status(session_id: str, request: Request):
     txn = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
@@ -237,6 +244,8 @@ async def payment_status(session_id: str, request: Request):
 RECONCILE_MIN_AGE_SECONDS = 30
 RECONCILE_MAX_AGE_SECONDS = 60 * 60 * 24  # ignore anything older than 24h
 RECONCILE_INTERVAL_SECONDS = 60
+
+
 async def _reconcile_one_transaction(txn: dict) -> dict:
     """Ask Stripe for the current status of a single session and finalize
     the booking if it's now paid. Returns a short summary dict for logging."""
@@ -274,6 +283,8 @@ async def _reconcile_one_transaction(txn: dict) -> dict:
         "action": "still_pending", "stripe_status": check.status,
         "stripe_payment_status": check.payment_status,
     }
+
+
 async def _reconcile_stuck_transactions() -> list[dict]:
     """Scan for `initiated` transactions in the 30s..24h age band and reconcile each."""
     now = utcnow()
@@ -291,6 +302,8 @@ async def _reconcile_stuck_transactions() -> list[dict]:
         except Exception as e:  # noqa: BLE001
             logger.exception("reconcile: unexpected error for %s: %s", txn.get("session_id"), e)
     return results
+
+
 async def _reconcile_loop() -> None:
     """Background task: reconcile stuck payments every RECONCILE_INTERVAL_SECONDS."""
     while True:
@@ -303,6 +316,8 @@ async def _reconcile_loop() -> None:
         except Exception as e:  # noqa: BLE001
             logger.exception("reconcile: loop error: %s", e)
         await asyncio.sleep(RECONCILE_INTERVAL_SECONDS)
+
+
 @router.post("/admin/payments/reconcile")
 async def admin_reconcile_payments(user: dict = Depends(require_admin)):
     """Force an immediate reconciliation sweep of all initiated transactions.
@@ -316,6 +331,8 @@ async def admin_reconcile_payments(user: dict = Depends(require_admin)):
         "finalized": sum(1 for o in outcomes if o.get("action") == "finalized"),
         "results": outcomes,
     }
+
+
 @router.post("/admin/payments/reconcile/{session_id}")
 async def admin_reconcile_one(session_id: str, user: dict = Depends(require_admin)):
     """Force reconciliation for a single Stripe session — useful when a
@@ -324,6 +341,8 @@ async def admin_reconcile_one(session_id: str, user: dict = Depends(require_admi
     if not txn:
         raise HTTPException(404, "Transaction not found")
     return await _reconcile_one_transaction(txn)
+
+
 async def _finalize_booking(booking_id: str, session_id: str):
     """Idempotent: mark seats booked, confirm booking, increment promo use, mark txn finalized.
 
@@ -350,6 +369,8 @@ async def _finalize_booking(booking_id: str, session_id: str):
     if booking:
         # Fire-and-forget CTS QR issuance — includes the confirmation email dispatch.
         asyncio.create_task(_issue_gohub_tickets(booking_id))
+
+
 @router.post("/webhook/stripe")
 async def stripe_webhook(request: Request):
     """
@@ -473,6 +494,8 @@ async def stripe_webhook(request: Request):
         # Absolute last-resort net: never 5xx to Stripe.
         logger.exception("stripe_webhook: unexpected error: %s", outer)
         return JSONResponse(status_code=200, content={"ok": True, "warning": "handler_error"})
+
+
 @router.get("/admin/payments")
 async def admin_payments(
     status_filter: Optional[str] = None,
@@ -511,6 +534,8 @@ async def admin_payments(
             summary["initiated"] += 1
 
     return {"summary": summary, "items": items}
+
+
 @router.get("/admin/audit-logs")
 async def admin_audit_logs(
     limit: int = 200,

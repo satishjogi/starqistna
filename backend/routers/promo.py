@@ -6,14 +6,12 @@ from pydantic import BaseModel, Field
 
 from core.audit import log_audit
 from core.config import db
+from core.pricing import _calc_pricing
 from core.security import require_admin
 from core.utils import new_id, utcnow
-
-router = APIRouter()
-
-from core.pricing import _calc_pricing
 from services.promos import _find_valid_promo
 
+router = APIRouter()
 
 class PromoValidateBody(BaseModel):
     code: str
@@ -37,6 +35,8 @@ class PromoCreateBody(BaseModel):
 
 
 # ---------- Promo Codes ----------
+
+
 @router.post("/promo/validate")
 async def validate_promo(body: PromoValidateBody):
     sched = await db.schedules.find_one({"id": body.schedule_id}, {"_id": 0})

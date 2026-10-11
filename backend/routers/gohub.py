@@ -28,6 +28,8 @@ async def admin_gohub_retry(booking_id: str, user: dict = Depends(require_admin)
          "gohub_error": 1, "gohub_processed_at": 1, "reference": 1},
     )
     return fresh or {"gohub_status": "unknown"}
+
+
 class GoHubProbeBody(BaseModel):
     trip_no: str = "SQ001"
     boarding_date: Optional[str] = None   # YYYYMMDD; defaults to today MY
@@ -40,6 +42,8 @@ class GoHubProbeBody(BaseModel):
     contact: str = ""
     confirm: bool = False
     cancel: bool = False
+
+
 @router.post("/admin/gohub/probe")
 async def admin_gohub_probe(body: GoHubProbeBody, request: Request, user: dict = Depends(require_admin)):
     """Fire a single CTS reserve (optionally confirm/query/cancel) round-trip.

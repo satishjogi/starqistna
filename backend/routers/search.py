@@ -202,6 +202,8 @@ POPULAR_PAIRS = [
     ("Johor Bahru", "Kuala Lumpur"),
     ("Penang", "Kuala Lumpur"),
 ]
+
+
 @router.get("/popular/now")
 async def popular_now(limit: int = 6):
     """Return time-aware 'next bus' suggestions for popular city pairs.
@@ -308,6 +310,8 @@ async def popular_now(limit: int = 6):
     payload = {"generated_at": now_utc.isoformat(), "items": suggestions[:limit]}
     _popular_cache[cache_key] = payload
     return payload
+
+
 @router.get("/schedules/{schedule_id}")
 async def get_schedule(schedule_id: str):
     sched = await db.schedules.find_one({"id": schedule_id}, {"_id": 0})

@@ -13,8 +13,12 @@ router = APIRouter()
 _settings_cache: TTLCache = TTLCache(maxsize=2, ttl=60)
 
 DEFAULT_SGD_TO_MYR = 3.50
+
+
 class AppSettingsBody(BaseModel):
     sgd_to_myr_rate: float = Field(gt=0, le=20)
+
+
 @router.get("/settings")
 async def public_settings():
     """Public — used by the frontend to compute the bracketed MYR approx for SGD trips."""
@@ -24,6 +28,8 @@ async def public_settings():
     payload = {"sgd_to_myr_rate": s.get("sgd_to_myr_rate", DEFAULT_SGD_TO_MYR)}
     _settings_cache["global"] = payload
     return payload
+
+
 @router.patch("/admin/settings")
 async def update_settings(body: AppSettingsBody, request: Request, user: dict = Depends(require_admin)):
     await db.app_settings.update_one(

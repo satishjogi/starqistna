@@ -20,6 +20,8 @@ class PassengerInput(BaseModel):
     name: str
     category: Literal["adult", "child"]
     ic_or_passport: Optional[str] = None
+
+
 class CreateBookingBody(BaseModel):
     schedule_id: str
     seat_assignments: List[dict]  # [{seat_number, passenger_index}]
@@ -32,10 +34,14 @@ class CreateBookingBody(BaseModel):
     # If omitted, the schedule's origin→final-destination is assumed (legacy).
     pickup_terminal_id: Optional[str] = None
     dropoff_terminal_id: Optional[str] = None
+
+
 class BoardingValidateBody(BaseModel):
     reference: str
     gate: Optional[str] = None
     mark_boarded: bool = True
+
+
 async def _resolve_segment_pricing(sched: dict,
                                    pickup_terminal_id: Optional[str],
                                    dropoff_terminal_id: Optional[str]) -> dict:
@@ -74,6 +80,8 @@ async def _resolve_segment_pricing(sched: dict,
     seg["child_fare"] = float(pairing.get("child_fare", sched.get("child_fare", 0)))
     seg["currency"] = (pairing.get("currency") or sched.get("currency") or "myr").lower()
     return seg
+
+
 @router.post("/boarding/validate")
 async def boarding_validate(body: BoardingValidateBody):
     """Endpoint for existing gate-scanners. QR encodes only the booking `reference` (plain text).
@@ -107,6 +115,8 @@ async def boarding_validate(body: BoardingValidateBody):
         "departure_time": booking.get("departure_time"),
         "boarded_at": booking.get("boarded_at"),
     }
+
+
 @router.post("/bookings")
 async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends(current_user)):
     sched = await db.schedules.find_one({"id": body.schedule_id}, {"_id": 0})
@@ -190,6 +200,8 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
     )
 
     return {k: v for k, v in doc.items() if k != "_id"}
+
+
 @router.get("/bookings/me")
 async def my_bookings(user: dict = Depends(require_user)):
     items = await db.bookings.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
@@ -205,6 +217,8 @@ async def my_bookings(user: dict = Depends(require_user)):
         b["from"] = terms.get(b["from_terminal_id"])
         b["to"] = terms.get(b["to_terminal_id"])
     return items
+
+
 @router.get("/bookings/{booking_id}")
 async def get_booking(
     booking_id: str,
@@ -235,6 +249,8 @@ async def get_booking(
     b["schedule"] = await db.schedules.find_one({"id": b["schedule_id"]}, {"_id": 0})
     return b
 CANCEL_REFUND_THRESHOLD_HOURS = 24
+
+
 def _hours_to_departure(booking: dict) -> float:
     """Hours between now and the booking's departure (MY/SG local time, UTC+8)."""
     try:
@@ -243,6 +259,8 @@ def _hours_to_departure(booking: dict) -> float:
         return (dep_utc - utcnow()).total_seconds() / 3600.0
     except Exception:
         return 0.0
+
+
 @router.get("/bookings/{booking_id}/cancellation-quote")
 async def cancellation_quote(booking_id: str, user: dict = Depends(require_user)):
     """Tell the user, before they confirm, exactly what cancelling now will do."""
@@ -282,6 +300,8 @@ async def cancellation_quote(booking_id: str, user: dict = Depends(require_user)
         "outcome": "full_refund" if eligible else "ticket_burned",
         "policy": "Free cancellation up to 24 hours before departure. Within 24 hours, the ticket is non-refundable.",
     }
+
+
 def _stripe_refund_sync(payment_intent_id: str, amount_minor_units: int, idem_key: str) -> dict:
     """Run the blocking Stripe refund call inside a worker thread."""
     import stripe as stripe_sdk
@@ -292,12 +312,16 @@ def _stripe_refund_sync(payment_intent_id: str, amount_minor_units: int, idem_ke
         reason="requested_by_customer",
         idempotency_key=idem_key,
     )
+
+
 def _stripe_get_payment_intent_sync(session_id: str) -> Optional[str]:
     import stripe as stripe_sdk
     stripe_sdk.api_key = STRIPE_API_KEY
     sess = stripe_sdk.checkout.Session.retrieve(session_id)
     pi = sess.get("payment_intent") if isinstance(sess, dict) else getattr(sess, "payment_intent", None)
     return pi if isinstance(pi, str) else None
+
+
 @router.post("/bookings/{booking_id}/cancel")
 async def cancel_booking(booking_id: str, user: dict = Depends(require_user)):
     b = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
@@ -396,6 +420,8 @@ async def cancel_booking(booking_id: str, user: dict = Depends(require_user)):
         "refund": refund_info,
         "hours_to_departure": round(hours, 2),
     }
+
+
 @router.get("/admin/stats")
 async def admin_stats(user: dict = Depends(require_admin)):
     # Run all 5 counts concurrently — ~5× faster than sequential awaits.
@@ -413,6 +439,8 @@ async def admin_stats(user: dict = Depends(require_admin)):
         "terminals": terminals_n,
         "schedules": schedules_n,
     }
+
+
 @router.get("/admin/bookings")
 async def admin_bookings(user: dict = Depends(require_admin)):
     items = await db.bookings.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)

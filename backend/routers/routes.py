@@ -12,6 +12,8 @@ from core.utils import new_id, utcnow
 router = APIRouter()
 
 DEFAULT_FARE = 55.0
+
+
 class RouteStopIn(BaseModel):
     """A pickup or dropoff stop referenced from a route.
 
@@ -21,6 +23,8 @@ class RouteStopIn(BaseModel):
     """
     terminal_id: str
     offset_min: int = Field(ge=0, le=48 * 60)  # cap at 48h so a typo doesn't nuke the UI
+
+
 class RoutePairingIn(BaseModel):
     pickup_id: str            # terminal_id of a boarding stop
     dropoff_id: str           # terminal_id of an alighting stop
@@ -30,6 +34,8 @@ class RoutePairingIn(BaseModel):
     oku_fare: float = Field(ge=0, default=DEFAULT_FARE)
     currency: Literal["myr", "sgd"] = "myr"
     cts_route_code: Optional[str] = None
+
+
 class RouteCreateBody(BaseModel):
     code: str = Field(min_length=2, max_length=32)
     name: str = Field(min_length=1)
@@ -40,6 +46,8 @@ class RouteCreateBody(BaseModel):
     alighting_stops: List[RouteStopIn] = []
     pairings: List[RoutePairingIn] = []
     is_active: bool = True
+
+
 class RouteUpdateBody(BaseModel):
     code: Optional[str] = None
     name: Optional[str] = None
@@ -50,9 +58,13 @@ class RouteUpdateBody(BaseModel):
     alighting_stops: Optional[List[RouteStopIn]] = None
     pairings: Optional[List[RoutePairingIn]] = None
     is_active: Optional[bool] = None
+
+
 def _serialize_route(doc: dict) -> dict:
     doc = {k: v for k, v in doc.items() if k != "_id"}
     return doc
+
+
 async def _validate_route_stops(body: RouteCreateBody | RouteUpdateBody) -> None:
     """Ensure all referenced terminal_ids exist and pairings reference valid stops."""
     boarding = body.boarding_stops or []
@@ -72,16 +84,22 @@ async def _validate_route_stops(body: RouteCreateBody | RouteUpdateBody) -> None
             raise HTTPException(400, f"Pairing pickup {p.pickup_id!r} not in boarding_stops.")
         if p.dropoff_id not in alighting_ids:
             raise HTTPException(400, f"Pairing dropoff {p.dropoff_id!r} not in alighting_stops.")
+
+
 @router.get("/admin/routes")
 async def admin_list_routes(user: dict = Depends(require_admin)):
     items = await db.routes.find({}, {"_id": 0}).sort("code", 1).to_list(500)
     return items
+
+
 @router.get("/admin/routes/{route_id}")
 async def admin_get_route(route_id: str, user: dict = Depends(require_admin)):
     doc = await db.routes.find_one({"id": route_id}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Route not found")
     return doc
+
+
 @router.post("/admin/routes")
 async def admin_create_route(body: RouteCreateBody, request: Request, user: dict = Depends(require_admin)):
     code = body.code.upper().strip()
@@ -97,6 +115,8 @@ async def admin_create_route(body: RouteCreateBody, request: Request, user: dict
     await log_audit(user, "create", "route", doc["id"],
                     {"code": code, "name": body.name}, request)
     return _serialize_route(doc)
+
+
 @router.patch("/admin/routes/{route_id}")
 async def admin_update_route(route_id: str, body: RouteUpdateBody, request: Request, user: dict = Depends(require_admin)):
     existing = await db.routes.find_one({"id": route_id})
@@ -129,6 +149,8 @@ async def admin_update_route(route_id: str, body: RouteUpdateBody, request: Requ
     await log_audit(user, "update", "route", route_id,
                     {"fields": list(updates.keys())}, request)
     return doc
+
+
 @router.delete("/admin/routes/{route_id}")
 async def admin_delete_route(route_id: str, request: Request, user: dict = Depends(require_admin)):
     ref = await db.schedules.count_documents({"route_id": route_id})

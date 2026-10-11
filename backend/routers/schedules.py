@@ -17,6 +17,8 @@ router = APIRouter()
 async def admin_schedules(user: dict = Depends(require_admin)):
     items = await db.schedules.find({}, {"_id": 0}).sort("departure_date", 1).to_list(500)
     return items
+
+
 class CreateScheduleBody(BaseModel):
     from_terminal_id: str
     to_terminal_id: str
@@ -34,6 +36,8 @@ class CreateScheduleBody(BaseModel):
     # route's pickup/dropoff pairings for pricing + boarding UX.
     route_id: Optional[str] = None
     trip_no: Optional[str] = None  # CTS/GoHub trip identifier, max 10 chars
+
+
 class ScheduleUpdateBody(BaseModel):
     departure_date: Optional[str] = None
     departure_time: Optional[str] = None
@@ -54,6 +58,8 @@ class ScheduleUpdateBody(BaseModel):
     # When true AND the update changes departure_date or departure_time,
     # send a notification email to every confirmed passenger on this schedule.
     notify_passengers: bool = False
+
+
 class BulkScheduleBody(BaseModel):
     from_terminal_id: str
     to_terminal_id: str
@@ -69,6 +75,8 @@ class BulkScheduleBody(BaseModel):
     # Optional link to a Route (same rationale as CreateScheduleBody).
     route_id: Optional[str] = None
     trip_no: Optional[str] = None
+
+
 class BulkDeleteScheduleFilter(BaseModel):
     """Filter for bulk delete previews and executions.
 
@@ -82,6 +90,8 @@ class BulkDeleteScheduleFilter(BaseModel):
     route_id: Optional[str] = None
     unlinked_only: bool = False       # schedules where route_id is null / missing
     force: bool = False               # allow deleting even schedules that have bookings
+
+
 @router.post("/admin/schedules")
 async def admin_create_schedule(body: CreateScheduleBody, request: Request, user: dict = Depends(require_admin)):
     # Validate route link (if any) — from/to must be one of the route's stops.
@@ -147,6 +157,8 @@ async def admin_create_schedule(body: CreateScheduleBody, request: Request, user
         "route_id": doc.get("route_id"),
     }, request)
     return doc
+
+
 @router.post("/admin/schedules/bulk")
 async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, user: dict = Depends(require_admin)):
     """Generate one schedule per date matching days_of_week between start_date and end_date (inclusive).
@@ -262,6 +274,8 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
         "end_date": body.end_date,
         "currency": derived_currency,
     }
+
+
 @router.delete("/admin/schedules/range")
 async def admin_delete_schedules_range(
     from_terminal_id: str,
@@ -298,6 +312,8 @@ async def admin_delete_schedules_range(
         "deleted": result.deleted_count,
     }, request)
     return {"deleted": result.deleted_count, "range": f"{start_date}..{end_date}"}
+
+
 def _build_bulk_delete_query(f: BulkDeleteScheduleFilter) -> dict:
     """Convert a BulkDeleteScheduleFilter into a Mongo query.
 
@@ -332,6 +348,8 @@ def _build_bulk_delete_query(f: BulkDeleteScheduleFilter) -> dict:
     if not q:
         raise HTTPException(400, "At least one filter must be provided (safety guard).")
     return q
+
+
 async def _notify_schedule_change(new_sched: dict, old_sched: dict) -> int:
     """Send a schedule-change email to every confirmed booking on this schedule.
 
@@ -359,6 +377,8 @@ async def _notify_schedule_change(new_sched: dict, old_sched: dict) -> int:
             old_departure=old_departure, new_departure=new_departure,
         ))
     return len(bookings)
+
+
 @router.get("/admin/schedules/{schedule_id}/impact")
 async def admin_schedule_impact(schedule_id: str, user: dict = Depends(require_admin)):
     """Return a summary of downstream impact BEFORE the admin edits a schedule.
@@ -390,6 +410,8 @@ async def admin_schedule_impact(schedule_id: str, user: dict = Depends(require_a
         "distinct_customer_emails": len(emails),
         "sample_references": [b.get("reference") for b in confirmed[:5]],
     }
+
+
 @router.patch("/admin/schedules/{schedule_id}")
 async def admin_update_schedule(schedule_id: str, body: ScheduleUpdateBody, request: Request,
                                 user: dict = Depends(require_admin)):
@@ -450,6 +472,8 @@ async def admin_update_schedule(schedule_id: str, body: ScheduleUpdateBody, requ
         notified_count = await _notify_schedule_change(doc, existing)
 
     return {**doc, "notified_passengers": notified_count}
+
+
 @router.post("/admin/schedules/bulk-delete/preview")
 async def admin_bulk_delete_preview(body: BulkDeleteScheduleFilter, user: dict = Depends(require_admin)):
     """Return a count-only preview so admin can confirm before executing.
@@ -470,6 +494,8 @@ async def admin_bulk_delete_preview(body: BulkDeleteScheduleFilter, user: dict =
         "blocked": len(blocking_ids),
         "deletable": matched - len(blocking_ids),
     }
+
+
 @router.post("/admin/schedules/bulk-delete")
 async def admin_bulk_delete_execute(body: BulkDeleteScheduleFilter, request: Request,
                                     user: dict = Depends(require_admin)):

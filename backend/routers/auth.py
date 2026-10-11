@@ -1,20 +1,17 @@
 """Authentication, account recovery, and Google OAuth endpoints."""
 import httpx
-import logging
 import os
-import re
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Optional
 
 import bcrypt
 import jwt
 import pyotp
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field
 
-from core.config import BOOTSTRAP_ADMIN_PASSWORD, JWT_ALG, JWT_SECRET, db, logger
+from core.config import JWT_ALG, JWT_SECRET, db, logger
 from core.security import (
     _check_auth_throttle,
     _clear_auth_attempts,
@@ -36,6 +33,8 @@ router = APIRouter()
 LOGIN_MAX_ATTEMPTS_PER_IDENTIFIER = 5   # same IP + email within window
 LOGIN_MAX_ATTEMPTS_PER_IP = 20          # same IP across all emails within window
 LOGIN_WINDOW_SECONDS = 15 * 60          # 15 minutes
+
+
 async def _check_login_rate_limit(ip: str, email: str):
     """Raise 429 if this IP+email or this IP alone has exceeded failed-login thresholds."""
     window_start = utcnow() - timedelta(seconds=LOGIN_WINDOW_SECONDS)
@@ -62,6 +61,8 @@ async def _check_login_rate_limit(ip: str, email: str):
             detail="Too many failed login attempts from this network. Please try again later.",
             headers={"Retry-After": str(LOGIN_WINDOW_SECONDS)},
         )
+
+
 async def _record_login_failure(ip: str, email: str):
     try:
         await db.login_attempts.insert_one({
@@ -72,38 +73,60 @@ async def _record_login_failure(ip: str, email: str):
         })
     except Exception as e:
         logger.warning("record_login_failure failed: %s", e)
+
+
 async def _clear_login_attempts(ip: str, email: str):
     try:
         await db.login_attempts.delete_many({"identifier": f"{ip}:{email.lower()}"})
     except Exception as e:
         logger.warning("clear_login_attempts failed: %s", e)
+
+
 class RegisterBody(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8)
     full_name: str = Field(min_length=1)
     phone: Optional[str] = None
+
+
 class LoginBody(BaseModel):
     email: EmailStr
     password: str
+
+
 class TwoFASetupBody(BaseModel):
     password: str
+
+
 class TwoFAEnableBody(BaseModel):
     code: str = Field(min_length=6, max_length=6)
+
+
 class TwoFADisableBody(BaseModel):
     password: str
     code: str = Field(min_length=6, max_length=6)
+
+
 class TwoFAVerifyBody(BaseModel):
     challenge_token: str
     code: str = Field(min_length=6, max_length=6)
+
+
 class ForgotPasswordBody(BaseModel):
     email: EmailStr
+
+
 class ResetPasswordBody(BaseModel):
     token: str = Field(min_length=16)
     new_password: str = Field(min_length=8)
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: dict
+
+
 @router.post("/auth/register", response_model=TokenResponse)
 async def register(body: RegisterBody, request: Request):
     ip = _client_ip(request)
@@ -133,6 +156,8 @@ async def register(body: RegisterBody, request: Request):
     user_public = {k: v for k, v in doc.items() if k not in ("password_hash", "_id", "totp_secret")}
     user_public["has_password"] = bool(doc.get("password_hash"))
     return TokenResponse(access_token=issue_jwt(user_id, doc["email"]), user=user_public)
+
+
 async def _record_login(user: dict, ip: str) -> dict:
     """Rotate last-login fields: previous_login_* gets the prior values, and
     last_login_* is set to now/this-IP. Returns the updated user dict so the
@@ -151,6 +176,8 @@ async def _record_login(user: dict, ip: str) -> dict:
     await db.users.update_one({"id": user["id"]}, {"$set": update})
     user.update(update)
     return user
+
+
 @router.post("/auth/login")
 async def login(body: LoginBody, request: Request):
     ip = _client_ip(request)
@@ -185,6 +212,8 @@ async def login(body: LoginBody, request: Request):
     user_public = {k: v for k, v in user.items() if k not in ("password_hash", "_id", "totp_secret")}
     user_public["has_password"] = bool(user.get("password_hash"))
     return TokenResponse(access_token=issue_jwt(user["id"], user["email"]), user=user_public)
+
+
 @router.post("/auth/2fa/verify")
 async def verify_2fa(body: TwoFAVerifyBody, request: Request):
     ip = _client_ip(request)
@@ -218,6 +247,8 @@ async def verify_2fa(body: TwoFAVerifyBody, request: Request):
     user_public["has_password"] = bool(user.get("password_hash"))
     return TokenResponse(access_token=issue_jwt(user["id"], user["email"]), user=user_public)
 RESET_TOKEN_TTL_SECONDS = 60 * 60  # 1 hour
+
+
 @router.post("/auth/forgot-password")
 async def forgot_password(body: ForgotPasswordBody, request: Request):
     """Always returns 200 with the same generic message to avoid user enumeration.
@@ -265,6 +296,8 @@ async def forgot_password(body: ForgotPasswordBody, request: Request):
         except Exception as e:
             logger.warning("forgot-password email failed for %s: %s", email, e)
     return {"ok": True, "message": "If an account exists with that email, we've sent a reset link."}
+
+
 @router.post("/auth/reset-password")
 async def reset_password(body: ResetPasswordBody, request: Request):
     """Validate the reset token, apply the new password (strength-checked), mark token used."""
@@ -304,6 +337,8 @@ async def reset_password(body: ResetPasswordBody, request: Request):
     except Exception:
         pass
     return {"ok": True, "message": "Password updated. You can now sign in."}
+
+
 @router.post("/auth/2fa/setup")
 async def setup_2fa(body: TwoFASetupBody, user: dict = Depends(require_user)):
     # Re-verify password before generating secret
@@ -317,6 +352,8 @@ async def setup_2fa(body: TwoFASetupBody, user: dict = Depends(require_user)):
     issuer = "Qistna Express"
     uri = pyotp.TOTP(secret).provisioning_uri(name=user["email"], issuer_name=issuer)
     return {"secret": secret, "otpauth_uri": uri, "issuer": issuer}
+
+
 @router.post("/auth/2fa/enable")
 async def enable_2fa(body: TwoFAEnableBody, user: dict = Depends(require_user)):
     full = await db.users.find_one({"id": user["id"]})
@@ -329,6 +366,8 @@ async def enable_2fa(body: TwoFAEnableBody, user: dict = Depends(require_user)):
         raise HTTPException(401, "Invalid 2FA code — re-scan the QR and try again")
     await db.users.update_one({"id": user["id"]}, {"$set": {"totp_enabled": True}})
     return {"enabled": True}
+
+
 @router.post("/auth/2fa/disable")
 async def disable_2fa(body: TwoFADisableBody, user: dict = Depends(require_user)):
     full = await db.users.find_one({"id": user["id"]})
@@ -344,6 +383,8 @@ async def disable_2fa(body: TwoFADisableBody, user: dict = Depends(require_user)
         {"$set": {"totp_enabled": False}, "$unset": {"totp_secret": ""}},
     )
     return {"enabled": False}
+
+
 @router.get("/auth/me")
 async def me(user: dict = Depends(require_user)):
     # Enrich the /me payload with a `has_password` flag so the Dashboard can
@@ -351,11 +392,17 @@ async def me(user: dict = Depends(require_user)):
     full = await db.users.find_one({"id": user["id"]}, {"password_hash": 1})
     user["has_password"] = bool((full or {}).get("password_hash"))
     return user
+
+
 class ChangePasswordBody(BaseModel):
     current_password: str
     new_password: str = Field(min_length=8)
+
+
 class SetPasswordBody(BaseModel):
     new_password: str = Field(min_length=8)
+
+
 @router.post("/auth/set-password")
 async def set_password(body: SetPasswordBody, user: dict = Depends(require_user)):
     """First-time password creation for accounts without one.
@@ -388,6 +435,8 @@ async def set_password(body: SetPasswordBody, user: dict = Depends(require_user)
         "has_password": True,
         "message": "Password set. You can now sign in with email and password too.",
     }
+
+
 @router.post("/auth/change-password")
 async def change_password(body: ChangePasswordBody, user: dict = Depends(require_user)):
     """Authenticated user changes their own password.
@@ -422,9 +471,13 @@ async def change_password(body: ChangePasswordBody, user: dict = Depends(require
     return {"ok": True, "message": "Password updated. Please use the new password from now on."}
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
+
+
 class GoogleCallbackBody(BaseModel):
     code: str
     redirect_uri: str
+
+
 @router.post("/auth/google/callback")
 async def google_oauth_callback(body: GoogleCallbackBody):
     """Exchange a Google authorization code for our own JWT.

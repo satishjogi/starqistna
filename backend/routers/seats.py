@@ -14,6 +14,8 @@ router = APIRouter()
 class SeatLockBody(BaseModel):
     schedule_id: str
     seat_numbers: List[str]
+
+
 @router.post("/seats/lock")
 async def lock_seats(body: SeatLockBody, user: Optional[dict] = Depends(current_user)):
     """Attempts to lock given seats for 10 minutes using unique index. Returns failed seats if any."""
@@ -67,6 +69,8 @@ async def lock_seats(body: SeatLockBody, user: Optional[dict] = Depends(current_
         raise HTTPException(409, detail={"message": "Some seats unavailable", "failed_seats": failed})
 
     return {"lock_token": lock_token, "expires_at": expires_at.isoformat(), "seats": acquired}
+
+
 @router.post("/seats/release")
 async def release_seats(lock_token: str):
     await db.seat_locks.delete_many({"lock_token": lock_token, "status": "locked"})
