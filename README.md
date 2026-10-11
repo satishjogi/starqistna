@@ -38,12 +38,10 @@ Copy `backend/.env.example` to `backend/.env` and fill it in (the app refuses to
 
 ```
 pip install -r backend/requirements.txt
-cd backend && uvicorn server:app
 cd backend && python -m pytest tests/test_modular_routers.py
 ```
 
-Other tests under `backend/tests/` (and `tests/`) exercise a running API/DB. Frontend: `cd frontend && yarn start` / `yarn build`
-(scripts defined in `frontend/package.json`).
+Other tests under `backend/tests/` (and `tests/`) exercise a running API/DB. Frontend scripts (`start`, `build`, `test`) are defined in `frontend/package.json`; see `scripts/README.md` for how the app is served in deployment.
 
 ## Migration note
 
