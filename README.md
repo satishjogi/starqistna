@@ -6,8 +6,8 @@ Deployment is described in `scripts/README.md` and `scripts/deploy.sh`.
 ## Backend layout
 
 `backend/server.py` is the application entrypoint (`server:app`). It builds the `FastAPI` app, configures CORS,
-runs startup/shutdown tasks (seeding, migrations, index creation, payment reconciliation) and still contains
-the not-yet-extracted domains.
+and runs startup/shutdown tasks (seeding, migrations, index creation, payment reconciliation). Domain endpoints
+live in `backend/routers/`.
 
 | Module | Responsibility |
 | --- | --- |
@@ -20,17 +20,26 @@ the not-yet-extracted domains.
 | `routers/promo.py` | `POST /api/promo/validate`, `/api/admin/promo-codes*` |
 | `routers/feedback.py` | `POST /api/feedback`, `/api/admin/feedback*` |
 | `routers/admin_users.py` | `/api/admin/admins*` (invite, accept-invite, role, active, revoke) |
+| `routers/auth.py` | `/api/auth/*` (registration, login, 2FA, recovery, profile, Google OAuth) |
+| `routers/search.py` | `GET /api/search`, `/api/schedules/{schedule_id}`, `/api/popular/now` |
+| `routers/seats.py` | `POST /api/seats/lock`, `/api/seats/release` |
+| `routers/bookings.py` | `/api/bookings*`, boarding validation, admin booking statistics/list |
+| `routers/payments.py` | `/api/payments*`, Stripe webhook, payment reconciliation and admin payment/audit views |
+| `routers/routes.py` | `/api/admin/routes*` |
+| `routers/schedules.py` | `/api/admin/schedules*` |
+| `routers/bus_types.py` | `/api/bus-types`, `/api/admin/bus-types*` |
+| `routers/gohub.py` | Admin GoHub retry and probe endpoints |
+| `routers/settings.py` | `GET /api/settings`, `PATCH /api/admin/settings` |
 
-Still in `server.py` (to be extracted later): search, seats, bookings, Stripe/payments/reconciliation,
-GoHub/CTS, routes, schedules, bus types, app settings, auth endpoints, seeds/migrations/indexes.
+Shared multi-router lookups and ticket issuance live in `backend/services/`. Startup seed, migration, and index tasks remain in `server.py`.
 
 ### How routes are assembled
 
-Each router module defines `router = APIRouter()` with **no prefix**. `server.py` creates
-`api = APIRouter(prefix="/api")`, registers its own endpoints on it, calls `api.include_router(<module>.router)` for
-each extracted module, and finally `app.include_router(api)`. Every endpoint therefore keeps its `/api/...` path.
-Shared dependencies live in `core/` and are imported by both `server.py` and the routers, so routers never import
-`server.py` (no circular imports).
+Each router module defines `router = APIRouter()` with **no prefix**. To add a router, define its endpoints in
+`backend/routers/<domain>.py`, import that module in `server.py`, then call
+`api.include_router(<domain>_router.router)`. `server.py` creates `api = APIRouter(prefix="/api")` and finally calls
+`app.include_router(api)`, preserving all `/api/...` paths. Shared dependencies come from `core/` and shared
+business logic from `services/`; routers must not import `server.py`.
 
 ### Running and testing
 
@@ -45,5 +54,5 @@ Other tests under `backend/tests/` (and `tests/`) exercise a running API/DB. Fro
 
 ## Migration note
 
-This is phase 1 of backend modularization (no API or behavior changes). Later PRs will extract
-booking, search, payment, routes and schedules into routers once this foundation is merged.
+The extraction-only phases preserve existing API and business behavior. The next phase, after modularization
+stabilizes, is the separate route/schedule UX redesign; it is not part of this backend extraction.

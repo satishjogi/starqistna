@@ -26,6 +26,7 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(BACKEND / ".env")
 
 import server  # noqa: E402
+from routers.payments import _reconcile_one_transaction  # noqa: E402
 
 
 async def _run(args: argparse.Namespace) -> int:
@@ -60,7 +61,7 @@ async def _run(args: argparse.Namespace) -> int:
 
     finalized = 0
     for t in target_txns:
-        result = await server._reconcile_one_transaction(t)
+        result = await _reconcile_one_transaction(t)
         action = result.get("action", "?")
         icon = {"finalized": "✅", "already_finalized": "•", "still_pending": "⏳",
                 "stripe_error": "⚠️ ", "skip_missing_session_id": "-"}.get(action, "?")

@@ -1,7 +1,7 @@
 import React from "react";
 
 // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
-// Own Google OAuth (starqistna.com branded — not Emergent-managed).
+// Google OAuth branded for starqistna.com.
 // The Client ID is public-safe; the Client Secret lives on the backend.
 export default function GoogleAuthButton({ label = "Continue with Google", testId = "google-auth-btn" }) {
   const handleClick = () => {

@@ -22,9 +22,11 @@ os.environ["STRIPE_WEBHOOK_SECRET"] = TEST_SECRET
 
 from fastapi.testclient import TestClient  # noqa: E402
 import server  # noqa: E402
+from routers import payments as payments_router  # noqa: E402
 
 # Ensure the module-level cached secret matches (in case server was imported earlier).
 server.STRIPE_WEBHOOK_SECRET = TEST_SECRET
+payments_router.STRIPE_WEBHOOK_SECRET = TEST_SECRET
 
 client = TestClient(server.app)
 

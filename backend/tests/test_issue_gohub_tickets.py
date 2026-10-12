@@ -18,7 +18,7 @@ BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND))
 os.environ.setdefault("STRIPE_WEBHOOK_SECRET", "whsec_test")
 
-import server  # noqa: E402
+from services import gohub as gohub_service  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -89,8 +89,8 @@ def _run(coro):
 def test_issue_skips_when_gohub_disabled(monkeypatch):
     monkeypatch.setenv("GOHUB_ENABLED", "false")
     fdb = _bookings_setup()
-    monkeypatch.setattr(server, "db", fdb)
-    _run(server._issue_gohub_tickets("BK1"))
+    monkeypatch.setattr(gohub_service, "db", fdb)
+    _run(gohub_service._issue_gohub_tickets("BK1"))
     doc = fdb.bookings.docs[0]
     assert doc["gohub_status"] == "skipped"
     assert "GOHUB_ENABLED=false" in doc["gohub_skip_reason"]
@@ -100,8 +100,8 @@ def test_issue_skips_when_missing_cts_code(monkeypatch):
     monkeypatch.setenv("GOHUB_ENABLED", "true")
     fdb = _bookings_setup()
     fdb.terminals.docs[1].pop("cts_code")  # to_terminal has no code
-    monkeypatch.setattr(server, "db", fdb)
-    _run(server._issue_gohub_tickets("BK1"))
+    monkeypatch.setattr(gohub_service, "db", fdb)
+    _run(gohub_service._issue_gohub_tickets("BK1"))
     assert fdb.bookings.docs[0]["gohub_status"] == "skipped"
     assert "to_terminal.cts_code missing" in fdb.bookings.docs[0]["gohub_skip_reason"]
 
@@ -110,15 +110,15 @@ def test_issue_skips_when_missing_trip_no(monkeypatch):
     monkeypatch.setenv("GOHUB_ENABLED", "true")
     fdb = _bookings_setup()
     fdb.schedules.docs[0]["trip_no"] = ""
-    monkeypatch.setattr(server, "db", fdb)
-    _run(server._issue_gohub_tickets("BK1"))
+    monkeypatch.setattr(gohub_service, "db", fdb)
+    _run(gohub_service._issue_gohub_tickets("BK1"))
     assert fdb.bookings.docs[0]["gohub_status"] == "skipped"
 
 
 def test_issue_records_failure_on_gohub_error(monkeypatch):
     monkeypatch.setenv("GOHUB_ENABLED", "true")
     fdb = _bookings_setup()
-    monkeypatch.setattr(server, "db", fdb)
+    monkeypatch.setattr(gohub_service, "db", fdb)
 
     from gohub_client import GoHubError
 
@@ -128,7 +128,7 @@ def test_issue_records_failure_on_gohub_error(monkeypatch):
             raise GoHubError("12", "Online QR rate cannot be found")
 
     monkeypatch.setattr("gohub_client.GoHubClient", _FakeClient)
-    _run(server._issue_gohub_tickets("BK1"))
+    _run(gohub_service._issue_gohub_tickets("BK1"))
 
     doc = fdb.bookings.docs[0]
     assert doc["gohub_status"] == "failed"
@@ -139,7 +139,7 @@ def test_issue_records_failure_on_gohub_error(monkeypatch):
 def test_issue_success_persists_tickets(monkeypatch):
     monkeypatch.setenv("GOHUB_ENABLED", "true")
     fdb = _bookings_setup()
-    monkeypatch.setattr(server, "db", fdb)
+    monkeypatch.setattr(gohub_service, "db", fdb)
 
     captured: dict[str, Any] = {}
 
@@ -158,7 +158,7 @@ def test_issue_success_persists_tickets(monkeypatch):
             return b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
 
     monkeypatch.setattr("gohub_client.GoHubClient", _FakeClient)
-    _run(server._issue_gohub_tickets("BK1"))
+    _run(gohub_service._issue_gohub_tickets("BK1"))
 
     doc = fdb.bookings.docs[0]
     assert doc["gohub_status"] == "confirmed"
@@ -187,7 +187,7 @@ def test_issue_success_without_branded_image(monkeypatch):
     and skip the qr_image field so the frontend falls back gracefully."""
     monkeypatch.setenv("GOHUB_ENABLED", "true")
     fdb = _bookings_setup()
-    monkeypatch.setattr(server, "db", fdb)
+    monkeypatch.setattr(gohub_service, "db", fdb)
 
     class _FakeClient:
         def __init__(self, **_): pass
@@ -201,7 +201,7 @@ def test_issue_success_without_branded_image(monkeypatch):
             return None   # simulate image endpoint failure
 
     monkeypatch.setattr("gohub_client.GoHubClient", _FakeClient)
-    _run(server._issue_gohub_tickets("BK1"))
+    _run(gohub_service._issue_gohub_tickets("BK1"))
 
     doc = fdb.bookings.docs[0]
     assert doc["gohub_status"] == "confirmed"
@@ -214,7 +214,7 @@ def test_issue_never_raises_on_unexpected_exception(monkeypatch):
     """Never let an unexpected exception propagate back into the webhook path."""
     monkeypatch.setenv("GOHUB_ENABLED", "true")
     fdb = _bookings_setup()
-    monkeypatch.setattr(server, "db", fdb)
+    monkeypatch.setattr(gohub_service, "db", fdb)
 
     class _KaboomClient:
         def __init__(self, **_): pass
@@ -222,7 +222,7 @@ def test_issue_never_raises_on_unexpected_exception(monkeypatch):
             raise RuntimeError("boom")
 
     monkeypatch.setattr("gohub_client.GoHubClient", _KaboomClient)
-    _run(server._issue_gohub_tickets("BK1"))  # must NOT raise
+    _run(gohub_service._issue_gohub_tickets("BK1"))  # must NOT raise
 
     doc = fdb.bookings.docs[0]
     assert doc["gohub_status"] == "failed"
@@ -232,5 +232,5 @@ def test_issue_never_raises_on_unexpected_exception(monkeypatch):
 def test_issue_noop_when_booking_missing(monkeypatch):
     monkeypatch.setenv("GOHUB_ENABLED", "true")
     fdb = _FakeDB()  # no bookings
-    monkeypatch.setattr(server, "db", fdb)
-    _run(server._issue_gohub_tickets("BK_missing"))  # must not raise
+    monkeypatch.setattr(gohub_service, "db", fdb)
+    _run(gohub_service._issue_gohub_tickets("BK_missing"))  # must not raise
