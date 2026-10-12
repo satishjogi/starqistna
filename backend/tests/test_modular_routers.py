@@ -16,7 +16,6 @@ for k, v in {
 }.items():
     os.environ.setdefault(k, v)
 
-pytest.importorskip("emergentintegrations")
 import server  # noqa: E402
 
 EXPECTED = {

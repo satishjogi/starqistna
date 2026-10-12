@@ -6,12 +6,6 @@ from functools import lru_cache
 from typing import Optional
 
 import stripe as stripe_sdk
-from emergentintegrations.payments.stripe.checkout import (
-    StripeCheckout,
-    CheckoutSessionResponse,
-    CheckoutStatusResponse,
-    CheckoutSessionRequest,
-)
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -21,7 +15,7 @@ from core.config import db, logger, STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET
 from core.security import current_user, require_admin
 from core.utils import new_id, utcnow
 from services.gohub import _issue_gohub_tickets as issue_gohub_tickets
-from services.settings import _get_settings
+from services.settings import DEFAULT_SGD_TO_MYR, _get_settings
 
 router = APIRouter()
 
@@ -132,32 +126,35 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
     if body.gateway not in available_ids:
         raise HTTPException(400, f"Payment method '{body.gateway}' is not available")
 
-    host_url = str(request.base_url).rstrip("/")
-    webhook_url = f"{host_url}/api/webhook/stripe"
-    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
-
     origin = body.origin_url.rstrip("/")
     success_url = f"{origin}/payment/success?session_id={{CHECKOUT_SESSION_ID}}&booking_id={body.booking_id}"
     cancel_url = f"{origin}/payment/cancel?booking_id={body.booking_id}"
 
-    checkout_req = CheckoutSessionRequest(
-        amount=amount,
-        currency=BILLING_CURRENCY,
-        success_url=success_url,
-        cancel_url=cancel_url,
-        payment_methods=[body.gateway],  # card | grabpay | fpx
-        metadata={
-            "booking_id": body.booking_id,
-            "booking_reference": booking["reference"],
-            "user_id": booking.get("user_id") or "guest",
-            "payment_method": body.gateway,
-            "display_currency": display_currency,
-            "display_total": str(display_total),
-            "fx_rate": str(fx_rate),
-        },
-    )
+    stripe_sdk.api_key = STRIPE_API_KEY
     try:
-        session: CheckoutSessionResponse = await stripe_checkout.create_checkout_session(checkout_req)
+        session = await stripe_sdk.checkout.Session.create_async(
+            mode="payment",
+            success_url=success_url,
+            cancel_url=cancel_url,
+            payment_method_types=[body.gateway],
+            line_items=[{
+                "price_data": {
+                    "currency": BILLING_CURRENCY,
+                    "product_data": {"name": f"Bus booking {booking['reference']}"},
+                    "unit_amount": int(round(amount * 100)),
+                },
+                "quantity": 1,
+            }],
+            metadata={
+                "booking_id": body.booking_id,
+                "booking_reference": booking["reference"],
+                "user_id": booking.get("user_id") or "guest",
+                "payment_method": body.gateway,
+                "display_currency": display_currency,
+                "display_total": str(display_total),
+                "fx_rate": str(fx_rate),
+            },
+        )
     except Exception as e:
         # Stripe surfaces payment-method activation issues with a helpful message
         # (e.g. "The payment method type provided: grabpay is invalid"). Return
@@ -181,7 +178,7 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
     await db.payment_transactions.insert_one(
         {
             "id": new_id(),
-            "session_id": session.session_id,
+            "session_id": session.id,
             "booking_id": body.booking_id,
             "amount": amount,                  # MYR — what Stripe actually charges
             "currency": BILLING_CURRENCY,
@@ -199,7 +196,7 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
         }
     )
 
-    return {"url": session.url, "session_id": session.session_id}
+    return {"url": session.url, "session_id": session.id}
 
 
 @router.get("/payments/status/{session_id}")
@@ -213,11 +210,9 @@ async def payment_status(session_id: str, request: Request):
         booking = await db.bookings.find_one({"id": txn["booking_id"]}, {"_id": 0})
         return {"payment_status": "paid", "status": txn.get("status"), "booking": booking}
 
-    host_url = str(request.base_url).rstrip("/")
-    webhook_url = f"{host_url}/api/webhook/stripe"
-    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+    stripe_sdk.api_key = STRIPE_API_KEY
     try:
-        check: CheckoutStatusResponse = await stripe_checkout.get_checkout_status(session_id)
+        check = await stripe_sdk.checkout.Session.retrieve_async(session_id)
     except Exception as e:
         logger.warning("Stripe status fetch failed for %s: %s", session_id, e)
         booking = await db.bookings.find_one({"id": txn["booking_id"]}, {"_id": 0})
@@ -256,9 +251,9 @@ async def _reconcile_one_transaction(txn: dict) -> dict:
         return {"session_id": session_id, "action": "already_finalized"}
 
     # Reuse a fresh StripeCheckout — no request needed here.
-    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
+    stripe_sdk.api_key = STRIPE_API_KEY
     try:
-        check: CheckoutStatusResponse = await stripe_checkout.get_checkout_status(session_id)
+        check = await stripe_sdk.checkout.Session.retrieve_async(session_id)
     except Exception as e:  # noqa: BLE001
         logger.warning("reconcile: stripe status fetch failed for %s: %s", session_id, e)
         return {"session_id": session_id, "action": "stripe_error", "error": str(e)[:200]}

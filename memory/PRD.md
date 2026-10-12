@@ -57,7 +57,7 @@ Build a complete online bus booking system where visitors can search departure t
 
 ## Implemented (2026-04-19 · iteration 3)
 - **Passenger counter UI polish** — `−`, number, `+` on Home page are now tightly grouped & centered (desktop + mobile)
-- **Google social login (Emergent-managed)** — `POST /api/auth/google/session`, auto-link by email, 2FA still enforced; `GoogleAuthButton` on `/login` and `/register` + `/auth/callback` page.
+- **Google social login** — `POST /api/auth/google/callback` exchanges Google's authorization code and auto-links by email; 2FA is still enforced. `GoogleAuthButton` is available on `/login` and `/register`, with `/auth/callback` handling the redirect.
 - **My Next Trip widget** on Dashboard — countdown, QR, "View ticket" + "Add to calendar" (.ics) CTAs.
 - **Tighter horizontal gutters** — `px-6 md:px-12 lg:px-20` → `px-4 md:px-6 lg:px-10` site-wide.
 - **Stripe webhook signature verification** — `STRIPE_WEBHOOK_SECRET` env flag; when set the webhook rejects unsigned / bad-signature requests.
@@ -174,7 +174,7 @@ Build a complete online bus booking system where visitors can search departure t
 - **Admin recovery + Google OAuth swap + deploy automation**
   - New `backend/scripts/reset_admin_password.py` CLI tool + `RESET_ADMIN_ON_BOOT=true` env flag to unblock a locked-out super-admin without dropping the DB.
   - `_seed_admin()` now detects env↔DB password drift on every boot and logs a big recovery WARNING.
-  - Google Auth switched from Emergent-managed to own OAuth Client (Client ID: `426301430644-uq2k54p7l3les28e4t3okeltl3ucu2n3.apps.googleusercontent.com`). Users see "Continue to starqistna.com" branded consent. Backend endpoint `POST /api/auth/google/callback` exchanges code+client_secret with Google, verifies id_token via `google-auth`, upserts user (auto-link by email), issues JWT. Respects existing 2FA.
+  - Google Auth uses a first-party OAuth client; users see "Continue to starqistna.com" branded consent. Backend endpoint `POST /api/auth/google/callback` exchanges code+client_secret with Google, verifies id_token via `google-auth`, upserts user (auto-link by email), issues JWT. Respects existing 2FA.
   - New `scripts/deploy.sh` (repo root) — idempotent VPS deploy: syncs `.env.example` → `.env` (never overwrites values), pip install, yarn build, systemctl restart backend + reload nginx.
   - `.env.example` files committed (with real public Client ID baked in). `.gitignore` cleaned + exception `!**/.env.example` added.
   - Removed the admin demo credentials hint from `Login.jsx` (no more `ADMIN DEMO · admin@starqistna.com / Admin@123` visible on production).

@@ -10,7 +10,7 @@
 | Auth | JWT (HS256) + bcrypt + optional TOTP 2FA |
 | Payments | Stripe Checkout (Card · GrabPay · FPX) |
 | Email | Resend (transactional) |
-| Social Auth | Emergent-managed Google OAuth (preview) |
+| Social Auth | Google OAuth authorization-code flow |
 | QR | `qrcode` Python lib (email attachment) + `qrcode.react` (frontend) |
 
 ## File structure

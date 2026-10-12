@@ -1,64 +1,37 @@
-"""
-Test Google OAuth (Emergent-managed) social login endpoints
-Tests for iteration 3: Google social login feature
-"""
+"""Tests for Google OAuth authorization-code login and existing auth flows."""
 import pytest
 import requests
 import os
 
-BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', '').rstrip('/')
+BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', 'http://localhost:8001').rstrip('/')
 
 class TestGoogleOAuthEndpoint:
-    """Tests for POST /api/auth/google/session endpoint"""
+    """Tests for POST /api/auth/google/callback endpoint"""
     
-    def test_google_session_endpoint_exists(self):
-        """Verify the endpoint exists and accepts POST requests"""
+    def test_google_callback_endpoint_exists(self):
+        """Missing authorization code is rejected by request validation."""
         response = requests.post(
-            f"{BASE_URL}/api/auth/google/session",
-            json={"session_id": "invalid-test-session-id"},
+            f"{BASE_URL}/api/auth/google/callback",
+            json={"redirect_uri": "http://localhost:3000/auth/callback"},
             headers={"Content-Type": "application/json"}
         )
-        # Should return 401 for invalid session, not 404 (endpoint exists)
-        assert response.status_code in [401, 502], f"Expected 401 or 502, got {response.status_code}: {response.text}"
-        print(f"PASS: POST /api/auth/google/session endpoint exists, returns {response.status_code} for invalid session")
+        assert response.status_code == 422, response.text
     
-    def test_google_session_invalid_session_returns_401(self):
-        """Invalid session_id should return 401"""
+    def test_google_callback_invalid_code_is_rejected(self):
         response = requests.post(
-            f"{BASE_URL}/api/auth/google/session",
-            json={"session_id": "completely-fake-session-id-12345"},
+            f"{BASE_URL}/api/auth/google/callback",
+            json={"code": "invalid-test-code", "redirect_uri": "http://localhost:3000/auth/callback"},
             headers={"Content-Type": "application/json"}
         )
-        # 401 for invalid session OR 502 if auth provider unavailable
-        assert response.status_code in [401, 502], f"Expected 401 or 502, got {response.status_code}"
-        if response.status_code == 401:
-            data = response.json()
-            assert "detail" in data or "message" in data or "Invalid" in str(data)
-            print("PASS: Invalid session_id returns 401 with appropriate error message")
-        else:
-            print("PASS: Auth provider unavailable (502) - acceptable for test environment")
+        assert response.status_code in [401, 500, 502], response.text
     
-    def test_google_session_missing_session_id_returns_422(self):
-        """Missing session_id in body should return 422 validation error"""
+    def test_google_callback_missing_redirect_uri_returns_422(self):
         response = requests.post(
-            f"{BASE_URL}/api/auth/google/session",
-            json={},
+            f"{BASE_URL}/api/auth/google/callback",
+            json={"code": "test-code"},
             headers={"Content-Type": "application/json"}
         )
-        # Pydantic validation should return 422 for missing required field
-        assert response.status_code == 422, f"Expected 422 for missing session_id, got {response.status_code}"
-        print("PASS: Missing session_id returns 422 validation error")
-    
-    def test_google_session_empty_session_id_returns_422(self):
-        """Empty string session_id should return 422 or 401"""
-        response = requests.post(
-            f"{BASE_URL}/api/auth/google/session",
-            json={"session_id": ""},
-            headers={"Content-Type": "application/json"}
-        )
-        # Empty string might pass validation but fail at auth provider
-        assert response.status_code in [401, 422, 502], f"Expected 401/422/502, got {response.status_code}"
-        print(f"PASS: Empty session_id returns {response.status_code}")
+        assert response.status_code == 422, response.text
 
 
 class TestExistingEmailPasswordAuth:

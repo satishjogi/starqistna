@@ -33,7 +33,6 @@ respx==0.22.0
 
 # Payments
 stripe==15.0.1
-emergentintegrations==0.1.0
 
 # Email (Resend) + QR codes for tickets
 resend==2.29.0
