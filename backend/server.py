@@ -2166,6 +2166,7 @@ async def payment_status(session_id: str, request: Request):
 RECONCILE_MIN_AGE_SECONDS = 30
 RECONCILE_MAX_AGE_SECONDS = 60 * 60 * 24  # ignore anything older than 24h
 RECONCILE_INTERVAL_SECONDS = 60
+FINALIZATION_LOCK_TTL_SECONDS = 300
 
 
 async def _reconcile_one_transaction(txn: dict) -> dict:
@@ -2433,26 +2434,75 @@ async def _issue_gohub_tickets(booking_id: str) -> None:
 async def _finalize_booking(booking_id: str, session_id: str):
     """Idempotent: mark seats booked, confirm booking, increment promo use, mark txn finalized.
 
+    An atomic transaction-row claim serializes webhook, polling, and reconciliation.
+    Promo redemptions are recorded on the promo document so a retry after a partial
+    failure cannot increment its usage counter twice.
     The confirmation email is dispatched from inside ``_issue_gohub_tickets``
     once the CTS attempt completes — so the email always reflects the final
     boarding-pass state (real CTS QR vs. fallback).
     """
-    await db.seat_locks.update_many(
-        {"booking_id": booking_id, "status": "locked"},
-        {"$set": {"status": "booked", "expires_at": None}},
+    now = utcnow()
+    stale_before = (now - timedelta(seconds=FINALIZATION_LOCK_TTL_SECONDS)).isoformat()
+    claim = await db.payment_transactions.update_one(
+        {
+            "session_id": session_id,
+            "booking_finalized": {"$ne": True},
+            "$or": [
+                {"finalization_status": {"$ne": "processing"}},
+                {"finalization_started_at": {"$lt": stale_before}},
+            ],
+        },
+        {"$set": {
+            "finalization_status": "processing",
+            "finalization_started_at": now.isoformat(),
+        }},
     )
-    await db.bookings.update_one(
-        {"id": booking_id},
-        {"$set": {"status": "confirmed", "payment_status": "paid", "paid_at": utcnow().isoformat()}},
-    )
-    booking = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
-    promo = (booking or {}).get("pricing", {}).get("promo")
-    if promo and promo.get("code"):
-        await db.promo_codes.update_one({"code": promo["code"]}, {"$inc": {"used_count": 1}})
-    await db.payment_transactions.update_one(
-        {"session_id": session_id},
-        {"$set": {"booking_finalized": True, "payment_status": "paid", "status": "complete"}},
-    )
+    if not claim.modified_count:
+        return
+
+    try:
+        await db.seat_locks.update_many(
+            {"booking_id": booking_id, "status": "locked"},
+            {"$set": {"status": "booked", "expires_at": None}},
+        )
+        await db.bookings.update_one(
+            {"id": booking_id},
+            {"$set": {"status": "confirmed", "payment_status": "paid", "paid_at": utcnow().isoformat()}},
+        )
+        booking = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+        promo = (booking or {}).get("pricing", {}).get("promo")
+        if promo and promo.get("code"):
+            await db.promo_codes.update_one(
+                {
+                    "code": promo["code"],
+                    "redemption_booking_ids": {"$ne": booking_id},
+                },
+                {
+                    "$addToSet": {"redemption_booking_ids": booking_id},
+                    "$inc": {"used_count": 1},
+                },
+            )
+        await db.payment_transactions.update_one(
+            {"session_id": session_id},
+            {
+                "$set": {
+                    "booking_finalized": True,
+                    "payment_status": "paid",
+                    "status": "complete",
+                    "finalization_status": "complete",
+                },
+                "$unset": {"finalization_started_at": ""},
+            },
+        )
+    except Exception:
+        await db.payment_transactions.update_one(
+            {"session_id": session_id, "booking_finalized": {"$ne": True}},
+            {
+                "$set": {"finalization_status": "failed"},
+                "$unset": {"finalization_started_at": ""},
+            },
+        )
+        raise
     if booking:
         # Fire-and-forget CTS QR issuance — includes the confirmation email dispatch.
         asyncio.create_task(_issue_gohub_tickets(booking_id))
