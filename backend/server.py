@@ -179,9 +179,7 @@ async def log_audit(
     """Record an admin action to the audit_logs collection."""
     ip = None
     if request is not None:
-        # Respect X-Forwarded-For if present (behind proxy/ingress)
-        fwd = request.headers.get("x-forwarded-for")
-        ip = (fwd.split(",")[0].strip() if fwd else None) or (request.client.host if request.client else None)
+        ip = _client_ip(request)
     try:
         await db.audit_logs.insert_one({
             "id": new_id(),
@@ -206,11 +204,16 @@ LOGIN_WINDOW_SECONDS = 15 * 60          # 15 minutes
 
 
 def _client_ip(request: Optional[Request]) -> str:
+    """Client IP. X-Forwarded-For is honoured only when TRUST_PROXY_HEADERS is
+    enabled (i.e. we sit behind a proxy that overwrites the header); otherwise
+    a client could spoof it to dodge rate limits and forge audit entries."""
     if request is None:
         return "unknown"
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
+    if os.environ.get("TRUST_PROXY_HEADERS", "").strip().lower() in ("1", "true", "yes"):
+        fwd = request.headers.get("x-forwarded-for")
+        if fwd:
+            # The right-most entry is the one appended by our own proxy.
+            return fwd.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 
@@ -4775,7 +4778,22 @@ async def root():
 
 @api.get("/health")
 async def health():
+    """Liveness: the process is up."""
     return {"status": "ok", "time": utcnow().isoformat()}
+
+
+@api.get("/ready")
+async def ready():
+    """Readiness: MongoDB reachable and the seat-uniqueness index present."""
+    try:
+        await db.command("ping")
+        idx = await db.seat_locks.index_information()
+    except Exception as e:  # noqa: BLE001
+        logger.error("readiness check failed: %s", e)
+        return JSONResponse(status_code=503, content={"status": "unavailable"})
+    if "uniq_bus_instance_seat_active" not in idx:
+        return JSONResponse(status_code=503, content={"status": "unavailable", "reason": "seat_index_missing"})
+    return {"status": "ready", "time": utcnow().isoformat()}
 
 
 app.include_router(api)
@@ -4794,8 +4812,11 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def on_start():
-    if os.environ.get("APP_ENV", "").strip().lower() in ("production", "prod") and not STRIPE_WEBHOOK_SECRET:
-        raise RuntimeError("STRIPE_WEBHOOK_SECRET must be set in production")
+    if os.environ.get("APP_ENV", "").strip().lower() in ("production", "prod"):
+        if not STRIPE_WEBHOOK_SECRET:
+            raise RuntimeError("STRIPE_WEBHOOK_SECRET must be set in production")
+        if not os.environ.get("CORS_ORIGINS", "").strip() or os.environ.get("CORS_ORIGINS", "").strip() == "*":
+            raise RuntimeError("CORS_ORIGINS must list explicit origins in production")
     # Run bus_instance_id backfill BEFORE _ensure_indexes so the new unique
     # index on (bus_instance_id, seat_number) has valid data to key on.
     await _seed_terminals()

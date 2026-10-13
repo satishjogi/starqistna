@@ -248,3 +248,27 @@ def test_index_failure_fails_closed(monkeypatch):
     monkeypatch.setattr(server, "db", db)
     with pytest.raises(RuntimeError):
         _run(server._ensure_indexes())
+
+
+# ---------- Phase 3 hardening ----------
+def test_client_ip_ignores_forwarded_header_unless_trusted(monkeypatch):
+    req = type("R", (), {"headers": {"x-forwarded-for": "6.6.6.6, 10.0.0.1"},
+                         "client": type("C", (), {"host": "9.9.9.9"})()})()
+    monkeypatch.delenv("TRUST_PROXY_HEADERS", raising=False)
+    assert server._client_ip(req) == "9.9.9.9"
+    monkeypatch.setenv("TRUST_PROXY_HEADERS", "true")
+    assert server._client_ip(req) == "10.0.0.1"
+
+
+def test_ready_reports_503_when_db_down(monkeypatch):
+    class _D:
+        async def command(self, *a):
+            raise RuntimeError("down")
+
+    monkeypatch.setattr(server, "db", _D())
+    assert _run(server.ready()).status_code == 503
+
+
+def test_email_escapes_passenger_name():
+    import email_service
+    assert email_service._esc("<script>") == "&lt;script&gt;"
