@@ -126,6 +126,7 @@ export default function Passengers() {
         contact_email: email,
         contact_phone: phone,
         promo_code: promo?.code || undefined,
+        lock_token: flow.lock_token,
         // When the customer picked a specific segment on a route-linked schedule,
         // pass the pickup/drop-off terminal IDs so the backend applies the right
         // pairing fare and records the sold segment on the booking.
