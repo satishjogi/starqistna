@@ -29,7 +29,11 @@ class _FakeCollection:
                 continue
             actual = document.get(key)
             if isinstance(expected, dict):
-                if "$ne" in expected and actual == expected["$ne"]:
+                if "$ne" in expected:
+                    banned = expected["$ne"]
+                    if actual == banned or (isinstance(actual, list) and banned in actual):
+                        return False
+                if "$exists" in expected and (key in document) != expected["$exists"]:
                     return False
                 if "$lt" in expected and (actual is None or actual >= expected["$lt"]):
                     return False
@@ -61,8 +65,8 @@ class _FakeCollection:
                 doc.setdefault(key, [])
                 if value not in doc[key]:
                     doc[key].append(value)
-            return type("UpdateResult", (), {"modified_count": 1})()
-        return type("UpdateResult", (), {"modified_count": 0})()
+            return type("UpdateResult", (), {"modified_count": 1, "matched_count": 1})()
+        return type("UpdateResult", (), {"modified_count": 0, "matched_count": 0})()
 
     async def update_many(self, query, update):
         for doc in self.docs:

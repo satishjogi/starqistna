@@ -1844,7 +1844,7 @@ async def cancellation_quote(booking_id: str, user: dict = Depends(require_user)
     refund_currency = (pricing.get("currency") or "myr").upper()
     if eligible and float(pricing.get("total", 0)) > 0:
         txn = await db.payment_transactions.find_one(
-            {"booking_id": booking_id, "payment_status": "paid"},
+            {"booking_id": booking_id, "payment_status": "paid", "duplicate_payment": {"$ne": True}},
             sort=[("created_at", -1)],
         )
         if txn:
@@ -2056,6 +2056,63 @@ async def payment_options(
     }
 
 
+PAYMENT_ATTEMPT_REUSE_SECONDS = 60 * 60 * 23   # Stripe sessions live 24h
+PAYMENT_PLACEHOLDER_TTL_SECONDS = 120
+
+
+async def _claim_payment_attempt(booking: dict, gateway: str) -> dict:
+    """Atomically claim the single active payment attempt for a booking.
+
+    Returns {"url", "session_id"} to reuse an existing open session, or
+    {"placeholder_id"} for a freshly claimed attempt the caller must fill in.
+    """
+    booking_id = booking["id"]
+    now = utcnow()
+    for _ in range(3):
+        placeholder_id = f"pending:{new_id()}"
+        try:
+            await db.payment_transactions.insert_one({
+                "id": new_id(),
+                "session_id": placeholder_id,
+                "booking_id": booking_id,
+                "payment_method": gateway,
+                "user_id": booking.get("user_id"),
+                "user_email": booking["contact_email"],
+                "payment_status": "initiated",
+                "status": "initiated",
+                "active": True,
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            })
+            return {"placeholder_id": placeholder_id}
+        except DuplicateKeyError:
+            pass
+        active = await db.payment_transactions.find_one(
+            {"booking_id": booking_id, "active": True}, {"_id": 0}
+        )
+        if not active:
+            continue
+        age = (now - datetime.fromisoformat(active["created_at"])).total_seconds()
+        placeholder = str(active.get("session_id", "")).startswith("pending:")
+        if placeholder and age < PAYMENT_PLACEHOLDER_TTL_SECONDS:
+            raise HTTPException(409, "A payment attempt for this booking is already being started")
+        if (not placeholder and active.get("checkout_url")
+                and active.get("payment_method") == gateway
+                and age < PAYMENT_ATTEMPT_REUSE_SECONDS):
+            return {"url": active["checkout_url"], "session_id": active["session_id"]}
+        # Stale placeholder, expired session, or a different payment method:
+        # retire it. A late payment on a superseded session is still caught by
+        # the duplicate-payment guard in _finalize_booking.
+        if placeholder:
+            await db.payment_transactions.delete_one({"session_id": active["session_id"]})
+        else:
+            await db.payment_transactions.update_one(
+                {"session_id": active["session_id"]},
+                {"$set": {"active": False, "superseded_at": now.isoformat()}},
+            )
+    raise HTTPException(409, "Could not start a payment attempt, please retry")
+
+
 @api.post("/payments/checkout")
 async def create_checkout(body: CheckoutBody, request: Request, user: Optional[dict] = Depends(current_user)):
     booking = await db.bookings.find_one({"id": body.booking_id}, {"_id": 0})
@@ -2086,6 +2143,14 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
     available_ids = {o["id"] for o in _payment_options_for(BILLING_CURRENCY) if o["available"]}
     if body.gateway not in available_ids:
         raise HTTPException(400, f"Payment method '{body.gateway}' is not available")
+
+    # One active payment attempt per booking. A partial unique index on
+    # (booking_id) for active rows makes the claim below atomic, so duplicate or
+    # concurrent requests cannot create parallel Stripe sessions.
+    reuse = await _claim_payment_attempt(booking, body.gateway)
+    if reuse.get("url"):
+        return {"url": reuse["url"], "session_id": reuse["session_id"]}
+    placeholder_id = reuse["placeholder_id"]
 
     host_url = str(request.base_url).rstrip("/")
     webhook_url = f"{host_url}/api/webhook/stripe"
@@ -2118,6 +2183,7 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
     try:
         session: CheckoutSessionResponse = await stripe_checkout.create_checkout_session(checkout_req)
     except Exception as e:
+        await db.payment_transactions.delete_one({"session_id": placeholder_id})
         # Stripe surfaces payment-method activation issues with a helpful message
         # (e.g. "The payment method type provided: grabpay is invalid"). Return
         # the exact message so the frontend can guide the operator to enable it
@@ -2137,26 +2203,20 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
             )
         raise HTTPException(502, detail={"message": f"Could not start Stripe checkout: {msg}"})
 
-    await db.payment_transactions.insert_one(
-        {
-            "id": new_id(),
+    await db.payment_transactions.update_one(
+        {"session_id": placeholder_id},
+        {"$set": {
             "session_id": session.session_id,
-            "booking_id": body.booking_id,
+            "checkout_url": session.url,
             "receipt_token_hash": hashlib.sha256(receipt_token.encode()).hexdigest(),
             "amount": amount,                  # MYR — what Stripe actually charges
             "currency": BILLING_CURRENCY,
             "display_amount": display_total,   # original price as shown to customer
             "display_currency": display_currency,
             "fx_rate": fx_rate,
-            "payment_method": body.gateway,
-            "user_id": booking.get("user_id"),
-            "user_email": booking["contact_email"],
-            "payment_status": "initiated",
-            "status": "initiated",
             "metadata": {"booking_reference": booking["reference"], "payment_method": body.gateway},
-            "created_at": utcnow().isoformat(),
             "updated_at": utcnow().isoformat(),
-        }
+        }},
     )
 
     return {"url": session.url, "session_id": session.session_id}
@@ -2246,7 +2306,7 @@ async def _reconcile_one_transaction(txn: dict) -> dict:
     """Ask Stripe for the current status of a single session and finalize
     the booking if it's now paid. Returns a short summary dict for logging."""
     session_id = txn.get("session_id")
-    if not session_id:
+    if not session_id or str(session_id).startswith("pending:"):
         return {"session_id": None, "action": "skip_missing_session_id"}
     if txn.get("booking_finalized"):
         return {"session_id": session_id, "action": "already_finalized"}
@@ -2533,6 +2593,34 @@ async def _finalize_booking(booking_id: str, session_id: str):
     if not claim.modified_count:
         return
 
+    # Only one payment session may confirm a booking. A second paid session
+    # (e.g. a superseded checkout paid late) is flagged for refund/review.
+    owner = await db.bookings.update_one(
+        {"id": booking_id, "$or": [
+            {"paid_session_id": {"$exists": False}},
+            {"paid_session_id": session_id},
+        ]},
+        {"$set": {"paid_session_id": session_id}},
+    )
+    if not owner.matched_count:
+        logger.error(
+            "duplicate payment: session=%s paid for already-confirmed booking=%s — needs refund review",
+            session_id, booking_id,
+        )
+        await db.payment_transactions.update_one(
+            {"session_id": session_id},
+            {"$set": {
+                "booking_finalized": True,
+                "payment_status": "paid",
+                "status": "complete",
+                "finalization_status": "duplicate_payment",
+                "duplicate_payment": True,
+                "needs_refund_review": True,
+                "active": False,
+            }, "$unset": {"finalization_started_at": ""}},
+        )
+        return
+
     try:
         await db.seat_locks.update_many(
             {"booking_id": booking_id, "status": "locked"},
@@ -2563,6 +2651,7 @@ async def _finalize_booking(booking_id: str, session_id: str):
                     "payment_status": "paid",
                     "status": "complete",
                     "finalization_status": "complete",
+                    "active": False,
                 },
                 "$unset": {"finalization_started_at": ""},
             },
@@ -4508,6 +4597,12 @@ async def _ensure_indexes():
     # Shared seat pool per physical bus — see _migrate_bus_instance_ids docstring.
     await db.schedules.create_index([("bus_instance_id", ASCENDING)])
     await db.payment_transactions.create_index([("session_id", ASCENDING)], unique=True)
+    await db.payment_transactions.create_index(
+        [("booking_id", ASCENDING)],
+        unique=True,
+        partialFilterExpression={"active": True},
+        name="uniq_active_payment_per_booking",
+    )
     await db.promo_codes.create_index([("code", ASCENDING)], unique=True)
     await db.audit_logs.create_index([("created_at", ASCENDING)])
     await db.audit_logs.create_index([("resource", ASCENDING), ("action", ASCENDING)])
