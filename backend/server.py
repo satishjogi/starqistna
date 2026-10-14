@@ -15,6 +15,7 @@ import logging
 import uuid
 import asyncio
 import hashlib
+import hmac
 import re
 import secrets
 import bcrypt
@@ -153,6 +154,13 @@ async def require_admin(user: dict = Depends(require_user)) -> dict:
     return user
 
 
+async def require_scanner(user: dict = Depends(require_user)) -> dict:
+    """Gate scanners (role gate_scanner) and admins may validate boarding passes."""
+    if not (user.get("is_admin") or user.get("role") == "gate_scanner"):
+        raise HTTPException(403, "Gate scanner access required")
+    return user
+
+
 async def require_super_admin(user: dict = Depends(require_admin)) -> dict:
     """Super-admins manage other admins. Regular admins cannot."""
     if user.get("role") != "super_admin":
@@ -171,9 +179,7 @@ async def log_audit(
     """Record an admin action to the audit_logs collection."""
     ip = None
     if request is not None:
-        # Respect X-Forwarded-For if present (behind proxy/ingress)
-        fwd = request.headers.get("x-forwarded-for")
-        ip = (fwd.split(",")[0].strip() if fwd else None) or (request.client.host if request.client else None)
+        ip = _client_ip(request)
     try:
         await db.audit_logs.insert_one({
             "id": new_id(),
@@ -198,11 +204,16 @@ LOGIN_WINDOW_SECONDS = 15 * 60          # 15 minutes
 
 
 def _client_ip(request: Optional[Request]) -> str:
+    """Client IP. X-Forwarded-For is honoured only when TRUST_PROXY_HEADERS is
+    enabled (i.e. we sit behind a proxy that overwrites the header); otherwise
+    a client could spoof it to dodge rate limits and forge audit entries."""
     if request is None:
         return "unknown"
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
+    if os.environ.get("TRUST_PROXY_HEADERS", "").strip().lower() in ("1", "true", "yes"):
+        fwd = request.headers.get("x-forwarded-for")
+        if fwd:
+            # The right-most entry is the one appended by our own proxy.
+            return fwd.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 
@@ -1670,11 +1681,12 @@ _BOARDING_KEY_WARNED = False
 
 
 @api.post("/boarding/validate")
-async def boarding_validate(body: BoardingValidateBody, request: Request):
-    """Endpoint for gate-scanners. QR encodes only the booking `reference` (plain text).
-    The scanner posts the reference here; we return boarding details and atomically
-    mark as boarded. Requires the `X-Boarding-Key` header when BOARDING_API_KEY is
-    configured, and is rate-limited per IP to slow reference enumeration."""
+async def boarding_validate(
+    body: BoardingValidateBody,
+    request: Request,
+    user: dict = Depends(require_scanner),
+):
+    """Gate-scanner endpoint. QR encodes only the booking `reference`."""
     global _BOARDING_KEY_WARNED
     if BOARDING_API_KEY:
         if (request.headers.get("x-boarding-key") or "") != BOARDING_API_KEY:
@@ -1684,10 +1696,11 @@ async def boarding_validate(body: BoardingValidateBody, request: Request):
         logger.warning("BOARDING_API_KEY is not set — /api/boarding/validate is OPEN. "
                        "Set it before production use.")
 
-    ip = _client_ip(request)
-    await _check_auth_throttle(ip, "boarding", max_attempts=60, window_seconds=600,
-                                label="boarding validation")
-    await _record_auth_failure(ip, "boarding", window_seconds=600)
+    if request is not None:
+        ip = _client_ip(request)
+        await _check_auth_throttle(ip, "boarding", max_attempts=60, window_seconds=600,
+                                    label="boarding validation")
+        await _record_auth_failure(ip, "boarding", window_seconds=600)
 
     ref = body.reference.strip().upper()
     booking = await db.bookings.find_one({"reference": ref}, {"_id": 0})
@@ -1695,39 +1708,29 @@ async def boarding_validate(body: BoardingValidateBody, request: Request):
         return {"valid": False, "reason": "not_found", "reference": ref}
     if booking.get("status") != "confirmed":
         return {"valid": False, "reason": "not_confirmed", "status": booking.get("status"), "reference": ref}
-    sched = await db.schedules.find_one({"id": booking["schedule_id"]}, {"_id": 0})
-    # Already boarded?
     already = bool(booking.get("boarded_at"))
     if body.mark_boarded and not already:
-        await db.bookings.update_one(
-            {"reference": ref},
-            {"$set": {"boarded_at": utcnow().isoformat(), "boarded_gate": body.gate}},
+        now_iso = utcnow().isoformat()
+        res = await db.bookings.update_one(
+            {"reference": ref, "boarded_at": {"$in": [None, ""]}},
+            {"$set": {"boarded_at": now_iso, "boarded_gate": body.gate}},
         )
-        booking["boarded_at"] = utcnow().isoformat()
-        booking["boarded_gate"] = body.gate
-    # Return only what a gate reader needs — never IC/passport numbers or
-    # contact details (PDPA minimisation).
-    slim_schedule = None
-    if sched:
-        slim_schedule = {
-            "id": sched.get("id"),
-            "from_terminal_id": sched.get("from_terminal_id"),
-            "to_terminal_id": sched.get("to_terminal_id"),
-            "departure_date": sched.get("departure_date"),
-            "departure_time": sched.get("departure_time"),
-            "bus_type": sched.get("bus_type"),
-            "bus_operator": sched.get("bus_operator"),
-        }
-    slim_passengers = [
-        {"name": p.get("name"), "category": p.get("category"), "seat_number": p.get("seat_number")}
-        for p in booking.get("passengers", [])
-    ]
+        if res.modified_count:
+            booking["boarded_at"] = now_iso
+            await log_audit(user, "board", "booking", booking["id"], {"gate": body.gate}, request)
+        else:
+            already = True
+            fresh = await db.bookings.find_one({"reference": ref}, {"_id": 0, "boarded_at": 1})
+            booking["boarded_at"] = (fresh or {}).get("boarded_at")
+
     return {
         "valid": True,
         "already_boarded": already,
         "reference": ref,
-        "schedule": slim_schedule,
-        "passengers": slim_passengers,
+        "passengers": [
+            {"name": p.get("name"), "category": p.get("category"), "seat_number": p.get("seat_number")}
+            for p in booking.get("passengers", [])
+        ],
         "seats": booking.get("seats", []),
         "from_terminal_id": booking.get("from_terminal_id"),
         "to_terminal_id": booking.get("to_terminal_id"),
@@ -1735,6 +1738,9 @@ async def boarding_validate(body: BoardingValidateBody, request: Request):
         "departure_time": booking.get("departure_time"),
         "boarded_at": booking.get("boarded_at"),
     }
+
+
+BOOKING_PAYMENT_HOLD_MINUTES = 30
 
 
 @api.post("/bookings")
@@ -1766,23 +1772,24 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
             raise HTTPException(400, f"seat_assignments references passenger_index {sa.passenger_index} "
                                      f"but only {len(body.passengers)} passenger(s) provided")
 
-    # The booking MUST be bound to the lock token issued by /seats/lock —
-    # otherwise anyone could complete a booking on seats another customer is
-    # mid-checkout on ("seat sniping").
     if not body.lock_token:
         raise HTTPException(400, "lock_token is required — obtain it from /seats/lock first")
-    current_locks = await db.seat_locks.find(
-        {"schedule_id": body.schedule_id, "seat_number": {"$in": seats}},
-        {"_id": 0},
-    ).to_list(50)
-    lock_map = {lk["seat_number"]: lk for lk in current_locks}
-    missing = [s for s in seats if s not in lock_map or lock_map[s]["status"] != "locked"]
-    if missing:
-        raise HTTPException(409, detail={"message": "Seat locks missing or expired", "seats": missing})
-    not_mine = [s for s in seats if lock_map[s].get("lock_token") != body.lock_token]
-    if not_mine:
-        raise HTTPException(409, detail={"message": "These seats are locked by another session",
-                                         "seats": not_mine})
+    lock_owners = [f"guest:{body.lock_token}"]
+    if user:
+        lock_owners.append(user["id"])
+    lock_filter = {
+        "lock_token": body.lock_token,
+        "schedule_id": body.schedule_id,
+        "seat_number": {"$in": seats},
+        "status": "locked",
+        "owner": {"$in": lock_owners},
+        "booking_id": {"$exists": False},
+    }
+    live = await db.seat_locks.count_documents(
+        {**lock_filter, "expires_at": {"$gt": utcnow().isoformat()}}
+    )
+    if live != len(seats):
+        raise HTTPException(409, detail={"message": "Seat locks missing, expired or already used", "seats": seats})
 
     # Resolve the specific segment (pickup/drop-off + fare) — for route-linked
     # schedules this returns a sched-shaped dict with pairing fares; otherwise
@@ -1825,15 +1832,25 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
         "payment_status": "pending",
         "created_at": utcnow().isoformat(),
     }
-    await db.bookings.insert_one(doc)
 
-    # Attach booking_id to OUR locks only (token-scoped — never touch other
-    # sessions' lock rows).
-    await db.seat_locks.update_many(
-        {"schedule_id": body.schedule_id, "seat_number": {"$in": seats},
-         "lock_token": body.lock_token},
-        {"$set": {"booking_id": booking_id}},
+    # Atomically claim the exact locks issued to this caller. The filter only
+    # matches unexpired, unclaimed locks, so a lock can back at most one booking.
+    # The hold is extended to give the customer time to pay.
+    claimed = await db.seat_locks.update_many(
+        {**lock_filter, "expires_at": {"$gt": utcnow().isoformat()}},
+        {"$set": {
+            "booking_id": booking_id,
+            "expires_at": (utcnow() + timedelta(minutes=BOOKING_PAYMENT_HOLD_MINUTES)).isoformat(),
+        }},
     )
+    if claimed.modified_count != len(seats):
+        await db.seat_locks.update_many({"booking_id": booking_id}, {"$unset": {"booking_id": ""}})
+        raise HTTPException(409, detail={"message": "Seat locks missing, expired or already used", "seats": seats})
+    try:
+        await db.bookings.insert_one(doc)
+    except Exception:
+        await db.seat_locks.update_many({"booking_id": booking_id}, {"$unset": {"booking_id": ""}})
+        raise
 
     return {k: v for k, v in doc.items() if k != "_id"}
 
@@ -1922,7 +1939,7 @@ async def cancellation_quote(booking_id: str, user: dict = Depends(require_user)
     refund_currency = (pricing.get("currency") or "myr").upper()
     if eligible and float(pricing.get("total", 0)) > 0:
         txn = await db.payment_transactions.find_one(
-            {"booking_id": booking_id, "payment_status": "paid"},
+            {"booking_id": booking_id, "payment_status": "paid", "duplicate_payment": {"$ne": True}},
             sort=[("created_at", -1)],
         )
         if txn:
@@ -2166,6 +2183,63 @@ async def payment_options(
     }
 
 
+PAYMENT_ATTEMPT_REUSE_SECONDS = 60 * 60 * 23   # Stripe sessions live 24h
+PAYMENT_PLACEHOLDER_TTL_SECONDS = 120
+
+
+async def _claim_payment_attempt(booking: dict, gateway: str) -> dict:
+    """Atomically claim the single active payment attempt for a booking.
+
+    Returns {"url", "session_id"} to reuse an existing open session, or
+    {"placeholder_id"} for a freshly claimed attempt the caller must fill in.
+    """
+    booking_id = booking["id"]
+    now = utcnow()
+    for _ in range(3):
+        placeholder_id = f"pending:{new_id()}"
+        try:
+            await db.payment_transactions.insert_one({
+                "id": new_id(),
+                "session_id": placeholder_id,
+                "booking_id": booking_id,
+                "payment_method": gateway,
+                "user_id": booking.get("user_id"),
+                "user_email": booking["contact_email"],
+                "payment_status": "initiated",
+                "status": "initiated",
+                "active": True,
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            })
+            return {"placeholder_id": placeholder_id}
+        except DuplicateKeyError:
+            pass
+        active = await db.payment_transactions.find_one(
+            {"booking_id": booking_id, "active": True}, {"_id": 0}
+        )
+        if not active:
+            continue
+        age = (now - datetime.fromisoformat(active["created_at"])).total_seconds()
+        placeholder = str(active.get("session_id", "")).startswith("pending:")
+        if placeholder and age < PAYMENT_PLACEHOLDER_TTL_SECONDS:
+            raise HTTPException(409, "A payment attempt for this booking is already being started")
+        if (not placeholder and active.get("checkout_url")
+                and active.get("payment_method") == gateway
+                and age < PAYMENT_ATTEMPT_REUSE_SECONDS):
+            return {"url": active["checkout_url"], "session_id": active["session_id"]}
+        # Stale placeholder, expired session, or a different payment method:
+        # retire it. A late payment on a superseded session is still caught by
+        # the duplicate-payment guard in _finalize_booking.
+        if placeholder:
+            await db.payment_transactions.delete_one({"session_id": active["session_id"]})
+        else:
+            await db.payment_transactions.update_one(
+                {"session_id": active["session_id"]},
+                {"$set": {"active": False, "superseded_at": now.isoformat()}},
+            )
+    raise HTTPException(409, "Could not start a payment attempt, please retry")
+
+
 @api.post("/payments/checkout")
 async def create_checkout(body: CheckoutBody, request: Request, user: Optional[dict] = Depends(current_user)):
     # Throttle checkout session creation — each call creates a real Stripe
@@ -2203,12 +2277,24 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
     if body.gateway not in available_ids:
         raise HTTPException(400, f"Payment method '{body.gateway}' is not available")
 
+    # One active payment attempt per booking. A partial unique index on
+    # (booking_id) for active rows makes the claim below atomic, so duplicate or
+    # concurrent requests cannot create parallel Stripe sessions.
+    reuse = await _claim_payment_attempt(booking, body.gateway)
+    if reuse.get("url"):
+        return {"url": reuse["url"], "session_id": reuse["session_id"]}
+    placeholder_id = reuse["placeholder_id"]
+
     host_url = str(request.base_url).rstrip("/")
     webhook_url = f"{host_url}/api/webhook/stripe"
     stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
 
     origin = body.origin_url.rstrip("/")
-    success_url = f"{origin}/payment/success?session_id={{CHECKOUT_SESSION_ID}}&booking_id={body.booking_id}"
+    receipt_token = secrets.token_urlsafe(32)
+    success_url = (
+        f"{origin}/payment/success?session_id={{CHECKOUT_SESSION_ID}}"
+        f"&booking_id={body.booking_id}&receipt={receipt_token}"
+    )
     cancel_url = f"{origin}/payment/cancel?booking_id={body.booking_id}"
 
     checkout_req = CheckoutSessionRequest(
@@ -2230,6 +2316,7 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
     try:
         session: CheckoutSessionResponse = await stripe_checkout.create_checkout_session(checkout_req)
     except Exception as e:
+        await db.payment_transactions.delete_one({"session_id": placeholder_id})
         # Stripe surfaces payment-method activation issues with a helpful message
         # (e.g. "The payment method type provided: grabpay is invalid"). Return
         # the exact message so the frontend can guide the operator to enable it
@@ -2249,40 +2336,64 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
             )
         raise HTTPException(502, detail={"message": f"Could not start Stripe checkout: {msg}"})
 
-    await db.payment_transactions.insert_one(
-        {
-            "id": new_id(),
+    await db.payment_transactions.update_one(
+        {"session_id": placeholder_id},
+        {"$set": {
             "session_id": session.session_id,
-            "booking_id": body.booking_id,
+            "checkout_url": session.url,
+            "receipt_token_hash": hashlib.sha256(receipt_token.encode()).hexdigest(),
             "amount": amount,                  # MYR — what Stripe actually charges
             "currency": BILLING_CURRENCY,
             "display_amount": display_total,   # original price as shown to customer
             "display_currency": display_currency,
             "fx_rate": fx_rate,
-            "payment_method": body.gateway,
-            "user_id": booking.get("user_id"),
-            "user_email": booking["contact_email"],
-            "payment_status": "initiated",
-            "status": "initiated",
             "metadata": {"booking_reference": booking["reference"], "payment_method": body.gateway},
-            "created_at": utcnow().isoformat(),
             "updated_at": utcnow().isoformat(),
-        }
+        }},
     )
 
     return {"url": session.url, "session_id": session.session_id}
 
 
+def _receipt_authorized(txn: dict, receipt: Optional[str], user: Optional[dict]) -> bool:
+    if user and (user.get("is_admin") or (txn.get("user_id") and user.get("id") == txn["user_id"])):
+        return True
+    expected = txn.get("receipt_token_hash")
+    if not receipt or not expected:
+        return False
+    return hmac.compare_digest(hashlib.sha256(receipt.encode()).hexdigest(), expected)
+
+
+def _status_payload(payment_status, status, booking) -> dict:
+    payload = {"payment_status": payment_status, "status": status}
+    if booking is not None:
+        payload["booking"] = booking
+    return payload
+
+
 @api.get("/payments/status/{session_id}")
-async def payment_status(session_id: str, request: Request):
+async def payment_status(
+    session_id: str,
+    request: Request,
+    receipt: Optional[str] = None,
+    user: Optional[dict] = Depends(current_user),
+):
     txn = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
     if not txn:
         raise HTTPException(404, "Transaction not found")
 
+    # The booking is only returned to its owner, an admin, or a caller holding
+    # the receipt token issued at checkout. A session ID alone gets status only.
+    authorized = _receipt_authorized(txn, receipt, user)
+
+    async def _booking_for(txn_doc):
+        if not authorized:
+            return None
+        return await db.bookings.find_one({"id": txn_doc["booking_id"]}, {"_id": 0})
+
     # If already finalized, return current state
     if txn.get("payment_status") == "paid" and txn.get("booking_finalized"):
-        booking = await db.bookings.find_one({"id": txn["booking_id"]}, {"_id": 0})
-        return {"payment_status": "paid", "status": txn.get("status"), "booking": booking}
+        return _status_payload("paid", txn.get("status"), await _booking_for(txn))
 
     host_url = str(request.base_url).rstrip("/")
     webhook_url = f"{host_url}/api/webhook/stripe"
@@ -2291,13 +2402,11 @@ async def payment_status(session_id: str, request: Request):
         check: CheckoutStatusResponse = await stripe_checkout.get_checkout_status(session_id)
     except Exception as e:
         logger.warning("Stripe status fetch failed for %s: %s", session_id, e)
-        booking = await db.bookings.find_one({"id": txn["booking_id"]}, {"_id": 0})
-        return {
-            "payment_status": txn.get("payment_status", "unknown"),
-            "status": txn.get("status", "unknown"),
-            "booking": booking,
-            "error": "stripe_status_unavailable",
-        }
+        payload = _status_payload(
+            txn.get("payment_status", "unknown"), txn.get("status", "unknown"), await _booking_for(txn)
+        )
+        payload["error"] = "stripe_status_unavailable"
+        return payload
 
     updates = {
         "status": check.status,
@@ -2310,8 +2419,7 @@ async def payment_status(session_id: str, request: Request):
     if check.payment_status == "paid" and not txn.get("booking_finalized"):
         await _finalize_booking(txn["booking_id"], session_id)
 
-    booking = await db.bookings.find_one({"id": txn["booking_id"]}, {"_id": 0})
-    return {"payment_status": check.payment_status, "status": check.status, "booking": booking}
+    return _status_payload(check.payment_status, check.status, await _booking_for(txn))
 
 
 # ---------- Stuck-payment reconciliation --------------------------------
@@ -2324,13 +2432,14 @@ async def payment_status(session_id: str, request: Request):
 RECONCILE_MIN_AGE_SECONDS = 30
 RECONCILE_MAX_AGE_SECONDS = 60 * 60 * 24  # ignore anything older than 24h
 RECONCILE_INTERVAL_SECONDS = 60
+FINALIZATION_LOCK_TTL_SECONDS = 300
 
 
 async def _reconcile_one_transaction(txn: dict) -> dict:
     """Ask Stripe for the current status of a single session and finalize
     the booking if it's now paid. Returns a short summary dict for logging."""
     session_id = txn.get("session_id")
-    if not session_id:
+    if not session_id or str(session_id).startswith("pending:"):
         return {"session_id": None, "action": "skip_missing_session_id"}
     if txn.get("booking_finalized"):
         return {"session_id": session_id, "action": "already_finalized"}
@@ -2607,105 +2716,183 @@ async def _issue_gohub_tickets(booking_id: str) -> None:
 async def _finalize_booking(booking_id: str, session_id: str) -> bool:
     """Idempotent: mark seats booked, confirm booking, increment promo use, mark txn finalized.
 
-    Two safety properties:
-
-    1. ATOMIC CLAIM — the ``booking_finalized`` flag is flipped via a single
-       ``find_one_and_update`` guarded on its previous value. If the webhook,
-       the client status-poll and the background reconciler all fire at once,
-       exactly ONE caller wins; the others get ``False`` and stop. This kills
-       the double-promo-increment / double-email / double-CTS-call race.
-
-    2. SEAT RE-VERIFICATION — seat locks expire after 10 minutes, but async
-       payment methods (GrabPay/FPX) can settle hours later. If a lock row was
-       swept and the seat re-sold in the meantime, we must NOT blindly confirm.
-       For each seat we first try to flip our own lock to ``booked``; if the
-       row is gone we try to re-claim the seat via a fresh insert (the partial
-       unique index on (bus_instance_id, seat_number) makes this atomic). A
-       seat that fails both was re-sold → the booking is marked
-       ``seat_conflict`` (paid but NOT confirmed) for ops to refund, instead of
-       double-booking the seat.
-
+    An atomic transaction-row claim serializes webhook, polling, and reconciliation.
+    Promo redemptions are recorded on the promo document so a retry after a partial
+    failure cannot increment its usage counter twice. Before confirmation, every
+    seat is re-verified so an expired lock cannot lead to a double booking.
     The confirmation email is dispatched from inside ``_issue_gohub_tickets``
     once the CTS attempt completes — so the email always reflects the final
     boarding-pass state (real CTS QR vs. fallback).
     """
-    # --- 1. Atomic claim ------------------------------------------------------
-    claimed = await db.payment_transactions.find_one_and_update(
-        {"session_id": session_id, "booking_finalized": {"$ne": True}},
-        {"$set": {"booking_finalized": True, "finalized_at": utcnow().isoformat(),
-                  "payment_status": "paid", "status": "complete",
-                  "updated_at": utcnow().isoformat()}},
+    now = utcnow()
+    stale_before = (now - timedelta(seconds=FINALIZATION_LOCK_TTL_SECONDS)).isoformat()
+    claim = await db.payment_transactions.update_one(
+        {
+            "session_id": session_id,
+            "booking_finalized": {"$ne": True},
+            "$or": [
+                {"finalization_status": {"$ne": "processing"}},
+                {"finalization_started_at": {"$lt": stale_before}},
+            ],
+        },
+        {"$set": {
+            "finalization_status": "processing",
+            "finalization_started_at": now.isoformat(),
+        }},
     )
-    if not claimed:
-        logger.info("finalize: session=%s already finalized by another path — skipping", session_id)
+    if not claim.modified_count:
         return False
 
-    # --- 2. Seat re-verification ----------------------------------------------
-    booking = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
-    if not booking:
-        logger.error("finalize: booking %s missing for paid session=%s", booking_id, session_id)
-        return False
+    try:
+        booking = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+        if not booking:
+            logger.error("finalize: booking %s missing for paid session=%s", booking_id, session_id)
+            await db.payment_transactions.update_one(
+                {"session_id": session_id},
+                {"$set": {"finalization_status": "failed"},
+                 "$unset": {"finalization_started_at": ""}},
+            )
+            return False
 
-    sched = await db.schedules.find_one({"id": booking.get("schedule_id")}, {"_id": 0})
-    bus_instance_id = (sched or {}).get("bus_instance_id") or booking.get("schedule_id")
-    lost_seats: list = []
-    for sn in booking.get("seats", []):
-        res = await db.seat_locks.update_one(
-            {"booking_id": booking_id, "seat_number": sn, "status": "locked"},
+        # Only one payment session may confirm a booking. A second paid session
+        # (e.g. a superseded checkout paid late) is flagged for refund/review.
+        owner = await db.bookings.update_one(
+            {"id": booking_id, "$or": [
+                {"paid_session_id": {"$exists": False}},
+                {"paid_session_id": session_id},
+            ]},
+            {"$set": {"paid_session_id": session_id}},
+        )
+        if not owner.matched_count:
+            logger.error(
+                "duplicate payment: session=%s paid for already-confirmed booking=%s — needs refund review",
+                session_id, booking_id,
+            )
+            await db.payment_transactions.update_one(
+                {"session_id": session_id},
+                {"$set": {
+                    "booking_finalized": True,
+                    "payment_status": "paid",
+                    "status": "complete",
+                    "finalization_status": "duplicate_payment",
+                    "duplicate_payment": True,
+                    "needs_refund_review": True,
+                    "active": False,
+                }, "$unset": {"finalization_started_at": ""}},
+            )
+            return False
+
+        # --- Seat re-verification ----------------------------------------------
+        booking_seats = booking.get("seats", [])
+        schedule = None
+        if booking_seats:
+            schedule = await db.schedules.find_one({"id": booking.get("schedule_id")}, {"_id": 0})
+        bus_instance_id = (schedule or {}).get("bus_instance_id") or booking.get("schedule_id")
+        lost_seats = []
+        for seat_number in booking_seats:
+            result = await db.seat_locks.update_one(
+                {"booking_id": booking_id, "seat_number": seat_number, "status": "locked"},
+                {"$set": {"status": "booked", "expires_at": None}},
+            )
+            if result.matched_count:
+                continue
+
+            existing = await db.seat_locks.find_one(
+                {"booking_id": booking_id, "seat_number": seat_number, "status": "booked"}
+            )
+            if existing:
+                continue
+
+            try:
+                await db.seat_locks.insert_one({
+                    "id": new_id(),
+                    "schedule_id": booking["schedule_id"],
+                    "bus_instance_id": bus_instance_id,
+                    "seat_number": seat_number,
+                    "status": "booked",
+                    "owner": booking.get("user_id") or f"guest:{booking.get('contact_email')}",
+                    "booking_id": booking_id,
+                    "expires_at": None,
+                    "created_at": utcnow().isoformat(),
+                    "reclaimed_at_finalize": True,
+                })
+                logger.warning("finalize: re-claimed expired seat %s for booking %s", seat_number, booking_id)
+            except DuplicateKeyError:
+                lost_seats.append(seat_number)
+
+        if lost_seats:
+            await db.bookings.update_one(
+                {"id": booking_id},
+                {"$set": {
+                    "status": "seat_conflict",
+                    "payment_status": "paid",
+                    "seat_conflict_seats": lost_seats,
+                    "needs_ops_action": True,
+                    "seat_conflict_at": utcnow().isoformat(),
+                }},
+            )
+            await db.payment_transactions.update_one(
+                {"session_id": session_id},
+                {"$set": {
+                    "booking_finalized": True,
+                    "payment_status": "paid",
+                    "status": "complete",
+                    "finalization_status": "seat_conflict",
+                    "needs_ops_action": True,
+                    "active": False,
+                }, "$unset": {"finalization_started_at": ""}},
+            )
+            logger.critical(
+                "finalize: SEAT CONFLICT booking=%s session=%s lost_seats=%s — customer PAID but seat "
+                "was re-sold. Refund/reseat required.", booking_id, session_id, lost_seats)
+            return False
+
+        await db.seat_locks.update_many(
+            {"booking_id": booking_id, "status": "locked"},
             {"$set": {"status": "booked", "expires_at": None}},
         )
-        if res.matched_count:
-            continue  # normal path — our lock was still alive
-        # Lock row is gone (expired + swept). If a booked lock for this booking
-        # already exists, we're done (idempotent retry). Otherwise re-claim.
-        existing = await db.seat_locks.find_one(
-            {"booking_id": booking_id, "seat_number": sn, "status": "booked"})
-        if existing:
-            continue
-        try:
-            await db.seat_locks.insert_one({
-                "id": new_id(),
-                "schedule_id": booking["schedule_id"],
-                "bus_instance_id": bus_instance_id,
-                "seat_number": sn,
-                "status": "booked",
-                "owner": booking.get("user_id") or f"guest:{booking.get('contact_email')}",
-                "booking_id": booking_id,
-                "expires_at": None,
-                "created_at": utcnow().isoformat(),
-                "reclaimed_at_finalize": True,
-            })
-            logger.warning("finalize: re-claimed expired seat %s for booking %s", sn, booking_id)
-        except DuplicateKeyError:
-            lost_seats.append(sn)
-
-    if lost_seats:
-        # Paid, but the seat was re-sold while the lock lapsed. Do NOT confirm —
-        # flag for ops to refund + reseat. The unique index guarantees we never
-        # double-book; this booking simply can't be honoured as-is.
         await db.bookings.update_one(
             {"id": booking_id},
-            {"$set": {"status": "seat_conflict",
-                      "payment_status": "paid",
-                      "seat_conflict_seats": lost_seats,
-                      "needs_ops_action": True,
-                      "seat_conflict_at": utcnow().isoformat()}},
+            {"$set": {"status": "confirmed", "payment_status": "paid", "paid_at": utcnow().isoformat()}},
         )
-        logger.critical(
-            "finalize: SEAT CONFLICT booking=%s session=%s lost_seats=%s — customer PAID but seat "
-            "was re-sold. Refund/reseat required.", booking_id, session_id, lost_seats)
-        return False
-
-    # --- 3. Confirm -----------------------------------------------------------
-    await db.bookings.update_one(
-        {"id": booking_id},
-        {"$set": {"status": "confirmed", "payment_status": "paid", "paid_at": utcnow().isoformat()}},
-    )
-    promo = (booking or {}).get("pricing", {}).get("promo")
-    if promo and promo.get("code"):
-        await db.promo_codes.update_one({"code": promo["code"]}, {"$inc": {"used_count": 1}})
-    # Fire-and-forget CTS QR issuance — includes the confirmation email dispatch.
-    asyncio.create_task(_issue_gohub_tickets(booking_id))
+        booking = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+        promo = (booking or {}).get("pricing", {}).get("promo")
+        if promo and promo.get("code"):
+            await db.promo_codes.update_one(
+                {
+                    "code": promo["code"],
+                    "redemption_booking_ids": {"$ne": booking_id},
+                },
+                {
+                    "$addToSet": {"redemption_booking_ids": booking_id},
+                    "$inc": {"used_count": 1},
+                },
+            )
+        await db.payment_transactions.update_one(
+            {"session_id": session_id},
+            {
+                "$set": {
+                    "booking_finalized": True,
+                    "payment_status": "paid",
+                    "status": "complete",
+                    "finalization_status": "complete",
+                    "active": False,
+                },
+                "$unset": {"finalization_started_at": ""},
+            },
+        )
+    except Exception:
+        await db.payment_transactions.update_one(
+            {"session_id": session_id, "booking_finalized": {"$ne": True}},
+            {
+                "$set": {"finalization_status": "failed"},
+                "$unset": {"finalization_started_at": ""},
+            },
+        )
+        raise
+    if booking:
+        # Fire-and-forget CTS QR issuance — includes the confirmation email dispatch.
+        asyncio.create_task(_issue_gohub_tickets(booking_id))
     return True
 
 
@@ -2745,44 +2932,28 @@ async def stripe_webhook(request: Request):
 
     # 1. Parse + verify signature.
     event_dict: Optional[dict] = None
-    if STRIPE_WEBHOOK_SECRET:
-        if not sig:
-            logger.warning("stripe_webhook: missing Stripe-Signature header")
-            return JSONResponse(status_code=400, content={"error": "missing_signature"})
-        try:
-            event = stripe_sdk.Webhook.construct_event(
-                body_bytes, sig, STRIPE_WEBHOOK_SECRET
-            )
-            event_dict = event.to_dict() if hasattr(event, "to_dict") else dict(event)
-        except stripe_sdk.error.SignatureVerificationError as e:
-            logger.warning("stripe_webhook: signature verification failed: %s", e)
-            return JSONResponse(status_code=400, content={"error": "invalid_signature"})
-        except ValueError as e:
-            # Invalid payload — return 400 so Stripe knows the body is malformed.
-            logger.warning("stripe_webhook: invalid payload: %s", e)
-            return JSONResponse(status_code=400, content={"error": "invalid_payload"})
-        except Exception as e:
-            # Any other verification-layer error: log and return 400 (do not fail 500).
-            logger.exception("stripe_webhook: verification error: %s", e)
-            return JSONResponse(status_code=400, content={"error": "verification_error"})
-    else:
-        # No secret configured. In production this is a hard misconfiguration —
-        # fail CLOSED (503 so Stripe keeps retrying and ops notices) rather
-        # than accepting forgeable events. In dev/preview, accept unverified
-        # so local testing works without a signing secret.
-        if os.environ.get("APP_ENV", "").strip().lower() == "production":
-            logger.error("stripe_webhook: STRIPE_WEBHOOK_SECRET missing in production — refusing event")
-            return JSONResponse(status_code=503, content={"error": "webhook_not_configured"})
-        logger.warning(
-            "stripe_webhook: STRIPE_WEBHOOK_SECRET is not set — accepting event without verification"
+    if not STRIPE_WEBHOOK_SECRET:
+        logger.error("stripe_webhook: STRIPE_WEBHOOK_SECRET is not configured — rejecting event")
+        return JSONResponse(status_code=503, content={"error": "webhook_not_configured"})
+    if not sig:
+        logger.warning("stripe_webhook: missing Stripe-Signature header")
+        return JSONResponse(status_code=400, content={"error": "missing_signature"})
+    try:
+        event = stripe_sdk.Webhook.construct_event(
+            body_bytes, sig, STRIPE_WEBHOOK_SECRET
         )
-        try:
-            import json as _json
-            event_dict = _json.loads(body_bytes.decode("utf-8"))
-        except Exception as e:
-            logger.exception("stripe_webhook: could not parse payload: %s", e)
-            # Still return 200 so Stripe stops retrying garbage.
-            return JSONResponse(status_code=200, content={"ok": True, "warning": "unparsable"})
+        event_dict = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+    except stripe_sdk.error.SignatureVerificationError as e:
+        logger.warning("stripe_webhook: signature verification failed: %s", e)
+        return JSONResponse(status_code=400, content={"error": "invalid_signature"})
+    except ValueError as e:
+        # Invalid payload — return 400 so Stripe knows the body is malformed.
+        logger.warning("stripe_webhook: invalid payload: %s", e)
+        return JSONResponse(status_code=400, content={"error": "invalid_payload"})
+    except Exception as e:
+        # Any other verification-layer error: log and return 400 (do not fail 500).
+        logger.exception("stripe_webhook: verification error: %s", e)
+        return JSONResponse(status_code=400, content={"error": "verification_error"})
 
     # 2. From here on, ALWAYS return 200 — business errors must not disable the endpoint.
     try:
@@ -4637,7 +4808,6 @@ async def _ensure_indexes():
     # to be independent), the index build fails. In that case: log a warning,
     # keep the legacy `uniq_schedule_seat_active` index in place, and let the
     # operator resolve manually with `scripts/find_duplicate_seat_locks.py`.
-    new_lock_index_ok = False
     try:
         await db.seat_locks.create_index(
             [("bus_instance_id", ASCENDING), ("seat_number", ASCENDING)],
@@ -4645,30 +4815,22 @@ async def _ensure_indexes():
             partialFilterExpression={"status": {"$in": ["locked", "booked"]}},
             name="uniq_bus_instance_seat_active",
         )
-        new_lock_index_ok = True
     except DuplicateKeyError as e:
-        logger.warning(
-            "\n" + ("=" * 78) + "\n"
-            "  Legacy duplicate seat_locks detected — uniq_bus_instance_seat_active NOT built.\n"
-            "  Backend will keep running with the legacy (schedule_id, seat_number) index.\n"
-            "  Cross-sibling seat sharing is enforced in application code — DB-level guard\n"
-            "  is off until conflicts are resolved.\n"
-            "\n"
-            "  To inspect + fix:\n"
-            "    cd ~/app/backend && python scripts/find_duplicate_seat_locks.py\n"
-            "    (add --release-expired to unlock stale non-booked locks; use --help for more)\n"
-            "\n"
-            f"  First conflict: {e.details.get('keyValue') if hasattr(e, 'details') else str(e)[:150]}\n"
-            + ("=" * 78)
+        # Fail closed: never accept live bookings without the shared-seat guarantee.
+        first = e.details.get("keyValue") if getattr(e, "details", None) else str(e)[:150]
+        logger.critical(
+            "Legacy duplicate seat_locks detected — uniq_bus_instance_seat_active NOT built. "
+            "Refusing to start. Run `cd ~/app/backend && python scripts/find_duplicate_seat_locks.py` "
+            "(--release-expired to unlock stale non-booked locks). First conflict: %s", first,
         )
-    # Only drop the legacy index if the new one was built — otherwise we'd
-    # leave the seat-locks collection with NO uniqueness at all.
-    if new_lock_index_ok:
-        for stale in ("uniq_schedule_seat_active",):
-            try:
-                await db.seat_locks.drop_index(stale)
-            except Exception:
-                pass
+        raise RuntimeError(
+            "Required seat uniqueness index uniq_bus_instance_seat_active could not be created"
+        ) from e
+    # The new index is in place, so the legacy schedule-level index is redundant.
+    try:
+        await db.seat_locks.drop_index("uniq_schedule_seat_active")
+    except Exception:
+        pass
     await db.users.create_index([("email", ASCENDING)], unique=True)
     await db.bookings.create_index([("user_id", ASCENDING)])
     await db.bookings.create_index([("reference", ASCENDING)], unique=True)
@@ -4682,6 +4844,12 @@ async def _ensure_indexes():
     # Shared seat pool per physical bus — see _migrate_bus_instance_ids docstring.
     await db.schedules.create_index([("bus_instance_id", ASCENDING)])
     await db.payment_transactions.create_index([("session_id", ASCENDING)], unique=True)
+    await db.payment_transactions.create_index(
+        [("booking_id", ASCENDING)],
+        unique=True,
+        partialFilterExpression={"active": True},
+        name="uniq_active_payment_per_booking",
+    )
     await db.promo_codes.create_index([("code", ASCENDING)], unique=True)
     await db.audit_logs.create_index([("created_at", ASCENDING)])
     await db.audit_logs.create_index([("resource", ASCENDING), ("action", ASCENDING)])
@@ -4854,7 +5022,22 @@ async def root():
 
 @api.get("/health")
 async def health():
+    """Liveness: the process is up."""
     return {"status": "ok", "time": utcnow().isoformat()}
+
+
+@api.get("/ready")
+async def ready():
+    """Readiness: MongoDB reachable and the seat-uniqueness index present."""
+    try:
+        await db.command("ping")
+        idx = await db.seat_locks.index_information()
+    except Exception as e:  # noqa: BLE001
+        logger.error("readiness check failed: %s", e)
+        return JSONResponse(status_code=503, content={"status": "unavailable"})
+    if "uniq_bus_instance_seat_active" not in idx:
+        return JSONResponse(status_code=503, content={"status": "unavailable", "reason": "seat_index_missing"})
+    return {"status": "ready", "time": utcnow().isoformat()}
 
 
 app.include_router(api)
@@ -4873,6 +5056,11 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def on_start():
+    if os.environ.get("APP_ENV", "").strip().lower() in ("production", "prod"):
+        if not STRIPE_WEBHOOK_SECRET:
+            raise RuntimeError("STRIPE_WEBHOOK_SECRET must be set in production")
+        if not os.environ.get("CORS_ORIGINS", "").strip() or os.environ.get("CORS_ORIGINS", "").strip() == "*":
+            raise RuntimeError("CORS_ORIGINS must list explicit origins in production")
     # Run bus_instance_id backfill BEFORE _ensure_indexes so the new unique
     # index on (bus_instance_id, seat_number) has valid data to key on.
     await _seed_terminals()

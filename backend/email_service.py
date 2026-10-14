@@ -1,6 +1,7 @@
 """Email delivery — Resend API. Non-blocking, failure-tolerant."""
 import os
 import base64
+from html import escape as _esc
 import logging
 import asyncio
 from io import BytesIO
@@ -72,10 +73,10 @@ def _render_ticket_html(booking: dict, from_term: dict, to_term: dict) -> str:
                 f'</td>'
             )
         return f"""<tr>
-              <td style="padding:10px 0;border-top:1px dashed #e4e4e7;font-family:monospace;font-weight:700;font-size:13px">{seat}</td>
+              <td style="padding:10px 0;border-top:1px dashed #e4e4e7;font-family:monospace;font-weight:700;font-size:13px">{_esc(str(seat))}</td>
               <td style="padding:10px 0 10px 12px;border-top:1px dashed #e4e4e7;font-size:14px">
-                <div style="font-weight:700">{p.get('name','')}</div>
-                <div style="color:#71717a;font-size:11px;text-transform:uppercase;letter-spacing:.1em">{p.get('category','adult')}</div>
+                <div style="font-weight:700">{_esc(str(p.get('name','')))}</div>
+                <div style="color:#71717a;font-size:11px;text-transform:uppercase;letter-spacing:.1em">{_esc(str(p.get('category','adult')))}</div>
               </td>
               {qr_cell}
             </tr>"""
@@ -145,19 +146,19 @@ def _render_ticket_html(booking: dict, from_term: dict, to_term: dict) -> str:
         <tr>
           <td style="padding:0 16px 16px 0;width:50%;vertical-align:top">
             <div style="text-transform:uppercase;letter-spacing:.2em;color:#71717a;font-size:10px;font-weight:700">From</div>
-            <div style="font-size:22px;font-weight:900;line-height:1.1;margin-top:4px">{(from_term or {}).get('city','—')}</div>
-            <div style="font-family:monospace;color:#71717a;font-size:11px">{(from_term or {}).get('code','')} · {(from_term or {}).get('name','')}</div>
+            <div style="font-size:22px;font-weight:900;line-height:1.1;margin-top:4px">{_esc(str((from_term or {}).get('city','—')))}</div>
+            <div style="font-family:monospace;color:#71717a;font-size:11px">{_esc(str((from_term or {}).get('code','')))} · {_esc(str((from_term or {}).get('name','')))}</div>
           </td>
           <td style="padding:0 0 16px 16px;width:50%;vertical-align:top">
             <div style="text-transform:uppercase;letter-spacing:.2em;color:#71717a;font-size:10px;font-weight:700">To</div>
-            <div style="font-size:22px;font-weight:900;line-height:1.1;margin-top:4px">{(to_term or {}).get('city','—')}</div>
-            <div style="font-family:monospace;color:#71717a;font-size:11px">{(to_term or {}).get('code','')} · {(to_term or {}).get('name','')}</div>
+            <div style="font-size:22px;font-weight:900;line-height:1.1;margin-top:4px">{_esc(str((to_term or {}).get('city','—')))}</div>
+            <div style="font-family:monospace;color:#71717a;font-size:11px">{_esc(str((to_term or {}).get('code','')))} · {_esc(str((to_term or {}).get('name','')))}</div>
           </td>
         </tr>
         <tr>
           <td style="padding:16px 16px 0 0;vertical-align:top">
             <div style="text-transform:uppercase;letter-spacing:.2em;color:#71717a;font-size:10px;font-weight:700">Date · Departure</div>
-            <div style="font-family:monospace;font-weight:700;margin-top:4px">{booking.get('departure_date','')} · {booking.get('departure_time','')}</div>
+            <div style="font-family:monospace;font-weight:700;margin-top:4px">{_esc(str(booking.get('departure_date','')))} · {_esc(str(booking.get('departure_time','')))}</div>
           </td>
           <td style="padding:16px 0 0 16px;vertical-align:top">
             <div style="text-transform:uppercase;letter-spacing:.2em;color:#71717a;font-size:10px;font-weight:700">Total paid</div>
@@ -258,7 +259,7 @@ async def send_booking_confirmation(booking: dict, from_term: dict, to_term: dic
 
 
 def _render_password_reset_html(full_name: str, reset_link: str, ttl_minutes: int) -> str:
-    safe_name = (full_name or "there").split()[0]
+    safe_name = _esc((full_name or "there").split()[0])
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Reset your Qistna Express password</title></head>
 <body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#09090b">
@@ -388,7 +389,7 @@ async def send_schedule_change(*, booking: dict, from_term: dict, to_term: dict,
 
 
 def _render_admin_invite_html(full_name: str, inviter_name: str, role: str, accept_link: str, ttl_days: int) -> str:
-    safe_name = (full_name or "there").split()[0]
+    safe_name = _esc((full_name or "there").split()[0])
     role_label = "Super-admin" if role == "super_admin" else "Admin"
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>You've been invited to Qistna Express admin</title></head>
@@ -401,7 +402,7 @@ def _render_admin_invite_html(full_name: str, inviter_name: str, role: str, acce
       <div style="text-transform:uppercase;letter-spacing:.22em;color:#002FA7;font-size:11px;font-weight:700">You're invited</div>
       <h1 style="margin:8px 0 12px;font-size:30px;letter-spacing:-.5px;font-weight:900">Join as {role_label}</h1>
       <p style="font-size:14px;color:#52525b;line-height:1.6;margin:0 0 18px">
-        Hi {safe_name}, <b>{inviter_name}</b> has invited you to join the Qistna Express admin team as <b>{role_label}</b>.
+        Hi {safe_name}, <b>{_esc(str(inviter_name))}</b> has invited you to join the Qistna Express admin team as <b>{role_label}</b>.
         Click below to set your password and accept the invite. This link is valid for {ttl_days} days.
       </p>
       <p style="margin:24px 0">
@@ -447,7 +448,7 @@ _CATEGORY_LABELS = {
 
 
 def _render_feedback_user_html(name: str, reference: str, category: str, message: str) -> str:
-    safe_name = (name or "there").split()[0]
+    safe_name = _esc((name or "there").split()[0])
     cat_label = _CATEGORY_LABELS.get(category, category.title())
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>We received your feedback</title></head>
@@ -484,7 +485,7 @@ def _render_feedback_admin_html(fb: dict) -> str:
     rating = fb.get("rating")
     rating_row = f"<div><b>Rating:</b> {'★' * rating}{'☆' * (5 - rating)}</div>" if rating else ""
     ref_row = f"<div><b>Booking ref:</b> {fb['booking_reference']}</div>" if fb.get("booking_reference") else ""
-    name_row = f"<div><b>Name:</b> {fb['name']}</div>" if fb.get("name") else ""
+    name_row = f"<div><b>Name:</b> {_esc(str(fb['name']))}</div>" if fb.get("name") else ""
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>New customer feedback</title></head>
 <body style="margin:0;padding:0;background:#f4f4f5;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#09090b">
@@ -543,7 +544,7 @@ async def send_feedback_admin_notification(admin_email: str, feedback: dict):
 def _render_cancelled_html(booking: dict, from_term: dict, to_term: dict, refunded: bool, amount: float, currency: str) -> str:
     ref = booking.get("reference", "")
     ccy_sym = _currency_symbol(currency)
-    route = f"{(from_term or {}).get('city', '')} → {(to_term or {}).get('city', '')}"
+    route = f"{_esc(str((from_term or {}).get('city', '')))} → {_esc(str((to_term or {}).get('city', '')))}"
     dep = f"{booking.get('departure_date', '')} · {booking.get('departure_time', '')}"
     if refunded:
         headline = "Refund issued"

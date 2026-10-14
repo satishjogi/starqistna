@@ -67,12 +67,12 @@ elif [[ -d "$REPO_ROOT/backend/venv" ]]; then
     # shellcheck disable=SC1091
     source "$REPO_ROOT/backend/venv/bin/activate"
 else
-    warn "No venv found at backend/.venv or backend/venv. Skipping pip install."
+    echo "ERROR: no virtualenv at backend/.venv or backend/venv. Refusing to pip install into the system Python." >&2
+    echo "       Create one first: python3 -m venv backend/.venv" >&2
+    exit 1
 fi
-if command -v pip >/dev/null 2>&1; then
-    pip install -q -r "$REPO_ROOT/backend/requirements.txt"
-    echo "  ✓ backend deps up to date"
-fi
+python -m pip install -q -r "$REPO_ROOT/backend/requirements.txt"
+echo "  ✓ backend deps up to date"
 
 log "3/4  Building frontend"
 pushd "$REPO_ROOT/frontend" >/dev/null
