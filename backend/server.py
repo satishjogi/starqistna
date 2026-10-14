@@ -15,6 +15,7 @@ import logging
 import uuid
 import asyncio
 import hashlib
+import hmac
 import re
 import secrets
 import bcrypt
@@ -153,6 +154,13 @@ async def require_admin(user: dict = Depends(require_user)) -> dict:
     return user
 
 
+async def require_scanner(user: dict = Depends(require_user)) -> dict:
+    """Gate scanners (role gate_scanner) and admins may validate boarding passes."""
+    if not (user.get("is_admin") or user.get("role") == "gate_scanner"):
+        raise HTTPException(403, "Gate scanner access required")
+    return user
+
+
 async def require_super_admin(user: dict = Depends(require_admin)) -> dict:
     """Super-admins manage other admins. Regular admins cannot."""
     if user.get("role") != "super_admin":
@@ -171,9 +179,7 @@ async def log_audit(
     """Record an admin action to the audit_logs collection."""
     ip = None
     if request is not None:
-        # Respect X-Forwarded-For if present (behind proxy/ingress)
-        fwd = request.headers.get("x-forwarded-for")
-        ip = (fwd.split(",")[0].strip() if fwd else None) or (request.client.host if request.client else None)
+        ip = _client_ip(request)
     try:
         await db.audit_logs.insert_one({
             "id": new_id(),
@@ -198,11 +204,16 @@ LOGIN_WINDOW_SECONDS = 15 * 60          # 15 minutes
 
 
 def _client_ip(request: Optional[Request]) -> str:
+    """Client IP. X-Forwarded-For is honoured only when TRUST_PROXY_HEADERS is
+    enabled (i.e. we sit behind a proxy that overwrites the header); otherwise
+    a client could spoof it to dodge rate limits and forge audit entries."""
     if request is None:
         return "unknown"
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
+    if os.environ.get("TRUST_PROXY_HEADERS", "").strip().lower() in ("1", "true", "yes"):
+        fwd = request.headers.get("x-forwarded-for")
+        if fwd:
+            # The right-most entry is the one appended by our own proxy.
+            return fwd.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 
@@ -444,6 +455,8 @@ class CreateBookingBody(BaseModel):
     contact_email: EmailStr
     contact_phone: str
     promo_code: Optional[str] = None
+    # Token returned by /api/seats/lock; binds this booking to the held seats.
+    lock_token: Optional[str] = None
     # When booking a specific segment of a multi-stop route, these override the
     # schedule's own from/to and switch fare pricing to the route's pairing entry.
     # If omitted, the schedule's origin→final-destination is assumed (legacy).
@@ -1599,31 +1612,37 @@ async def delete_promo_code(code_id: str, request: Request, user: dict = Depends
 
 # ---------- Boarding gate validation (for existing QR readers) ----------
 @api.post("/boarding/validate")
-async def boarding_validate(body: BoardingValidateBody):
-    """Endpoint for existing gate-scanners. QR encodes only the booking `reference` (plain text).
-    The scanner posts the reference here; we return booking details and atomically mark as boarded."""
+async def boarding_validate(body: BoardingValidateBody, request: Request, user: dict = Depends(require_scanner)):
+    """Gate-scanner endpoint (admin or gate_scanner role only). QR encodes only the booking `reference`.
+    Returns the minimum a scanner needs and atomically marks the booking as boarded."""
     ref = body.reference.strip().upper()
     booking = await db.bookings.find_one({"reference": ref}, {"_id": 0})
     if not booking:
         return {"valid": False, "reason": "not_found", "reference": ref}
     if booking.get("status") != "confirmed":
         return {"valid": False, "reason": "not_confirmed", "status": booking.get("status"), "reference": ref}
-    sched = await db.schedules.find_one({"id": booking["schedule_id"]}, {"_id": 0})
-    # Already boarded?
     already = bool(booking.get("boarded_at"))
     if body.mark_boarded and not already:
-        await db.bookings.update_one(
-            {"reference": ref},
-            {"$set": {"boarded_at": utcnow().isoformat(), "boarded_gate": body.gate}},
+        now_iso = utcnow().isoformat()
+        res = await db.bookings.update_one(
+            {"reference": ref, "boarded_at": {"$in": [None, ""]}},
+            {"$set": {"boarded_at": now_iso, "boarded_gate": body.gate}},
         )
-        booking["boarded_at"] = utcnow().isoformat()
-        booking["boarded_gate"] = body.gate
+        if res.modified_count:
+            booking["boarded_at"] = now_iso
+            await log_audit(user, "board", "booking", booking["id"], {"gate": body.gate}, request)
+        else:
+            already = True
+            fresh = await db.bookings.find_one({"reference": ref}, {"_id": 0, "boarded_at": 1})
+            booking["boarded_at"] = (fresh or {}).get("boarded_at")
     return {
         "valid": True,
         "already_boarded": already,
         "reference": ref,
-        "schedule": sched,
-        "passengers": booking.get("passengers", []),
+        "passengers": [
+            {"name": p.get("name"), "category": p.get("category"), "seat_number": p.get("seat_number")}
+            for p in booking.get("passengers", [])
+        ],
         "seats": booking.get("seats", []),
         "from_terminal_id": booking.get("from_terminal_id"),
         "to_terminal_id": booking.get("to_terminal_id"),
@@ -1631,6 +1650,9 @@ async def boarding_validate(body: BoardingValidateBody):
         "departure_time": booking.get("departure_time"),
         "boarded_at": booking.get("boarded_at"),
     }
+
+
+BOOKING_PAYMENT_HOLD_MINUTES = 30
 
 
 @api.post("/bookings")
@@ -1655,15 +1677,26 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
         raise HTTPException(400, "Passengers and seat assignments must match in count")
 
     seats = [sa["seat_number"] for sa in body.seat_assignments]
-    # verify locks exist (any owner) and aren't booked yet -- must belong to this session ideally
-    current_locks = await db.seat_locks.find(
-        {"schedule_id": body.schedule_id, "seat_number": {"$in": seats}},
-        {"_id": 0},
-    ).to_list(50)
-    lock_map = {lk["seat_number"]: lk for lk in current_locks}
-    missing = [s for s in seats if s not in lock_map or lock_map[s]["status"] != "locked"]
-    if missing:
-        raise HTTPException(409, detail={"message": "Seat locks missing or expired", "seats": missing})
+    if len(set(seats)) != len(seats):
+        raise HTTPException(400, "Duplicate seats in request")
+    if not body.lock_token:
+        raise HTTPException(400, "lock_token is required")
+    lock_owners = [f"guest:{body.lock_token}"]
+    if user:
+        lock_owners.append(user["id"])
+    lock_filter = {
+        "lock_token": body.lock_token,
+        "schedule_id": body.schedule_id,
+        "seat_number": {"$in": seats},
+        "status": "locked",
+        "owner": {"$in": lock_owners},
+        "booking_id": {"$exists": False},
+    }
+    live = await db.seat_locks.count_documents(
+        {**lock_filter, "expires_at": {"$gt": utcnow().isoformat()}}
+    )
+    if live != len(seats):
+        raise HTTPException(409, detail={"message": "Seat locks missing, expired or already used", "seats": seats})
 
     # Resolve the specific segment (pickup/drop-off + fare) — for route-linked
     # schedules this returns a sched-shaped dict with pairing fares; otherwise
@@ -1707,13 +1740,25 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
         "payment_status": "pending",
         "created_at": utcnow().isoformat(),
     }
-    await db.bookings.insert_one(doc)
 
-    # Attach booking_id to locks
-    await db.seat_locks.update_many(
-        {"schedule_id": body.schedule_id, "seat_number": {"$in": seats}},
-        {"$set": {"booking_id": booking_id}},
+    # Atomically claim the exact locks issued to this caller. The filter only
+    # matches unexpired, unclaimed locks, so a lock can back at most one booking.
+    # The hold is extended to give the customer time to pay.
+    claimed = await db.seat_locks.update_many(
+        {**lock_filter, "expires_at": {"$gt": utcnow().isoformat()}},
+        {"$set": {
+            "booking_id": booking_id,
+            "expires_at": (utcnow() + timedelta(minutes=BOOKING_PAYMENT_HOLD_MINUTES)).isoformat(),
+        }},
     )
+    if claimed.modified_count != len(seats):
+        await db.seat_locks.update_many({"booking_id": booking_id}, {"$unset": {"booking_id": ""}})
+        raise HTTPException(409, detail={"message": "Seat locks missing, expired or already used", "seats": seats})
+    try:
+        await db.bookings.insert_one(doc)
+    except Exception:
+        await db.seat_locks.update_many({"booking_id": booking_id}, {"$unset": {"booking_id": ""}})
+        raise
 
     return {k: v for k, v in doc.items() if k != "_id"}
 
@@ -1802,7 +1847,7 @@ async def cancellation_quote(booking_id: str, user: dict = Depends(require_user)
     refund_currency = (pricing.get("currency") or "myr").upper()
     if eligible and float(pricing.get("total", 0)) > 0:
         txn = await db.payment_transactions.find_one(
-            {"booking_id": booking_id, "payment_status": "paid"},
+            {"booking_id": booking_id, "payment_status": "paid", "duplicate_payment": {"$ne": True}},
             sort=[("created_at", -1)],
         )
         if txn:
@@ -2014,6 +2059,63 @@ async def payment_options(
     }
 
 
+PAYMENT_ATTEMPT_REUSE_SECONDS = 60 * 60 * 23   # Stripe sessions live 24h
+PAYMENT_PLACEHOLDER_TTL_SECONDS = 120
+
+
+async def _claim_payment_attempt(booking: dict, gateway: str) -> dict:
+    """Atomically claim the single active payment attempt for a booking.
+
+    Returns {"url", "session_id"} to reuse an existing open session, or
+    {"placeholder_id"} for a freshly claimed attempt the caller must fill in.
+    """
+    booking_id = booking["id"]
+    now = utcnow()
+    for _ in range(3):
+        placeholder_id = f"pending:{new_id()}"
+        try:
+            await db.payment_transactions.insert_one({
+                "id": new_id(),
+                "session_id": placeholder_id,
+                "booking_id": booking_id,
+                "payment_method": gateway,
+                "user_id": booking.get("user_id"),
+                "user_email": booking["contact_email"],
+                "payment_status": "initiated",
+                "status": "initiated",
+                "active": True,
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            })
+            return {"placeholder_id": placeholder_id}
+        except DuplicateKeyError:
+            pass
+        active = await db.payment_transactions.find_one(
+            {"booking_id": booking_id, "active": True}, {"_id": 0}
+        )
+        if not active:
+            continue
+        age = (now - datetime.fromisoformat(active["created_at"])).total_seconds()
+        placeholder = str(active.get("session_id", "")).startswith("pending:")
+        if placeholder and age < PAYMENT_PLACEHOLDER_TTL_SECONDS:
+            raise HTTPException(409, "A payment attempt for this booking is already being started")
+        if (not placeholder and active.get("checkout_url")
+                and active.get("payment_method") == gateway
+                and age < PAYMENT_ATTEMPT_REUSE_SECONDS):
+            return {"url": active["checkout_url"], "session_id": active["session_id"]}
+        # Stale placeholder, expired session, or a different payment method:
+        # retire it. A late payment on a superseded session is still caught by
+        # the duplicate-payment guard in _finalize_booking.
+        if placeholder:
+            await db.payment_transactions.delete_one({"session_id": active["session_id"]})
+        else:
+            await db.payment_transactions.update_one(
+                {"session_id": active["session_id"]},
+                {"$set": {"active": False, "superseded_at": now.isoformat()}},
+            )
+    raise HTTPException(409, "Could not start a payment attempt, please retry")
+
+
 @api.post("/payments/checkout")
 async def create_checkout(body: CheckoutBody, request: Request, user: Optional[dict] = Depends(current_user)):
     booking = await db.bookings.find_one({"id": body.booking_id}, {"_id": 0})
@@ -2045,12 +2147,24 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
     if body.gateway not in available_ids:
         raise HTTPException(400, f"Payment method '{body.gateway}' is not available")
 
+    # One active payment attempt per booking. A partial unique index on
+    # (booking_id) for active rows makes the claim below atomic, so duplicate or
+    # concurrent requests cannot create parallel Stripe sessions.
+    reuse = await _claim_payment_attempt(booking, body.gateway)
+    if reuse.get("url"):
+        return {"url": reuse["url"], "session_id": reuse["session_id"]}
+    placeholder_id = reuse["placeholder_id"]
+
     host_url = str(request.base_url).rstrip("/")
     webhook_url = f"{host_url}/api/webhook/stripe"
     stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
 
     origin = body.origin_url.rstrip("/")
-    success_url = f"{origin}/payment/success?session_id={{CHECKOUT_SESSION_ID}}&booking_id={body.booking_id}"
+    receipt_token = secrets.token_urlsafe(32)
+    success_url = (
+        f"{origin}/payment/success?session_id={{CHECKOUT_SESSION_ID}}"
+        f"&booking_id={body.booking_id}&receipt={receipt_token}"
+    )
     cancel_url = f"{origin}/payment/cancel?booking_id={body.booking_id}"
 
     checkout_req = CheckoutSessionRequest(
@@ -2072,6 +2186,7 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
     try:
         session: CheckoutSessionResponse = await stripe_checkout.create_checkout_session(checkout_req)
     except Exception as e:
+        await db.payment_transactions.delete_one({"session_id": placeholder_id})
         # Stripe surfaces payment-method activation issues with a helpful message
         # (e.g. "The payment method type provided: grabpay is invalid"). Return
         # the exact message so the frontend can guide the operator to enable it
@@ -2091,40 +2206,64 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
             )
         raise HTTPException(502, detail={"message": f"Could not start Stripe checkout: {msg}"})
 
-    await db.payment_transactions.insert_one(
-        {
-            "id": new_id(),
+    await db.payment_transactions.update_one(
+        {"session_id": placeholder_id},
+        {"$set": {
             "session_id": session.session_id,
-            "booking_id": body.booking_id,
+            "checkout_url": session.url,
+            "receipt_token_hash": hashlib.sha256(receipt_token.encode()).hexdigest(),
             "amount": amount,                  # MYR — what Stripe actually charges
             "currency": BILLING_CURRENCY,
             "display_amount": display_total,   # original price as shown to customer
             "display_currency": display_currency,
             "fx_rate": fx_rate,
-            "payment_method": body.gateway,
-            "user_id": booking.get("user_id"),
-            "user_email": booking["contact_email"],
-            "payment_status": "initiated",
-            "status": "initiated",
             "metadata": {"booking_reference": booking["reference"], "payment_method": body.gateway},
-            "created_at": utcnow().isoformat(),
             "updated_at": utcnow().isoformat(),
-        }
+        }},
     )
 
     return {"url": session.url, "session_id": session.session_id}
 
 
+def _receipt_authorized(txn: dict, receipt: Optional[str], user: Optional[dict]) -> bool:
+    if user and (user.get("is_admin") or (txn.get("user_id") and user.get("id") == txn["user_id"])):
+        return True
+    expected = txn.get("receipt_token_hash")
+    if not receipt or not expected:
+        return False
+    return hmac.compare_digest(hashlib.sha256(receipt.encode()).hexdigest(), expected)
+
+
+def _status_payload(payment_status, status, booking) -> dict:
+    payload = {"payment_status": payment_status, "status": status}
+    if booking is not None:
+        payload["booking"] = booking
+    return payload
+
+
 @api.get("/payments/status/{session_id}")
-async def payment_status(session_id: str, request: Request):
+async def payment_status(
+    session_id: str,
+    request: Request,
+    receipt: Optional[str] = None,
+    user: Optional[dict] = Depends(current_user),
+):
     txn = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
     if not txn:
         raise HTTPException(404, "Transaction not found")
 
+    # The booking is only returned to its owner, an admin, or a caller holding
+    # the receipt token issued at checkout. A session ID alone gets status only.
+    authorized = _receipt_authorized(txn, receipt, user)
+
+    async def _booking_for(txn_doc):
+        if not authorized:
+            return None
+        return await db.bookings.find_one({"id": txn_doc["booking_id"]}, {"_id": 0})
+
     # If already finalized, return current state
     if txn.get("payment_status") == "paid" and txn.get("booking_finalized"):
-        booking = await db.bookings.find_one({"id": txn["booking_id"]}, {"_id": 0})
-        return {"payment_status": "paid", "status": txn.get("status"), "booking": booking}
+        return _status_payload("paid", txn.get("status"), await _booking_for(txn))
 
     host_url = str(request.base_url).rstrip("/")
     webhook_url = f"{host_url}/api/webhook/stripe"
@@ -2133,13 +2272,11 @@ async def payment_status(session_id: str, request: Request):
         check: CheckoutStatusResponse = await stripe_checkout.get_checkout_status(session_id)
     except Exception as e:
         logger.warning("Stripe status fetch failed for %s: %s", session_id, e)
-        booking = await db.bookings.find_one({"id": txn["booking_id"]}, {"_id": 0})
-        return {
-            "payment_status": txn.get("payment_status", "unknown"),
-            "status": txn.get("status", "unknown"),
-            "booking": booking,
-            "error": "stripe_status_unavailable",
-        }
+        payload = _status_payload(
+            txn.get("payment_status", "unknown"), txn.get("status", "unknown"), await _booking_for(txn)
+        )
+        payload["error"] = "stripe_status_unavailable"
+        return payload
 
     updates = {
         "status": check.status,
@@ -2152,8 +2289,7 @@ async def payment_status(session_id: str, request: Request):
     if check.payment_status == "paid" and not txn.get("booking_finalized"):
         await _finalize_booking(txn["booking_id"], session_id)
 
-    booking = await db.bookings.find_one({"id": txn["booking_id"]}, {"_id": 0})
-    return {"payment_status": check.payment_status, "status": check.status, "booking": booking}
+    return _status_payload(check.payment_status, check.status, await _booking_for(txn))
 
 
 # ---------- Stuck-payment reconciliation --------------------------------
@@ -2173,7 +2309,7 @@ async def _reconcile_one_transaction(txn: dict) -> dict:
     """Ask Stripe for the current status of a single session and finalize
     the booking if it's now paid. Returns a short summary dict for logging."""
     session_id = txn.get("session_id")
-    if not session_id:
+    if not session_id or str(session_id).startswith("pending:"):
         return {"session_id": None, "action": "skip_missing_session_id"}
     if txn.get("booking_finalized"):
         return {"session_id": session_id, "action": "already_finalized"}
@@ -2460,6 +2596,34 @@ async def _finalize_booking(booking_id: str, session_id: str):
     if not claim.modified_count:
         return
 
+    # Only one payment session may confirm a booking. A second paid session
+    # (e.g. a superseded checkout paid late) is flagged for refund/review.
+    owner = await db.bookings.update_one(
+        {"id": booking_id, "$or": [
+            {"paid_session_id": {"$exists": False}},
+            {"paid_session_id": session_id},
+        ]},
+        {"$set": {"paid_session_id": session_id}},
+    )
+    if not owner.matched_count:
+        logger.error(
+            "duplicate payment: session=%s paid for already-confirmed booking=%s — needs refund review",
+            session_id, booking_id,
+        )
+        await db.payment_transactions.update_one(
+            {"session_id": session_id},
+            {"$set": {
+                "booking_finalized": True,
+                "payment_status": "paid",
+                "status": "complete",
+                "finalization_status": "duplicate_payment",
+                "duplicate_payment": True,
+                "needs_refund_review": True,
+                "active": False,
+            }, "$unset": {"finalization_started_at": ""}},
+        )
+        return
+
     try:
         await db.seat_locks.update_many(
             {"booking_id": booking_id, "status": "locked"},
@@ -2490,6 +2654,7 @@ async def _finalize_booking(booking_id: str, session_id: str):
                     "payment_status": "paid",
                     "status": "complete",
                     "finalization_status": "complete",
+                    "active": False,
                 },
                 "$unset": {"finalization_started_at": ""},
             },
@@ -2523,38 +2688,28 @@ async def stripe_webhook(request: Request):
 
     # 1. Parse + verify signature.
     event_dict: Optional[dict] = None
-    if STRIPE_WEBHOOK_SECRET:
-        if not sig:
-            logger.warning("stripe_webhook: missing Stripe-Signature header")
-            return JSONResponse(status_code=400, content={"error": "missing_signature"})
-        try:
-            event = stripe_sdk.Webhook.construct_event(
-                body_bytes, sig, STRIPE_WEBHOOK_SECRET
-            )
-            event_dict = event.to_dict() if hasattr(event, "to_dict") else dict(event)
-        except stripe_sdk.error.SignatureVerificationError as e:
-            logger.warning("stripe_webhook: signature verification failed: %s", e)
-            return JSONResponse(status_code=400, content={"error": "invalid_signature"})
-        except ValueError as e:
-            # Invalid payload — return 400 so Stripe knows the body is malformed.
-            logger.warning("stripe_webhook: invalid payload: %s", e)
-            return JSONResponse(status_code=400, content={"error": "invalid_payload"})
-        except Exception as e:
-            # Any other verification-layer error: log and return 400 (do not fail 500).
-            logger.exception("stripe_webhook: verification error: %s", e)
-            return JSONResponse(status_code=400, content={"error": "verification_error"})
-    else:
-        # No secret configured (dev/preview). Parse JSON but skip verification.
-        logger.warning(
-            "stripe_webhook: STRIPE_WEBHOOK_SECRET is not set — accepting event without verification"
+    if not STRIPE_WEBHOOK_SECRET:
+        logger.error("stripe_webhook: STRIPE_WEBHOOK_SECRET is not configured — rejecting event")
+        return JSONResponse(status_code=503, content={"error": "webhook_not_configured"})
+    if not sig:
+        logger.warning("stripe_webhook: missing Stripe-Signature header")
+        return JSONResponse(status_code=400, content={"error": "missing_signature"})
+    try:
+        event = stripe_sdk.Webhook.construct_event(
+            body_bytes, sig, STRIPE_WEBHOOK_SECRET
         )
-        try:
-            import json as _json
-            event_dict = _json.loads(body_bytes.decode("utf-8"))
-        except Exception as e:
-            logger.exception("stripe_webhook: could not parse payload: %s", e)
-            # Still return 200 so Stripe stops retrying garbage.
-            return JSONResponse(status_code=200, content={"ok": True, "warning": "unparsable"})
+        event_dict = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+    except stripe_sdk.error.SignatureVerificationError as e:
+        logger.warning("stripe_webhook: signature verification failed: %s", e)
+        return JSONResponse(status_code=400, content={"error": "invalid_signature"})
+    except ValueError as e:
+        # Invalid payload — return 400 so Stripe knows the body is malformed.
+        logger.warning("stripe_webhook: invalid payload: %s", e)
+        return JSONResponse(status_code=400, content={"error": "invalid_payload"})
+    except Exception as e:
+        # Any other verification-layer error: log and return 400 (do not fail 500).
+        logger.exception("stripe_webhook: verification error: %s", e)
+        return JSONResponse(status_code=400, content={"error": "verification_error"})
 
     # 2. From here on, ALWAYS return 200 — business errors must not disable the endpoint.
     try:
@@ -4409,7 +4564,6 @@ async def _ensure_indexes():
     # to be independent), the index build fails. In that case: log a warning,
     # keep the legacy `uniq_schedule_seat_active` index in place, and let the
     # operator resolve manually with `scripts/find_duplicate_seat_locks.py`.
-    new_lock_index_ok = False
     try:
         await db.seat_locks.create_index(
             [("bus_instance_id", ASCENDING), ("seat_number", ASCENDING)],
@@ -4417,30 +4571,22 @@ async def _ensure_indexes():
             partialFilterExpression={"status": {"$in": ["locked", "booked"]}},
             name="uniq_bus_instance_seat_active",
         )
-        new_lock_index_ok = True
     except DuplicateKeyError as e:
-        logger.warning(
-            "\n" + ("=" * 78) + "\n"
-            "  Legacy duplicate seat_locks detected — uniq_bus_instance_seat_active NOT built.\n"
-            "  Backend will keep running with the legacy (schedule_id, seat_number) index.\n"
-            "  Cross-sibling seat sharing is enforced in application code — DB-level guard\n"
-            "  is off until conflicts are resolved.\n"
-            "\n"
-            "  To inspect + fix:\n"
-            "    cd ~/app/backend && python scripts/find_duplicate_seat_locks.py\n"
-            "    (add --release-expired to unlock stale non-booked locks; use --help for more)\n"
-            "\n"
-            f"  First conflict: {e.details.get('keyValue') if hasattr(e, 'details') else str(e)[:150]}\n"
-            + ("=" * 78)
+        # Fail closed: never accept live bookings without the shared-seat guarantee.
+        first = e.details.get("keyValue") if getattr(e, "details", None) else str(e)[:150]
+        logger.critical(
+            "Legacy duplicate seat_locks detected — uniq_bus_instance_seat_active NOT built. "
+            "Refusing to start. Run `cd ~/app/backend && python scripts/find_duplicate_seat_locks.py` "
+            "(--release-expired to unlock stale non-booked locks). First conflict: %s", first,
         )
-    # Only drop the legacy index if the new one was built — otherwise we'd
-    # leave the seat-locks collection with NO uniqueness at all.
-    if new_lock_index_ok:
-        for stale in ("uniq_schedule_seat_active",):
-            try:
-                await db.seat_locks.drop_index(stale)
-            except Exception:
-                pass
+        raise RuntimeError(
+            "Required seat uniqueness index uniq_bus_instance_seat_active could not be created"
+        ) from e
+    # The new index is in place, so the legacy schedule-level index is redundant.
+    try:
+        await db.seat_locks.drop_index("uniq_schedule_seat_active")
+    except Exception:
+        pass
     await db.users.create_index([("email", ASCENDING)], unique=True)
     await db.bookings.create_index([("user_id", ASCENDING)])
     await db.bookings.create_index([("reference", ASCENDING)], unique=True)
@@ -4454,6 +4600,12 @@ async def _ensure_indexes():
     # Shared seat pool per physical bus — see _migrate_bus_instance_ids docstring.
     await db.schedules.create_index([("bus_instance_id", ASCENDING)])
     await db.payment_transactions.create_index([("session_id", ASCENDING)], unique=True)
+    await db.payment_transactions.create_index(
+        [("booking_id", ASCENDING)],
+        unique=True,
+        partialFilterExpression={"active": True},
+        name="uniq_active_payment_per_booking",
+    )
     await db.promo_codes.create_index([("code", ASCENDING)], unique=True)
     await db.audit_logs.create_index([("created_at", ASCENDING)])
     await db.audit_logs.create_index([("resource", ASCENDING), ("action", ASCENDING)])
@@ -4626,7 +4778,22 @@ async def root():
 
 @api.get("/health")
 async def health():
+    """Liveness: the process is up."""
     return {"status": "ok", "time": utcnow().isoformat()}
+
+
+@api.get("/ready")
+async def ready():
+    """Readiness: MongoDB reachable and the seat-uniqueness index present."""
+    try:
+        await db.command("ping")
+        idx = await db.seat_locks.index_information()
+    except Exception as e:  # noqa: BLE001
+        logger.error("readiness check failed: %s", e)
+        return JSONResponse(status_code=503, content={"status": "unavailable"})
+    if "uniq_bus_instance_seat_active" not in idx:
+        return JSONResponse(status_code=503, content={"status": "unavailable", "reason": "seat_index_missing"})
+    return {"status": "ready", "time": utcnow().isoformat()}
 
 
 app.include_router(api)
@@ -4645,6 +4812,11 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def on_start():
+    if os.environ.get("APP_ENV", "").strip().lower() in ("production", "prod"):
+        if not STRIPE_WEBHOOK_SECRET:
+            raise RuntimeError("STRIPE_WEBHOOK_SECRET must be set in production")
+        if not os.environ.get("CORS_ORIGINS", "").strip() or os.environ.get("CORS_ORIGINS", "").strip() == "*":
+            raise RuntimeError("CORS_ORIGINS must list explicit origins in production")
     # Run bus_instance_id backfill BEFORE _ensure_indexes so the new unique
     # index on (bus_instance_id, seat_number) has valid data to key on.
     await _seed_terminals()

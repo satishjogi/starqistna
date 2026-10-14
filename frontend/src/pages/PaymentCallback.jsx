@@ -16,6 +16,7 @@ export default function PaymentCallback() {
   const [params] = useSearchParams();
   const sessionId = params.get("session_id");
   const bookingId = params.get("booking_id");
+  const receipt = params.get("receipt");
 
   const [status, setStatus] = useState("pending"); // pending | paid | failed | timeout
   const [booking, setBooking] = useState(null);
@@ -32,7 +33,7 @@ export default function PaymentCallback() {
     }
     attemptsRef.current += 1;
     try {
-      const { data } = await api.get(`/payments/status/${sessionId}`);
+      const { data } = await api.get(`/payments/status/${sessionId}`, { params: { receipt } });
       if (data.payment_status === "paid") {
         setStatus("paid");
         setBooking(data.booking);
@@ -61,7 +62,7 @@ export default function PaymentCallback() {
     if (ctsAttemptsRef.current >= MAX_CTS_POLL) return;
     ctsAttemptsRef.current += 1;
     try {
-      const { data } = await api.get(`/payments/status/${sessionId}`);
+      const { data } = await api.get(`/payments/status/${sessionId}`, { params: { receipt } });
       if (data.booking) {
         setBooking(data.booking);
         const hasBrandedQr = (data.booking.gohub_tickets || []).some((t) => t?.qr_image);
@@ -89,7 +90,7 @@ export default function PaymentCallback() {
     if (!sessionId) return;
     setVerifying(true);
     try {
-      const { data } = await api.get(`/payments/status/${sessionId}`);
+      const { data } = await api.get(`/payments/status/${sessionId}`, { params: { receipt } });
       if (data.payment_status === "paid") {
         setStatus("paid");
         setBooking(data.booking);
