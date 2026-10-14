@@ -9,7 +9,8 @@ Authentication
 --------------
 Every request carries an MD5 signature computed as:
     md5(OTACode + TodayDate + OTAPassword)
-where TodayDate is Malaysia local date `YYYYMMDD`.
+where TodayDate is the Malaysia local date in `DD/MM/YYYY` format (lowercase
+hex digest — verified live 2026-08 via scripts/gohub_sign_sweep.py).
 
 The signature is passed alongside OTA+Operator codes in the SOAP envelope.
 This module handles the signature, envelope construction, HTTP POST, and
@@ -276,13 +277,26 @@ def _parse_response(operation: str, xml_body: str) -> dict:
             raise GoHubError(code, msg or "CTS returned non-OK status", raw=xml_body[:500])
         details = status.find(f"./cts:{operation}_details", _NS)
         if details is not None:
+            detail_rows: list[dict] = []
             for child in details:
                 tag = child.tag.split("}")[-1]
-                # Flatten attributes + text into the payload.
+                # Flatten attributes + text into the payload (kept for backward
+                # compatibility — but note this collapses repeated <detail>
+                # elements, keeping only the LAST one's values).
                 for k, v in child.attrib.items():
                     payload[f"{tag}_{k}"] = v
                 if child.text and child.text.strip():
                     payload[tag] = child.text.strip()
+                # Multi-seat responses carry ONE <detail> PER SEAT. Preserve
+                # them all as a list so callers can match per-seat QR / tickno
+                # by opetickno instead of accidentally using the last row.
+                if tag.lower() == "detail":
+                    row = dict(child.attrib)
+                    if child.text and child.text.strip():
+                        row["text"] = child.text.strip()
+                    detail_rows.append(row)
+            if detail_rows:
+                payload["detail_rows"] = detail_rows
     else:
         # Fallback: some older ops may still return flat StatusCode children.
         payload = {c.tag.split("}")[-1]: (c.text or "").strip() for c in result}

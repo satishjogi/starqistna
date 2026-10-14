@@ -163,6 +163,8 @@ def env(monkeypatch):
 
 class _Req:
     base_url = "http://test/"
+    client = None
+    headers = {}
 
 
 def _checkout(gateway="card"):
