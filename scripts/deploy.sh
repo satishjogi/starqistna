@@ -10,7 +10,13 @@
 # What it does:
 #   1. For backend/.env  and frontend/.env, add any keys defined in the
 #      matching .env.example that are missing locally (values left as
-#      placeholders — you fill them in on first run only).
+#      placeholders — you fill them in on first run only). Production-
+#      sensitive backend keys (APP_ENV, secrets, SEED_DEMO_DATA) are NEVER
+#      auto-added to an existing .env; they are reported as missing instead.
+#      Then validate backend/.env for production and ABORT before any
+#      restart if APP_ENV is not exactly "production", if required secrets
+#      are missing/empty/placeholders, if STRIPE_API_KEY is not sk_live_*,
+#      or if SEED_DEMO_DATA=true. Secret values are never printed.
 #   2. Install/check Python dependencies and smoke-import the backend.
 #   3. Build the React frontend.
 #   4. Restart the configured systemd backend, verify health, and reload nginx.
@@ -84,9 +90,25 @@ wait_for_health() {
     done
 }
 
+# Keys that must be set deliberately by the operator in backend/.env and are
+# never copied from .env.example into an existing file.
+PRODUCTION_SENSITIVE_KEYS=(
+    APP_ENV STRIPE_API_KEY STRIPE_WEBHOOK_SECRET JWT_SECRET
+    BOARDING_API_KEY BOOTSTRAP_ADMIN_PASSWORD SEED_DEMO_DATA
+)
+
+is_sensitive_key() {
+    local k
+    for k in "${PRODUCTION_SENSITIVE_KEYS[@]}"; do
+        [[ "$k" == "$1" ]] && return 0
+    done
+    return 1
+}
+
 sync_env() {
     local example="$1"
     local target="$2"
+    local protect="${3:-no}"   # "protect" => skip production-sensitive keys
     if [[ ! -f "$example" ]]; then
         warn "Missing $example — skipping sync."
         return 0
@@ -101,6 +123,9 @@ sync_env() {
         # Skip blanks and comments
         [[ -z "${line// }" || "$line" =~ ^# ]] && continue
         local key="${line%%=*}"
+        if [[ "$protect" == "protect" ]] && is_sensitive_key "$key"; then
+            continue
+        fi
         # If the key does NOT already exist in target, append the example line.
         if ! grep -qE "^${key}=" "$target"; then
             echo "" >> "$target"
@@ -114,9 +139,66 @@ sync_env() {
     fi
 }
 
+# Read KEY from an env file without sourcing it (last assignment wins,
+# surrounding quotes/CR stripped). Prints nothing if unset.
+env_value() {
+    local key="$1" file="$2" v
+    v="$(grep -E "^${key}=" "$file" | tail -n 1 | cut -d= -f2- | tr -d '\r' || true)"
+    v="${v#\"}"; v="${v%\"}"; v="${v#\'}"; v="${v%\'}"
+    printf '%s' "$v"
+}
+
+is_placeholder() {
+    local v="${1,,}"
+    [[ -z "${v// }" || "$v" == *replace* || "$v" == *changeme* || "$v" == *change_me* || "$v" == *your_* ]]
+}
+
+# Fail before any restart if backend/.env is not production-ready.
+# Reports key NAMES only, never values.
+validate_production_env() {
+    local envfile="$REPO_ROOT/backend/.env"
+    local errors=0 key v
+    if [[ ! -f "$envfile" ]]; then
+        echo "ERROR: $envfile does not exist. Create it and set production values." >&2
+        return 1
+    fi
+    v="$(env_value APP_ENV "$envfile")"
+    if [[ -z "$v" ]]; then
+        echo "ERROR: APP_ENV is missing in backend/.env. Add the line APP_ENV=production." >&2
+        errors=$((errors + 1))
+    elif [[ "$v" != "production" ]]; then
+        echo "ERROR: APP_ENV must be exactly 'production' in backend/.env (found a different value)." >&2
+        errors=$((errors + 1))
+    fi
+    for key in STRIPE_WEBHOOK_SECRET JWT_SECRET BOARDING_API_KEY BOOTSTRAP_ADMIN_PASSWORD STRIPE_API_KEY; do
+        v="$(env_value "$key" "$envfile")"
+        if is_placeholder "$v"; then
+            echo "ERROR: $key is missing, empty, or a placeholder in backend/.env." >&2
+            errors=$((errors + 1))
+        fi
+    done
+    v="$(env_value STRIPE_API_KEY "$envfile")"
+    if ! is_placeholder "$v" && [[ "$v" != sk_live_* ]]; then
+        echo "ERROR: STRIPE_API_KEY must be a live key (sk_live_...) in production." >&2
+        errors=$((errors + 1))
+    fi
+    v="$(env_value SEED_DEMO_DATA "$envfile")"
+    if [[ "${v,,}" == "true" ]]; then
+        echo "ERROR: SEED_DEMO_DATA=true is not allowed in production. Remove it or set it to false." >&2
+        errors=$((errors + 1))
+    fi
+    if (( errors > 0 )); then
+        echo "Production validation failed ($errors problem(s)). Nothing was restarted." >&2
+        echo "Fix it with: nano $envfile   then re-run ./scripts/deploy.sh" >&2
+        return 1
+    fi
+    echo "  ✓ production configuration validated (values not shown)"
+}
+
 log "1/4  Syncing env files"
-sync_env "$REPO_ROOT/backend/.env.example"  "$REPO_ROOT/backend/.env"
+sync_env "$REPO_ROOT/backend/.env.example"  "$REPO_ROOT/backend/.env" protect
 sync_env "$REPO_ROOT/frontend/.env.example" "$REPO_ROOT/frontend/.env"
+validate_production_env
 
 log "2/4  Installing backend dependencies"
 if [[ -d "$REPO_ROOT/backend/.venv" ]]; then
