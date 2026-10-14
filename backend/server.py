@@ -1507,7 +1507,10 @@ async def lock_seats(body: SeatLockBody, request: Request, user: Optional[dict] 
 
 @api.post("/seats/release")
 async def release_seats(lock_token: str):
-    await db.seat_locks.delete_many({"lock_token": lock_token, "status": "locked"})
+    # Never delete locks already attached to a booking (awaiting payment).
+    await db.seat_locks.delete_many(
+        {"lock_token": lock_token, "status": "locked", "booking_id": {"$exists": False}}
+    )
     return {"released": True}
 
 

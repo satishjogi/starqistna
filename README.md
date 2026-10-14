@@ -31,6 +31,9 @@ MONGO_TEST_URL=mongodb://localhost:27017 python -m pytest tests/test_mongo_integ
 ## Deploy
 `./scripts/deploy.sh` (requires an existing `backend/.venv`; it will not install into system Python).
 
+## Seat-lock release
+`POST /api/seats/release` only deletes `locked` seat locks that are not attached to a booking. Previously it could delete locks already claimed by a booking awaiting payment (`pending_payment`), letting another customer take the seat while the first payment was processing. Attached locks now stay until payment resolves or the hold expires (the sweeper / booking cancellation frees them).
+
 ## Recovery runbook
 - **App refuses to start: seat index** – run `python backend/scripts/find_duplicate_seat_locks.py` (`--release-expired`), fix conflicts, restart.
 - **Paid booking without ticket** – `POST /api/admin/bookings/{id}/gohub/retry`.
