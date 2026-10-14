@@ -20,9 +20,11 @@ jobs:
       MONGO_TEST_URL: mongodb://localhost:27017
       MONGO_URL: mongodb://localhost:27017
       DB_NAME: starqistna_ci
+      APP_ENV: test
       JWT_SECRET: ci-secret
       STRIPE_API_KEY: sk_test_ci
       STRIPE_WEBHOOK_SECRET: whsec_ci
+      BOARDING_API_KEY: ci-boarding-key
       BOOTSTRAP_ADMIN_PASSWORD: Str0ngPassw0rd!ci
     steps:
       - uses: actions/checkout@v4
@@ -36,14 +38,14 @@ jobs:
           pip install -r requirements.txt --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/
       - name: Run backend tests
         working-directory: backend
-        # Only the offline + MongoDB-backed suites: older tests in backend/tests
-        # call a live deployment (REACT_APP_BACKEND_URL) and are run manually.
+        # Booking API integration tests use isolated MongoDB databases and stub Stripe.
         run: >
           python -m pytest -q
           tests/test_phase1_hardening.py tests/test_phase2_payments.py
           tests/test_payment_finalization.py tests/test_stripe_webhook.py
           tests/test_issue_gohub_tickets.py tests/test_gohub_client.py
-          tests/test_mongo_integration.py
+          tests/test_mongo_integration.py tests/test_bus_booking_api.py
+          tests/test_startup_security.py
 
   frontend:
     runs-on: ubuntu-latest

@@ -12,8 +12,10 @@ cd ../frontend && yarn install && yarn start
 ```
 
 ## Required production configuration
-- `APP_ENV=production` – startup fails without `STRIPE_WEBHOOK_SECRET` or explicit `CORS_ORIGINS`.
-- `STRIPE_WEBHOOK_SECRET` – unsigned/invalid webhooks are rejected.
+- Set `APP_ENV=production` explicitly. Startup fails if the environment is missing or unknown.
+- Production startup rejects missing/placeholder `STRIPE_WEBHOOK_SECRET`, `BOARDING_API_KEY`, `JWT_SECRET`, or `BOOTSTRAP_ADMIN_PASSWORD`; `STRIPE_API_KEY` must be a live key (`sk_live_...`).
+- Production startup also requires explicit non-wildcard `CORS_ORIGINS` and refuses `SEED_DEMO_DATA=true`. The deployment script applies the same checks before restarting the service.
+- `STRIPE_WEBHOOK_SECRET` – unsigned/invalid webhooks are rejected, and production startup fails closed if the secret is not configured.
 - `TRUST_PROXY_HEADERS=true` only behind a proxy that overwrites `X-Forwarded-For`.
 - `CHECKOUT_ALLOWED_ORIGINS` – comma-separated trusted origins (e.g. `https://starqistna.com,https://www.starqistna.com`) for Stripe success/cancel return URLs. Falls back to the non-wildcard `CORS_ORIGINS`. The first entry is the default.
 - Gate-scanner accounts need role `gate_scanner` (admins also work).
@@ -27,7 +29,10 @@ cd backend
 python -m pytest tests/test_phase1_hardening.py tests/test_phase2_payments.py \
   tests/test_payment_finalization.py tests/test_stripe_webhook.py
 MONGO_TEST_URL=mongodb://localhost:27017 python -m pytest tests/test_mongo_integration.py
+MONGO_TEST_URL=mongodb://localhost:27017 python -m pytest tests/test_bus_booking_api.py
+python -m pytest tests/test_startup_security.py
 ```
+The booking API integration tests create and drop uniquely named `starqistna_booking_test_*` databases; set `MONGO_TEST_URL` to a dedicated test MongoDB, never a production instance. Stripe checkout is stubbed, so no Stripe account or live key is needed. CI runs these tests against its MongoDB service.
 
 ## Deploy
 `./scripts/deploy.sh` (requires an existing `backend/.venv`; it will not install into system Python). It restarts `starqistna-backend` and checks backend liveness/readiness before reporting success; deployment settings can be overridden with environment variables documented in [`scripts/README.md`](scripts/README.md).
