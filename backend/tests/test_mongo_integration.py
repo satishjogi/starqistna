@@ -77,6 +77,7 @@ def test_seat_uniqueness_index_is_created(mdb):
     names = _run(mdb.seat_locks.index_information())
     assert "uniq_bus_instance_seat_active" in names
     assert "uniq_active_payment_per_booking" in _run(mdb.payment_transactions.index_information())
+    assert "uniq_payment_attempt_id" in _run(mdb.payment_transactions.index_information())
 
 
 def test_startup_fails_closed_when_legacy_duplicates_exist(mdb):

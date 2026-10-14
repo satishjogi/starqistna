@@ -137,6 +137,7 @@ class _DB:
 
 class _FakeStripe:
     created = 0
+    requests = []
 
     def __init__(self, *a, **k):
         pass
@@ -144,6 +145,7 @@ class _FakeStripe:
     async def create_checkout_session(self, req):
         await asyncio.sleep(0)
         type(self).created += 1
+        type(self).requests.append(req)
         n = type(self).created
         return type("S", (), {"session_id": f"cs_{n}", "url": f"https://stripe.test/pay/cs_{n}"})()
 
@@ -152,6 +154,7 @@ class _FakeStripe:
 def env(monkeypatch):
     db = _DB()
     _FakeStripe.created = 0
+    _FakeStripe.requests = []
     monkeypatch.setattr(server, "db", db)
     monkeypatch.setattr(server, "STRIPE_WEBHOOK_SECRET", SECRET)
     monkeypatch.setenv("CHECKOUT_ALLOWED_ORIGINS", "http://app,https://starqistna.com")
@@ -303,6 +306,9 @@ def test_repeated_checkout_reuses_same_session(env):
     assert first == second
     assert _FakeStripe.created == 1
     assert len(env.payment_transactions.docs) == 1
+    assert _FakeStripe.requests[0]["metadata"]["payment_attempt_id"] == (
+        env.payment_transactions.docs[0]["payment_attempt_id"]
+    )
 
 
 def test_concurrent_checkout_creates_one_session(env):
@@ -325,7 +331,7 @@ def test_checkout_with_other_gateway_supersedes_previous(env):
     assert [d["session_id"] for d in active] == ["cs_2"]
 
 
-def test_checkout_stripe_failure_releases_claim(env, monkeypatch):
+def test_checkout_stripe_failure_keeps_attempt_for_late_webhook_and_releases_claim(env, monkeypatch):
     class Boom(_FakeStripe):
         async def create_checkout_session(self, req):
             raise RuntimeError("stripe down")
@@ -334,7 +340,17 @@ def test_checkout_stripe_failure_releases_claim(env, monkeypatch):
     with pytest.raises(HTTPException) as e:
         _run(_checkout())
     assert e.value.status_code == 502
-    assert env.payment_transactions.docs == []
+    assert len(env.payment_transactions.docs) == 1
+    attempt = env.payment_transactions.docs[0]
+    assert attempt["session_id"].startswith("pending:")
+    assert attempt["active"] is False
+    assert attempt["payment_attempt_id"]
+
+    # A retry can proceed, while the original attempt stays available for
+    # correlating a session created despite the transport error.
+    monkeypatch.setattr(server, "StripeCheckout", _FakeStripe)
+    assert _run(_checkout())["session_id"] == "cs_1"
+    assert len(env.payment_transactions.docs) == 2
 
 
 def test_stale_placeholder_is_replaced(env):
@@ -457,6 +473,41 @@ def test_webhook_replay_finalizes_once(env):
 
 
 # ---------- cancellation / refund retry ----------
+def test_webhook_recovers_session_mapping_from_attempt_metadata(env):
+    attempt_id = "attempt_123"
+    env.payment_transactions.docs.append({
+        "session_id": "pending:attempt_123",
+        "payment_attempt_id": attempt_id,
+        "booking_id": "b1",
+        "payment_status": "initiated",
+        "active": True,
+    })
+    event = {
+        "object": "event",
+        "id": "evt_recover",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "id": "cs_recovered",
+            "payment_status": "paid",
+            "metadata": {"payment_attempt_id": attempt_id},
+        }},
+    }
+    body = json.dumps(event)
+    response = client.post(
+        "/api/webhook/stripe", content=body,
+        headers={"Stripe-Signature": _sig(body)},
+    )
+
+    assert response.status_code == 200
+    recovered = next(
+        txn for txn in env.payment_transactions.docs
+        if txn.get("payment_attempt_id") == attempt_id
+    )
+    assert recovered["session_id"] == "cs_recovered"
+    assert recovered["finalization_status"] == "complete"
+    assert env.bookings.docs[0]["paid_session_id"] == "cs_recovered"
+
+
 def test_cancel_refund_retry_reuses_idempotency_key(env, monkeypatch):
     dep = (server.utcnow() + timedelta(days=5))
     env.bookings.docs[0].update({
