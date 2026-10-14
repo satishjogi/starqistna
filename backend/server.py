@@ -2191,16 +2191,18 @@ async def _claim_payment_attempt(booking: dict, gateway: str) -> dict:
     """Atomically claim the single active payment attempt for a booking.
 
     Returns {"url", "session_id"} to reuse an existing open session, or
-    {"placeholder_id"} for a freshly claimed attempt the caller must fill in.
+    {"placeholder_id", "attempt_id"} for a freshly claimed attempt.
     """
     booking_id = booking["id"]
     now = utcnow()
     for _ in range(3):
-        placeholder_id = f"pending:{new_id()}"
+        attempt_id = new_id()
+        placeholder_id = f"pending:{attempt_id}"
         try:
             await db.payment_transactions.insert_one({
                 "id": new_id(),
                 "session_id": placeholder_id,
+                "payment_attempt_id": attempt_id,
                 "booking_id": booking_id,
                 "payment_method": gateway,
                 "user_id": booking.get("user_id"),
@@ -2211,7 +2213,7 @@ async def _claim_payment_attempt(booking: dict, gateway: str) -> dict:
                 "created_at": now.isoformat(),
                 "updated_at": now.isoformat(),
             })
-            return {"placeholder_id": placeholder_id}
+            return {"placeholder_id": placeholder_id, "attempt_id": attempt_id}
         except DuplicateKeyError:
             pass
         active = await db.payment_transactions.find_one(
@@ -2227,11 +2229,14 @@ async def _claim_payment_attempt(booking: dict, gateway: str) -> dict:
                 and active.get("payment_method") == gateway
                 and age < PAYMENT_ATTEMPT_REUSE_SECONDS):
             return {"url": active["checkout_url"], "session_id": active["session_id"]}
-        # Stale placeholder, expired session, or a different payment method:
-        # retire it. A late payment on a superseded session is still caught by
-        # the duplicate-payment guard in _finalize_booking.
+        # Retire stale attempts without deleting them. The attempt ID is also in
+        # Stripe metadata, so a late webhook can still attach its real session
+        # ID and the duplicate-payment guard can handle a late payment safely.
         if placeholder:
-            await db.payment_transactions.delete_one({"session_id": active["session_id"]})
+            await db.payment_transactions.update_one(
+                {"session_id": active["session_id"], "active": True},
+                {"$set": {"active": False, "superseded_at": now.isoformat()}},
+            )
         else:
             await db.payment_transactions.update_one(
                 {"session_id": active["session_id"]},
@@ -2283,7 +2288,7 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
     reuse = await _claim_payment_attempt(booking, body.gateway)
     if reuse.get("url"):
         return {"url": reuse["url"], "session_id": reuse["session_id"]}
-    placeholder_id = reuse["placeholder_id"]
+    attempt_id = reuse["attempt_id"]
 
     host_url = str(request.base_url).rstrip("/")
     webhook_url = f"{host_url}/api/webhook/stripe"
@@ -2311,12 +2316,22 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
             "display_currency": display_currency,
             "display_total": str(display_total),
             "fx_rate": str(fx_rate),
+            "payment_attempt_id": attempt_id,
         },
     )
     try:
         session: CheckoutSessionResponse = await stripe_checkout.create_checkout_session(checkout_req)
     except Exception as e:
-        await db.payment_transactions.delete_one({"session_id": placeholder_id})
+        # A transport error can happen after Stripe created the session. Keep
+        # the attempt row (inactive) so a late webhook can correlate it.
+        await db.payment_transactions.update_one(
+            {"payment_attempt_id": attempt_id, "session_id": f"pending:{attempt_id}"},
+            {"$set": {
+                "active": False,
+                "stripe_error": str(e)[:500],
+                "updated_at": utcnow().isoformat(),
+            }},
+        )
         # Stripe surfaces payment-method activation issues with a helpful message
         # (e.g. "The payment method type provided: grabpay is invalid"). Return
         # the exact message so the frontend can guide the operator to enable it
@@ -2337,7 +2352,7 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
         raise HTTPException(502, detail={"message": f"Could not start Stripe checkout: {msg}"})
 
     await db.payment_transactions.update_one(
-        {"session_id": placeholder_id},
+        {"payment_attempt_id": attempt_id},
         {"$set": {
             "session_id": session.session_id,
             "checkout_url": session.url,
@@ -2986,6 +3001,24 @@ async def stripe_webhook(request: Request):
             # Any other event type: acknowledge and move on.
             logger.info("stripe_webhook: ignoring event type=%s id=%s", event_type, event_id)
             return JSONResponse(status_code=200, content={"ok": True, "ignored": event_type})
+
+        # Checkout can be created at Stripe even if the process dies or the
+        # database update times out before persisting its session ID. The
+        # attempt ID was stored before the Stripe call and copied into session
+        # metadata, so webhook delivery can repair that mapping.
+        payment_attempt_id = (obj.get("metadata") or {}).get("payment_attempt_id")
+        if session_id and payment_attempt_id:
+            attempt = await db.payment_transactions.find_one(
+                {"payment_attempt_id": payment_attempt_id}
+            )
+            if attempt and attempt.get("session_id") != session_id:
+                await db.payment_transactions.update_one(
+                    {"payment_attempt_id": payment_attempt_id},
+                    {"$set": {
+                        "session_id": session_id,
+                        "updated_at": utcnow().isoformat(),
+                    }},
+                )
 
         logger.info(
             "stripe_webhook: type=%s session=%s payment_status=%s",
@@ -4844,6 +4877,12 @@ async def _ensure_indexes():
     # Shared seat pool per physical bus — see _migrate_bus_instance_ids docstring.
     await db.schedules.create_index([("bus_instance_id", ASCENDING)])
     await db.payment_transactions.create_index([("session_id", ASCENDING)], unique=True)
+    await db.payment_transactions.create_index(
+        [("payment_attempt_id", ASCENDING)],
+        unique=True,
+        sparse=True,
+        name="uniq_payment_attempt_id",
+    )
     await db.payment_transactions.create_index(
         [("booking_id", ASCENDING)],
         unique=True,
