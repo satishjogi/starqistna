@@ -153,6 +153,12 @@ def env(monkeypatch):
         {"id": "card", "available": True}, {"id": "grabpay", "available": True}])
     issued = []
 
+    async def _no_throttle(*a, **k):
+        return None
+
+    monkeypatch.setattr(server, "_check_auth_throttle", _no_throttle)
+    monkeypatch.setattr(server, "_record_auth_failure", _no_throttle)
+
     async def fake_issue(booking_id):
         issued.append(booking_id)
 
