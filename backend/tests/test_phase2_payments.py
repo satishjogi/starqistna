@@ -224,6 +224,7 @@ def test_checkout_stripe_failure_keeps_attempt_for_late_webhook_and_releases_cla
 
     # A retry can proceed, while the original attempt stays available for
     # correlating a session created despite the transport error.
+    monkeypatch.setattr(server, "StripeCheckout", _FakeStripe)
     assert _run(_checkout())["session_id"] == "cs_1"
     assert len(env.payment_transactions.docs) == 2
 
