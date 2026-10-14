@@ -30,7 +30,7 @@ MONGO_TEST_URL=mongodb://localhost:27017 python -m pytest tests/test_mongo_integ
 ```
 
 ## Deploy
-`./scripts/deploy.sh` (requires an existing `backend/.venv`; it will not install into system Python).
+`./scripts/deploy.sh` (requires an existing `backend/.venv`; it will not install into system Python). It restarts `starqistna-backend` and checks backend liveness/readiness before reporting success; deployment settings can be overridden with environment variables documented in [`scripts/README.md`](scripts/README.md).
 
 ## Seat-lock release
 `POST /api/seats/release` only deletes `locked` seat locks that are not attached to a booking. Previously it could delete locks already claimed by a booking awaiting payment (`pending_payment`), letting another customer take the seat while the first payment was processing. Attached locks now stay until payment resolves or the hold expires (the sweeper / booking cancellation frees them).

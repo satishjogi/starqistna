@@ -11,19 +11,78 @@
 #   1. For backend/.env  and frontend/.env, add any keys defined in the
 #      matching .env.example that are missing locally (values left as
 #      placeholders — you fill them in on first run only).
-#   2. Refresh Python dependencies (`pip install -r requirements.txt`).
-#   3. Build the React frontend (`yarn install --frozen-lockfile && yarn build`).
-#   4. Reload systemd + nginx so the new build is served.
+#   2. Install/check Python dependencies and smoke-import the backend.
+#   3. Build the React frontend.
+#   4. Restart the configured systemd backend, verify health, and reload nginx.
 #
-# Requires: bash, python3 (with venv already created), yarn, systemctl.
+# Configuration (override by exporting variables before running this script):
+#   BACKEND_SERVICE       systemd unit name (default: starqistna-backend)
+#   HEALTH_URL            readiness endpoint (default: http://127.0.0.1:8001/api/ready)
+#   LIVE_URL              liveness endpoint (default: http://127.0.0.1:8001/api/health)
+#   PIP_EXTRA_INDEX_URL   extra Python package index
+#                         (default: https://d33sy5i8bnduwe.cloudfront.net/simple/)
+#   HEALTH_TIMEOUT        health-check timeout in seconds (default: 60)
+#
+# Requires: bash, python3 (with venv already created), npm or yarn, systemctl, curl.
 # ---------------------------------------------------------------------------
 set -euo pipefail
+
+BACKEND_SERVICE="${BACKEND_SERVICE:-starqistna-backend}"
+HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8001/api/ready}"
+LIVE_URL="${LIVE_URL:-http://127.0.0.1:8001/api/health}"
+PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL:-https://d33sy5i8bnduwe.cloudfront.net/simple/}"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-60}"
+
+if ! [[ "$HEALTH_TIMEOUT" =~ ^[0-9]+$ ]] || (( 10#$HEALTH_TIMEOUT < 1 )); then
+    echo "ERROR: HEALTH_TIMEOUT must be a positive integer number of seconds." >&2
+    exit 1
+fi
+HEALTH_TIMEOUT_SECONDS=$((10#$HEALTH_TIMEOUT))
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 log() { printf "\n\033[1;34m▸ %s\033[0m\n" "$*"; }
 warn() { printf "\n\033[1;33m! %s\033[0m\n" "$*"; }
+
+if ! command -v curl >/dev/null 2>&1; then
+    echo "ERROR: curl is required for backend health checks. Install curl and retry." >&2
+    exit 1
+fi
+
+wait_for_health() {
+    local url="$1"
+    local label="$2"
+    local deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
+    local remaining
+    local request_timeout
+
+    while :; do
+        remaining=$((deadline - SECONDS))
+        if (( remaining < 1 )); then
+            echo "ERROR: Backend $label check did not return HTTP 200 at $url within ${HEALTH_TIMEOUT_SECONDS}s." >&2
+            return 1
+        fi
+        request_timeout=$remaining
+        if (( request_timeout > 2 )); then
+            request_timeout=2
+        fi
+        if curl -fsS --max-time "$request_timeout" "$url" >/dev/null 2>&1; then
+            echo "  ✓ backend $label check passed: $url"
+            return 0
+        fi
+        remaining=$((deadline - SECONDS))
+        if (( remaining < 1 )); then
+            echo "ERROR: Backend $label check did not return HTTP 200 at $url within ${HEALTH_TIMEOUT_SECONDS}s." >&2
+            return 1
+        fi
+        if (( remaining > 2 )); then
+            sleep 2
+        else
+            sleep "$remaining"
+        fi
+    done
+}
 
 sync_env() {
     local example="$1"
@@ -71,7 +130,9 @@ else
     echo "       Create one first: python3 -m venv backend/.venv" >&2
     exit 1
 fi
-python -m pip install -q -r "$REPO_ROOT/backend/requirements.txt"
+python -m pip install -r "$REPO_ROOT/backend/requirements.txt" --extra-index-url "$PIP_EXTRA_INDEX_URL"
+python -m pip check
+(cd "$REPO_ROOT/backend" && python -c "import server")
 echo "  ✓ backend deps up to date"
 
 log "3/4  Building frontend"
@@ -90,66 +151,40 @@ fi
 npm run build
 popd >/dev/null
 
-log "4/4  Restarting services"
+log "4/4  Restarting backend and checking health"
 
-# Try every common supervisor the operator might have used, in order:
-#   1. systemd unit (any name containing qistna / starqistna / bus / backend)
-#   2. PM2 process
-#   3. supervisord managed process
-#   4. Nothing matched — surface actionable instructions.
-BACKEND_RESTARTED=0
+if ! command -v systemctl >/dev/null 2>&1; then
+    echo "ERROR: systemctl is required to restart backend unit '$BACKEND_SERVICE'." >&2
+    exit 1
+fi
+if ! sudo systemctl cat "$BACKEND_SERVICE" >/dev/null; then
+    echo "ERROR: systemd unit '$BACKEND_SERVICE' was not found or could not be read. Set BACKEND_SERVICE to the correct unit name." >&2
+    exit 1
+fi
+if ! sudo systemctl restart "$BACKEND_SERVICE"; then
+    echo "ERROR: Failed to restart systemd unit '$BACKEND_SERVICE'. Recent service details:" >&2
+    sudo systemctl status --no-pager "$BACKEND_SERVICE" >&2 || true
+    sudo journalctl -u "$BACKEND_SERVICE" -n 50 --no-pager >&2 || true
+    exit 1
+fi
+echo "  ✓ backend restarted via systemd: $BACKEND_SERVICE"
 
-if command -v systemctl >/dev/null 2>&1; then
-    # Enumerate ALL loaded units (running, enabled, or otherwise) — much broader
-    # than list-unit-files, which misses transient / manually-created units.
-    CANDIDATE_UNITS=$(systemctl list-units --type=service --all --no-legend 2>/dev/null \
-        | awk '{print $1}' \
-        | grep -iE '(qistna|starqistna|star-qistna|star_qistna|fastapi|uvicorn|gunicorn|bus-backend|bus_backend)' \
-        | head -3 || true)
-    for unit in $CANDIDATE_UNITS; do
-        if sudo systemctl restart "$unit" 2>/dev/null; then
-            echo "  ✓ backend restarted via systemd: $unit"
-            BACKEND_RESTARTED=1
-            break
-        fi
-    done
+if ! sudo systemctl is-active --quiet "$BACKEND_SERVICE"; then
+    echo "ERROR: systemd unit '$BACKEND_SERVICE' is not active after restart. Recent service details:" >&2
+    sudo systemctl status --no-pager "$BACKEND_SERVICE" >&2 || true
+    sudo journalctl -u "$BACKEND_SERVICE" -n 50 --no-pager >&2 || true
+    exit 1
 fi
 
-if [[ $BACKEND_RESTARTED -eq 0 ]] && command -v pm2 >/dev/null 2>&1; then
-    PM2_TARGET=$(pm2 list 2>/dev/null | awk '/qistna|starqistna|bus|backend|fastapi|uvicorn/ && !/^─/ {print $2; exit}' || true)
-    if [[ -n "$PM2_TARGET" ]]; then
-        pm2 restart "$PM2_TARGET" >/dev/null && \
-            echo "  ✓ backend restarted via pm2: $PM2_TARGET" && BACKEND_RESTARTED=1
-    fi
-fi
+wait_for_health "$LIVE_URL" "liveness"
+wait_for_health "$HEALTH_URL" "readiness"
 
-if [[ $BACKEND_RESTARTED -eq 0 ]] && command -v supervisorctl >/dev/null 2>&1; then
-    SUP_TARGET=$(sudo supervisorctl status 2>/dev/null \
-        | awk '/qistna|starqistna|backend|bus/ {print $1; exit}' || true)
-    if [[ -n "$SUP_TARGET" ]]; then
-        sudo supervisorctl restart "$SUP_TARGET" >/dev/null && \
-            echo "  ✓ backend restarted via supervisord: $SUP_TARGET" && BACKEND_RESTARTED=1
-    fi
-fi
-
-if [[ $BACKEND_RESTARTED -eq 0 ]]; then
-    warn "Could not auto-detect backend supervisor. Restart manually with ONE of:"
-    echo "     sudo systemctl restart <your-service-name>     # if using systemd"
-    echo "     pm2 restart <your-app-name>                    # if using PM2"
-    echo "     sudo supervisorctl restart <your-program>      # if using supervisord"
-    echo ""
-    echo "  To see what's running:"
-    echo "     sudo systemctl list-units --type=service | grep -iE 'star|qistna|fastapi|uvicorn|gunicorn'"
-    echo "     pm2 list"
-    echo "     sudo supervisorctl status"
-fi
-
-if systemctl list-unit-files 2>/dev/null | grep -qE "^nginx(\.service)?\s"; then
+if systemctl list-unit-files --type=service --no-legend | awk '$1 == "nginx.service" { found=1 } END { exit !found }'; then
     sudo systemctl reload nginx
     echo "  ✓ nginx reloaded"
 elif command -v nginx >/dev/null 2>&1; then
-    sudo nginx -s reload 2>/dev/null && echo "  ✓ nginx reloaded (via nginx -s reload)" \
-        || warn "nginx found but reload failed — reload it manually."
+    sudo nginx -s reload
+    echo "  ✓ nginx reloaded (via nginx -s reload)"
 else
     warn "nginx not found — skipping. Serve /app/frontend/build/ with your web server of choice."
 fi
