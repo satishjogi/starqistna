@@ -58,6 +58,8 @@ class _Coll:
                         return False
                     if op == "$in" and actual not in val:
                         return False
+                    if op == "$gt" and (actual is None or actual <= val):
+                        return False
                     if op == "$lt" and (actual is None or actual >= val):
                         return False
                     if op == "$exists" and (k in doc) != val:
@@ -71,6 +73,9 @@ class _Coll:
         if sort and hits:
             hits.sort(key=lambda d: d.get(sort[0][0], ""), reverse=sort[0][1] < 0)
         return dict(hits[0]) if hits else None
+
+    async def count_documents(self, query):
+        return len([d for d in self.docs if self._match(d, query)])
 
     async def insert_one(self, doc):
         if self.unique_active and doc.get("active") is True and any(
@@ -124,7 +129,9 @@ class _DB:
             "pricing": {"total": 20.0, "currency": "myr", "promo": None},
         }])
         self.payment_transactions = _Coll(unique_active=True)
-        self.seat_locks = _Coll([{"booking_id": "b1", "status": "locked"}])
+        self.seat_locks = _Coll([{
+            "booking_id": "b1", "status": "locked", "lock_token": "tok",
+            "expires_at": (server.utcnow() + timedelta(minutes=10)).isoformat()}])
         self.promo_codes = _Coll()
 
 
@@ -147,6 +154,7 @@ def env(monkeypatch):
     _FakeStripe.created = 0
     monkeypatch.setattr(server, "db", db)
     monkeypatch.setattr(server, "STRIPE_WEBHOOK_SECRET", SECRET)
+    monkeypatch.setenv("CHECKOUT_ALLOWED_ORIGINS", "http://app,https://starqistna.com")
     monkeypatch.setattr(server, "StripeCheckout", _FakeStripe)
     monkeypatch.setattr(server, "CheckoutSessionRequest", lambda **k: k)
     monkeypatch.setattr(server, "_payment_options_for", lambda c: [
@@ -173,9 +181,119 @@ class _Req:
     headers = {}
 
 
-def _checkout(gateway="card"):
-    body = server.CheckoutBody(booking_id="b1", origin_url="http://app", gateway=gateway)
-    return server.create_checkout(body, _Req(), None)
+def _checkout(gateway="card", origin="http://app", user=None, **kw):
+    if user is None and not kw:
+        kw = {"lock_token": "tok"}
+    body = server.CheckoutBody(booking_id="b1", origin_url=origin, gateway=gateway, **kw)
+    return server.create_checkout(body, _Req(), user)
+
+
+# ---------- authorization ----------
+@pytest.mark.parametrize("user,kw", [
+    (None, {}),
+    (None, {"lock_token": "wrong"}),
+    (None, {"email": "evil@example.com"}),
+    ({"id": "u2"}, {}),
+])
+def test_checkout_unauthorized_gets_404(env, user, kw):
+    with pytest.raises(HTTPException) as e:
+        _run(_checkout(user=user or None, **kw) if user else server.create_checkout(
+            server.CheckoutBody(booking_id="b1", origin_url="http://app", **kw), _Req(), None))
+    assert e.value.status_code == 404
+    assert _FakeStripe.created == 0
+
+
+def test_checkout_missing_booking_matches_unauthorized(env):
+    body = server.CheckoutBody(booking_id="nope", origin_url="http://app", lock_token="tok")
+    with pytest.raises(HTTPException) as e:
+        _run(server.create_checkout(body, _Req(), None))
+    assert e.value.status_code == 404
+
+
+@pytest.mark.parametrize("user,kw", [
+    ({"id": "u1"}, {}),
+    ({"id": "admin", "is_admin": True}, {}),
+    (None, {"email": "A@example.com"}),
+    (None, {"lock_token": "tok"}),
+])
+def test_checkout_authorized_callers(env, user, kw):
+    body = server.CheckoutBody(booking_id="b1", origin_url="http://app", **kw)
+    assert "url" in _run(server.create_checkout(body, _Req(), user))
+
+
+# ---------- payment state ----------
+@pytest.mark.parametrize("fields,code", [
+    ({"payment_status": "paid"}, 400),
+    ({"payment_status": "refunded"}, 409),
+    ({"status": "cancelled"}, 409),
+    ({"status": "expired"}, 409),
+    ({"status": "confirmed"}, 409),
+])
+def test_checkout_rejects_ineligible_booking(env, fields, code):
+    env.bookings.docs[0].update(fields)
+    with pytest.raises(HTTPException) as e:
+        _run(_checkout())
+    assert e.value.status_code == code
+    assert _FakeStripe.created == 0
+
+
+def test_checkout_rejects_expired_or_missing_seat_locks(env):
+    env.seat_locks.docs[0]["expires_at"] = (server.utcnow() - timedelta(minutes=1)).isoformat()
+    with pytest.raises(HTTPException) as e:
+        _run(_checkout())
+    assert e.value.status_code == 409
+    env.seat_locks.docs.clear()
+    with pytest.raises(HTTPException) as e:
+        _run(_checkout(email="a@example.com"))
+    assert e.value.status_code == 409
+
+
+# ---------- return URLs ----------
+def _urls(env, origin):
+    captured = {}
+    orig = server.CheckoutSessionRequest
+    server.CheckoutSessionRequest = lambda **k: captured.update(k) or k
+    try:
+        _run(_checkout(origin=origin))
+    finally:
+        server.CheckoutSessionRequest = orig
+    return captured["success_url"], captured["cancel_url"]
+
+
+def test_trusted_origin_is_used_with_receipt(env):
+    ok, cancel = _urls(env, "https://starqistna.com/")
+    assert ok.startswith("https://starqistna.com/payment/success?")
+    assert "receipt=" in ok and cancel.startswith("https://starqistna.com/payment/cancel")
+
+
+@pytest.mark.parametrize("origin", [
+    "https://evil.com",
+    "//evil.com",
+    "javascript:alert(1)",
+    "ftp://starqistna.com",
+    "https://starqistna.com@evil.com",
+    "https://evil.com@starqistna.com",
+    "https://starqistna.com.evil.com",
+    "https://evilstarqistna.com",
+    "https://starqistna.com\\@evil.com",
+    "https://starqistna.com/path?x=1",
+    "http://starqistna.com",
+    "",
+    "not a url",
+])
+def test_untrusted_origin_falls_back_to_default(env, origin):
+    ok, cancel = _urls(env, origin)
+    assert ok.startswith("http://app/payment/success?")
+    assert cancel.startswith("http://app/payment/cancel")
+    assert "evil" not in ok + cancel
+
+
+def test_no_trusted_origin_configured_rejects(env, monkeypatch):
+    monkeypatch.delenv("CHECKOUT_ALLOWED_ORIGINS")
+    monkeypatch.setenv("CORS_ORIGINS", "*")
+    with pytest.raises(HTTPException) as e:
+        _run(_checkout())
+    assert e.value.status_code == 400
 
 
 # ---------- single active payment attempt ----------
