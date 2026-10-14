@@ -339,4 +339,4 @@ Build a complete online bus booking system where visitors can search departure t
 - Stripe: production keys in VPS `/root/app/backend/.env`
 - CORS open to `*` for MVP — tighten before production
 - VPS: `sq@srv1598663` (Hostinger, `starqistna.com` served via Nginx + `starqistna-backend.service` systemd unit)
-- Deploy on VPS: `cd ~/app && git pull && ./scripts/deploy.sh` (auto-detects systemd/PM2/supervisord)
+- Deploy on VPS: `cd ~/app && git pull && ./scripts/deploy.sh` (restarts `starqistna-backend` via systemd and verifies backend health)
