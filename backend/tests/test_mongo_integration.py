@@ -61,7 +61,7 @@ async def _seed(db, n_sched=2):
 
 
 def _lock(sched, seats, user=None):
-    return server.lock_seats(server.SeatLockBody(schedule_id=sched, seat_numbers=seats), user)
+    return server.lock_seats(server.SeatLockBody(schedule_id=sched, seat_numbers=seats), None, user)
 
 
 def _book(sched, token, seat="1A"):
