@@ -142,6 +142,7 @@ export default function Passengers() {
       const { data: checkout } = await api.post("/payments/checkout", {
         booking_id: booking.id,
         origin_url: window.location.origin,
+        lock_token: flow.lock_token,
         gateway,
       });
       window.location.href = checkout.url;

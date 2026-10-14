@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import re
 import secrets
+from urllib.parse import urlsplit
 import bcrypt
 import jwt
 import pyotp
@@ -475,6 +476,10 @@ class CreateBookingBody(BaseModel):
 class CheckoutBody(BaseModel):
     booking_id: str
     origin_url: str
+    # Guest credentials (a logged-in owner or admin needs neither): the
+    # lock_token issued at seat-selection time, or the booking's contact email.
+    lock_token: Optional[str] = None
+    email: Optional[str] = None
     gateway: str = "card"  # stripe payment_method_types: card | grabpay | fpx
 
 
@@ -2243,6 +2248,71 @@ async def _claim_payment_attempt(booking: dict, gateway: str) -> dict:
     raise HTTPException(409, "Could not start a payment attempt, please retry")
 
 
+def _normalize_origin(value: Optional[str]) -> Optional[str]:
+    """Return 'scheme://host[:port]' for a plain http(s) origin, else None.
+
+    Rejects protocol-relative/backslash/whitespace tricks, userinfo, paths,
+    queries and fragments so only a bare origin can ever match the allowlist."""
+    if not value or not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or "\\" in value or any(c.isspace() or ord(c) < 32 for c in value):
+        return None
+    try:
+        u = urlsplit(value)
+        host, port = u.hostname, u.port
+    except ValueError:
+        return None
+    if u.scheme.lower() not in ("http", "https") or not host:
+        return None
+    if "@" in u.netloc or u.path not in ("", "/") or u.query or u.fragment:
+        return None
+    scheme = u.scheme.lower()
+    default_port = 443 if scheme == "https" else 80
+    netloc = f"[{host}]" if ":" in host else host
+    if port and port != default_port:
+        netloc += f":{port}"
+    return f"{scheme}://{netloc.lower()}"
+
+
+def _trusted_return_origins() -> List[str]:
+    """Allowlist for Stripe return URLs: CHECKOUT_ALLOWED_ORIGINS, falling back
+    to the non-wildcard CORS_ORIGINS entries. Order matters: first is the default."""
+    raw = os.environ.get("CHECKOUT_ALLOWED_ORIGINS", "").strip() or os.environ.get("CORS_ORIGINS", "")
+    out: List[str] = []
+    for item in raw.split(","):
+        n = _normalize_origin(item)
+        if n and n not in out:
+            out.append(n)
+    return out
+
+
+def _safe_return_origin(requested: Optional[str]) -> str:
+    """The requested origin if trusted, else the first trusted origin (safe
+    default). 400 if no trusted origin is configured at all."""
+    trusted = _trusted_return_origins()
+    n = _normalize_origin(requested)
+    if n and n in trusted:
+        return n
+    if not trusted:
+        raise HTTPException(400, "Return URL is not allowed")
+    return trusted[0]
+
+
+async def _checkout_authorized(booking: dict, body: "CheckoutBody", user: Optional[dict]) -> bool:
+    if user and (user.get("is_admin") or (booking.get("user_id") and user.get("id") == booking["user_id"])):
+        return True
+    if body.lock_token:
+        lock = await db.seat_locks.find_one(
+            {"booking_id": booking["id"], "lock_token": body.lock_token}, {"_id": 0})
+        if lock:
+            return True
+    return bool(
+        body.email and booking.get("contact_email")
+        and body.email.strip().lower() == booking["contact_email"].strip().lower()
+    )
+
+
 @api.post("/payments/checkout")
 async def create_checkout(body: CheckoutBody, request: Request, user: Optional[dict] = Depends(current_user)):
     # Throttle checkout session creation — each call creates a real Stripe
@@ -2252,10 +2322,22 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
                                 label="checkout")
     await _record_auth_failure(ip, "checkout", window_seconds=600)
     booking = await db.bookings.find_one({"id": body.booking_id}, {"_id": 0})
-    if not booking:
+    # Unauthorized callers get the same 404 as a missing booking so booking
+    # IDs can't be probed for existence.
+    if not booking or not await _checkout_authorized(booking, body, user):
         raise HTTPException(404, "Booking not found")
     if booking["payment_status"] == "paid":
         raise HTTPException(400, "Booking already paid")
+    if booking["payment_status"] != "pending" or booking.get("status") != "pending_payment":
+        raise HTTPException(409, "Booking is not eligible for payment")
+    # Every seat must still be held for this booking, otherwise the customer
+    # could pay for seats that may already belong to someone else.
+    now_iso = utcnow().isoformat()
+    held = await db.seat_locks.count_documents(
+        {"booking_id": booking["id"], "status": "locked", "expires_at": {"$gt": now_iso}})
+    if held < len(booking.get("seats") or [None]):
+        raise HTTPException(409, "Seat hold has expired, please select seats again")
+    origin = _safe_return_origin(body.origin_url)
 
     # Single Stripe account — Malaysia. Always bill in MYR regardless of where
     # the trip departs from. Display currency on receipts can stay as-is (SGD
@@ -2292,7 +2374,6 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
     webhook_url = f"{host_url}/api/webhook/stripe"
     stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
 
-    origin = body.origin_url.rstrip("/")
     receipt_token = secrets.token_urlsafe(32)
     success_url = (
         f"{origin}/payment/success?session_id={{CHECKOUT_SESSION_ID}}"

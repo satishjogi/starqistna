@@ -15,6 +15,7 @@ cd ../frontend && yarn install && yarn start
 - `APP_ENV=production` – startup fails without `STRIPE_WEBHOOK_SECRET` or explicit `CORS_ORIGINS`.
 - `STRIPE_WEBHOOK_SECRET` – unsigned/invalid webhooks are rejected.
 - `TRUST_PROXY_HEADERS=true` only behind a proxy that overwrites `X-Forwarded-For`.
+- `CHECKOUT_ALLOWED_ORIGINS` – comma-separated trusted origins (e.g. `https://starqistna.com,https://www.starqistna.com`) for Stripe success/cancel return URLs. Falls back to the non-wildcard `CORS_ORIGINS`. The first entry is the default.
 - Gate-scanner accounts need role `gate_scanner` (admins also work).
 
 ## Health
@@ -33,6 +34,12 @@ MONGO_TEST_URL=mongodb://localhost:27017 python -m pytest tests/test_mongo_integ
 
 ## Seat-lock release
 `POST /api/seats/release` only deletes `locked` seat locks that are not attached to a booking. Previously it could delete locks already claimed by a booking awaiting payment (`pending_payment`), letting another customer take the seat while the first payment was processing. Attached locks now stay until payment resolves or the hold expires (the sweeper / booking cancellation frees them).
+
+## Checkout security
+`POST /api/payments/checkout`:
+- **Authorization** – caller must be the booking owner, an admin, or a guest presenting the booking's `lock_token` (from `/seats/lock`) or its `contact_email` (`email`). Anyone else gets `404 Booking not found`, identical to a missing booking, so IDs can't be probed.
+- **Payment state** – rejected unless the booking is `pending_payment` with `payment_status=pending` (`400` if already paid, `409` if cancelled/expired/refunded/confirmed) and every seat lock is still held and unexpired (`409`).
+- **Return URLs** – `origin_url` must exactly match an origin in `CHECKOUT_ALLOWED_ORIGINS` (http/https only; userinfo, paths, queries, protocol-relative and look-alike hosts are refused). Untrusted values fall back to the first trusted origin (`400` if none is configured), so the receipt token is only ever sent to a trusted domain.
 
 ## Recovery runbook
 - **App refuses to start: seat index** – run `python backend/scripts/find_duplicate_seat_locks.py` (`--release-expired`), fix conflicts, restart.
