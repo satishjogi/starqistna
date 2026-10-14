@@ -130,6 +130,7 @@ class _DB:
 
 class _FakeStripe:
     created = 0
+    requests = []
 
     def __init__(self, *a, **k):
         pass
@@ -137,6 +138,7 @@ class _FakeStripe:
     async def create_checkout_session(self, req):
         await asyncio.sleep(0)
         type(self).created += 1
+        type(self).requests.append(req)
         n = type(self).created
         return type("S", (), {"session_id": f"cs_{n}", "url": f"https://stripe.test/pay/cs_{n}"})()
 
@@ -145,6 +147,7 @@ class _FakeStripe:
 def env(monkeypatch):
     db = _DB()
     _FakeStripe.created = 0
+    _FakeStripe.requests = []
     monkeypatch.setattr(server, "db", db)
     monkeypatch.setattr(server, "STRIPE_WEBHOOK_SECRET", SECRET)
     monkeypatch.setattr(server, "StripeCheckout", _FakeStripe)
@@ -179,6 +182,9 @@ def test_repeated_checkout_reuses_same_session(env):
     assert first == second
     assert _FakeStripe.created == 1
     assert len(env.payment_transactions.docs) == 1
+    assert _FakeStripe.requests[0]["metadata"]["payment_attempt_id"] == (
+        env.payment_transactions.docs[0]["payment_attempt_id"]
+    )
 
 
 def test_concurrent_checkout_creates_one_session(env):
