@@ -5177,13 +5177,57 @@ app.add_middleware(
 )
 
 
+def _is_placeholder_secret(value: str) -> bool:
+    value = value.strip().lower()
+    return not value or any(
+        marker in value for marker in ("replace", "changeme", "change_me", "your_")
+    )
+
+
+def _validate_startup_security_config():
+    app_env = os.environ.get("APP_ENV", "").strip().lower()
+    if app_env not in {"production", "prod", "development", "dev", "test"}:
+        raise RuntimeError(
+            "APP_ENV must be explicitly set to production/prod, development/dev, or test"
+        )
+    if app_env not in {"production", "prod"}:
+        return
+
+    invalid = []
+    required_secrets = {
+        "STRIPE_WEBHOOK_SECRET": STRIPE_WEBHOOK_SECRET,
+        "JWT_SECRET": JWT_SECRET,
+        "BOARDING_API_KEY": BOARDING_API_KEY,
+        "BOOTSTRAP_ADMIN_PASSWORD": BOOTSTRAP_ADMIN_PASSWORD,
+    }
+    invalid.extend(
+        key for key, value in required_secrets.items()
+        if _is_placeholder_secret(value)
+    )
+    if not STRIPE_WEBHOOK_SECRET.startswith("whsec_"):
+        invalid.append("STRIPE_WEBHOOK_SECRET")
+    if not STRIPE_API_KEY.startswith("sk_live_"):
+        invalid.append("STRIPE_API_KEY (must be a live key)")
+
+    cors_origins = [
+        origin.strip()
+        for origin in os.environ.get("CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    if not cors_origins or "*" in cors_origins:
+        invalid.append("CORS_ORIGINS (must list explicit origins)")
+    if os.environ.get("SEED_DEMO_DATA", "").strip().lower() in {"1", "true", "yes"}:
+        invalid.append("SEED_DEMO_DATA (must be disabled)")
+
+    if invalid:
+        raise RuntimeError(
+            "Unsafe production configuration; fix: " + ", ".join(dict.fromkeys(invalid))
+        )
+
+
 @app.on_event("startup")
 async def on_start():
-    if os.environ.get("APP_ENV", "").strip().lower() in ("production", "prod"):
-        if not STRIPE_WEBHOOK_SECRET:
-            raise RuntimeError("STRIPE_WEBHOOK_SECRET must be set in production")
-        if not os.environ.get("CORS_ORIGINS", "").strip() or os.environ.get("CORS_ORIGINS", "").strip() == "*":
-            raise RuntimeError("CORS_ORIGINS must list explicit origins in production")
+    _validate_startup_security_config()
     # Run bus_instance_id backfill BEFORE _ensure_indexes so the new unique
     # index on (bus_instance_id, seat_number) has valid data to key on.
     await _seed_terminals()

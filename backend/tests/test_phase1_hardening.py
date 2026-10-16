@@ -218,6 +218,7 @@ def test_boarding_minimal_response_and_single_board(monkeypatch):
         return None
 
     monkeypatch.setattr(server, "log_audit", no_audit)
+    monkeypatch.setattr(server, "BOARDING_API_KEY", "")
     body = server.BoardingValidateBody(reference="sq1", gate="G1")
     first = _run(server.boarding_validate(body, None, {"id": "g"}))
     assert first["valid"] and not first["already_boarded"]
