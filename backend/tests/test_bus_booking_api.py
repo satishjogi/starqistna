@@ -97,11 +97,14 @@ def api(monkeypatch):
         }
     )
 
-    client = TestClient(server.app)
+    monkeypatch.setattr(server.app.router, "on_startup", [])
+    monkeypatch.setattr(server.app.router, "on_shutdown", [])
     try:
-        yield client, sync_db
+        # Entering the context keeps one event loop alive across requests,
+        # which the Motor client requires.
+        with TestClient(server.app) as client:
+            yield client, sync_db
     finally:
-        client.close()
         mongo.drop_database(database_name)
         async_client.close()
         mongo.close()
