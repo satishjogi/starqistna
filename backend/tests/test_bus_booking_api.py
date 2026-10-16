@@ -129,7 +129,7 @@ def _create_booking(client, lock_token):
                     "ic_or_passport": "TEST123",
                 }
             ],
-            "contact_email": "booking@example.test",
+            "contact_email": "booking@example.com",
             "contact_phone": "+60123456789",
             "lock_token": lock_token,
         },
@@ -187,7 +187,7 @@ def test_checkout_email_authorization_and_expired_hold_failure(api):
         json={
             "booking_id": booking_id,
             "origin_url": "https://booking.test",
-            "email": "not-the-booker@example.test",
+            "email": "not-the-booker@example.com",
         },
     )
     assert wrong_email.status_code == 404
@@ -202,7 +202,7 @@ def test_checkout_email_authorization_and_expired_hold_failure(api):
         json={
             "booking_id": booking_id,
             "origin_url": "https://booking.test",
-            "email": "BOOKING@example.test",
+            "email": "BOOKING@example.com",
         },
     )
     assert expired_hold.status_code == 409

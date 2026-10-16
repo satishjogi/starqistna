@@ -71,7 +71,8 @@ def test_unsafe_production_configuration_fails_without_leaking_values(
     with pytest.raises(RuntimeError) as error:
         server._validate_startup_security_config()
     assert field in str(error.value)
-    assert value not in str(error.value)
+    if value:
+        assert value not in str(error.value)
 
 
 @pytest.mark.parametrize("app_env", ["", "prodution", "staging"])
