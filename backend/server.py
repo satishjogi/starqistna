@@ -4120,6 +4120,8 @@ class BulkScheduleBody(BaseModel):
     trip_no: Optional[str] = None
     # Explicit grouping key lets route segments with different stop times share one physical bus.
     bus_instance_key: Optional[str] = None
+    departure_day_offset: int = Field(ge=0, le=1, default=0)
+    arrival_day_offset: int = Field(ge=0, le=1, default=0)
 
 
 class BulkDeleteScheduleFilter(BaseModel):
@@ -4635,12 +4637,16 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
     cur = start
     while cur <= end:
         if cur.weekday() in dow_set:
-            # Dedup by EXACT segment (route_id + from + to + date + time). Multiple
-            # segments per physical bus are allowed and expected.
+            # `cur` is the service date of the first departure point. A later
+            # segment may depart after midnight, so its public departure_date
+            # can be one day later while retaining the same physical bus run.
+            service_date = cur.isoformat()
+            departure_date = (cur + timedelta(days=body.departure_day_offset)).isoformat()
+            # Dedup by exact sellable segment, not by the bus grouping key.
             dupe_filter = {
                 "from_terminal_id": body.from_terminal_id,
                 "to_terminal_id": body.to_terminal_id,
-                "departure_date": cur.isoformat(),
+                "departure_date": departure_date,
                 "departure_time": body.departure_time,
             }
             if body.route_id:
@@ -4655,13 +4661,12 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
                 sched_id = new_id()
                 bus_instance_id = sched_id
                 if body.route_id:
-                    sibling_filter = {
-                        "route_id": body.route_id,
-                        "departure_date": cur.isoformat(),
-                    }
+                    sibling_filter = {"route_id": body.route_id}
                     if body.bus_instance_key:
                         sibling_filter["bus_instance_key"] = body.bus_instance_key
+                        sibling_filter["bus_instance_service_date"] = service_date
                     else:
+                        sibling_filter["departure_date"] = departure_date
                         sibling_filter["departure_time"] = body.departure_time
                     sibling = await db.schedules.find_one(
                         sibling_filter, {"_id": 0, "bus_instance_id": 1}
@@ -4675,9 +4680,10 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
                     "bus_instance_id": bus_instance_id,
                     "from_terminal_id": body.from_terminal_id,
                     "to_terminal_id": body.to_terminal_id,
-                    "departure_date": cur.isoformat(),
+                    "departure_date": departure_date,
                     "departure_time": body.departure_time,
                     "arrival_time": body.arrival_time,
+                    "arrival_day_offset": body.arrival_day_offset,
                     "bus_operator": "Qistna Express",
                     "bus_type": body.bus_type,
                     "adult_fare": body.adult_fare,
@@ -4693,6 +4699,7 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
                     doc["trip_no"] = body.trip_no
                 if body.bus_instance_key:
                     doc["bus_instance_key"] = body.bus_instance_key
+                    doc["bus_instance_service_date"] = service_date
                 await db.schedules.insert_one(doc)
                 created += 1
         cur += timedelta(days=1)
