@@ -5413,6 +5413,139 @@ async def _migrate_seat_lock_legs():
                 ) from exc
 
 
+    # A previous release could leave a confirmed booking without a primary seat
+    # lock (for example, after recovering a payment whose hold had expired).
+    # Bookings are the durable record of sold seats, so re-project every confirmed
+    # booking into the per-leg inventory before serving traffic.
+    async for booking in db.bookings.find(
+        {"status": "confirmed", "seats": {"$exists": True}}, {"_id": 0}
+    ):
+        seat_numbers = list(dict.fromkeys(
+            str(value).strip().upper() for value in (booking.get("seats") or []) if value
+        ))
+        if not seat_numbers:
+            continue
+        schedule = await db.schedules.find_one(
+            {"id": booking.get("schedule_id")}, {"_id": 0}
+        )
+        if not schedule:
+            raise RuntimeError(
+                f"Confirmed booking {booking.get('id')} references a missing schedule; "
+                "cannot safely rebuild its seat inventory."
+            )
+        pickup_id = booking.get("from_terminal_id") or schedule.get("from_terminal_id")
+        dropoff_id = booking.get("to_terminal_id") or schedule.get("to_terminal_id")
+        if not pickup_id or not dropoff_id:
+            raise RuntimeError(
+                f"Confirmed booking {booking.get('id')} is missing its journey endpoints."
+            )
+        leg_indices = booking.get("leg_indices")
+        if not isinstance(leg_indices, list) or not leg_indices:
+            route = None
+            if schedule.get("route_id"):
+                route = await db.routes.find_one({"id": schedule["route_id"]}, {"_id": 0})
+            try:
+                leg_indices = _segment_leg_indices_for_schedule(
+                    schedule, pickup_id, dropoff_id, route
+                )
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"Cannot rebuild inventory for confirmed booking {booking.get('id')}: {exc}"
+                ) from exc
+
+        bus_id = (
+            booking.get("bus_instance_id")
+            or schedule.get("bus_instance_id")
+            or schedule["id"]
+        )
+        await db.bookings.update_one(
+            {"id": booking["id"]},
+            {"$set": {
+                "bus_instance_id": bus_id,
+                "leg_indices": leg_indices,
+            }},
+        )
+
+        for seat_number in seat_numbers:
+            primary = await db.seat_locks.find_one({
+                "booking_id": booking["id"],
+                "seat_number": seat_number,
+                "status": "booked",
+            })
+            if primary is None:
+                primary = await db.seat_locks.find_one({
+                    "booking_id": booking["id"],
+                    "seat_number": seat_number,
+                })
+            now_iso = utcnow().isoformat()
+            if primary:
+                lock_id = primary.get("id") or str(primary["_id"])
+                await db.seat_locks.update_one(
+                    {"_id": primary["_id"]},
+                    {"$set": {
+                        "id": lock_id,
+                        "schedule_id": booking.get("schedule_id"),
+                        "bus_instance_id": bus_id,
+                        "seat_number": seat_number,
+                        "segment_from_terminal_id": pickup_id,
+                        "segment_to_terminal_id": dropoff_id,
+                        "leg_indices": leg_indices,
+                        "status": "booked",
+                        "owner": primary.get("owner") or booking.get("user_id")
+                                 or "guest:" + str(booking.get("contact_email") or ""),
+                        "booking_id": booking["id"],
+                        "expires_at": None,
+                    }},
+                )
+            else:
+                lock_id = "booking:" + str(booking["id"]) + ":" + seat_number
+                await db.seat_locks.insert_one({
+                    "id": lock_id,
+                    "schedule_id": booking.get("schedule_id"),
+                    "bus_instance_id": bus_id,
+                    "seat_number": seat_number,
+                    "segment_from_terminal_id": pickup_id,
+                    "segment_to_terminal_id": dropoff_id,
+                    "leg_indices": leg_indices,
+                    "status": "booked",
+                    "owner": booking.get("user_id") or "guest:" + str(booking.get("contact_email") or ""),
+                    "booking_id": booking["id"],
+                    "expires_at": None,
+                    "created_at": booking.get("created_at") or now_iso,
+                    "recovered_from_confirmed_booking": True,
+                })
+
+            for leg_index in leg_indices:
+                leg_doc = {
+                    "id": lock_id + ":" + str(int(leg_index)),
+                    "seat_lock_id": lock_id,
+                    "schedule_id": booking.get("schedule_id"),
+                    "bus_instance_id": bus_id,
+                    "seat_number": seat_number,
+                    "leg_index": int(leg_index),
+                    "segment_from_terminal_id": pickup_id,
+                    "segment_to_terminal_id": dropoff_id,
+                    "status": "booked",
+                    "owner": booking.get("user_id") or "guest:" + str(booking.get("contact_email") or ""),
+                    "lock_token": primary.get("lock_token") if primary else None,
+                    "booking_id": booking["id"],
+                    "expires_at": None,
+                    "created_at": booking.get("created_at") or now_iso,
+                    "recovered_from_confirmed_booking": True,
+                }
+                try:
+                    await leg_collection.update_one(
+                        {"seat_lock_id": lock_id, "leg_index": int(leg_index)},
+                        {"$set": leg_doc},
+                        upsert=True,
+                    )
+                except DuplicateKeyError as exc:
+                    raise RuntimeError(
+                        "Cannot safely migrate confirmed bookings: two bookings claim the "
+                        f"same physical bus leg and seat ({bus_id}, leg {leg_index}, {seat_number})."
+                    ) from exc
+
+
 async def _ensure_indexes():
     # Also drop the earlier attempt at uniq_route_departure on schedules —
     # we now WANT multiple sibling schedules per (route, date, time) and rely
