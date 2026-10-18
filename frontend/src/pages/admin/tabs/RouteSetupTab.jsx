@@ -13,6 +13,9 @@ export default function RouteSetupTab() {
   const [error, setError] = useState("");
   const [createdRoute, setCreatedRoute] = useState(null);
   const [stopTimes, setStopTimes] = useState({});
+  const [pairFares, setPairFares] = useState({});
+  const [pickupSearch, setPickupSearch] = useState("");
+  const [dropoffSearch, setDropoffSearch] = useState("");
   const [busInstanceKey, setBusInstanceKey] = useState("");
   const [form, setForm] = useState({
     code: "", name: "", origin_city: "", destination_city: "",
@@ -36,8 +39,21 @@ export default function RouteSetupTab() {
   }, [form.bus_type, busTypes]);
 
   const stopById = useMemo(() => Object.fromEntries(stops.map((s) => [s.id, s])), [stops]);
-  const pickups = stops.filter((s) => s.is_pickup !== false);
-  const dropoffs = stops.filter((s) => s.is_dropoff !== false);
+  const sortStops = (a, b) =>
+    (a.state || "").localeCompare(b.state || "") ||
+    (a.city || "").localeCompare(b.city || "") ||
+    (a.name || "").localeCompare(b.name || "");
+  const pickups = stops.filter((s) => s.is_pickup !== false).sort(sortStops);
+  const dropoffs = stops.filter((s) => s.is_dropoff !== false).sort(sortStops);
+  const filterStops = (items, query) => {
+    const q = query.trim().toLowerCase();
+    if (!q) return items;
+    return items.filter((s) =>
+      [s.state, s.city, s.name, s.code, s.country].some((value) => String(value || "").toLowerCase().includes(q))
+    );
+  };
+  const filteredPickups = filterStops(pickups, pickupSearch);
+  const filteredDropoffs = filterStops(dropoffs, dropoffSearch);
   const selectedStopIds = [...new Set([...form.pickupIds, ...form.dropoffIds])];
   const toMinutes = (value) => {
     if (!/^\d{2}:\d{2}$/.test(value || "")) return NaN;
@@ -50,7 +66,16 @@ export default function RouteSetupTab() {
     return (stop - base + 1440) % 1440;
   };
   const dayOffsetForStop = (id) => Math.floor((toMinutes(form.departure_time) + offsetForStop(id)) / 1440);
-  const validPairCount = form.pickupIds.reduce((n, id) => n + form.dropoffIds.filter((dropId) => dropId !== id && offsetForStop(dropId) > offsetForStop(id)).length, 0);
+  const validPairs = form.pickupIds.flatMap((pickup_id) =>
+    form.dropoffIds
+      .filter((dropoff_id) => dropoff_id !== pickup_id && offsetForStop(dropoff_id) > offsetForStop(pickup_id))
+      .map((dropoff_id) => ({ pickup_id, dropoff_id }))
+  ).sort((a, b) =>
+    offsetForStop(a.pickup_id) - offsetForStop(b.pickup_id) ||
+    offsetForStop(a.dropoff_id) - offsetForStop(b.dropoff_id)
+  );
+  const validPairCount = validPairs.length;
+  const pairFareKey = (pickupId, dropoffId) => `${pickupId}::${dropoffId}`;
   const orderedSelectedStops = selectedStopIds.map((id) => ({ id, offset: offsetForStop(id) })).sort((a, b) => a.offset - b.offset);
   const timeValidation = (() => {
     if (!form.pickupIds.length || !form.dropoffIds.length) return "";
@@ -116,14 +141,20 @@ export default function RouteSetupTab() {
       if (!route) {
         const boarding_stops = form.pickupIds.map((terminal_id) => ({ terminal_id, offset_min: offsetForStop(terminal_id) }));
         const alighting_stops = form.dropoffIds.map((terminal_id) => ({ terminal_id, offset_min: offsetForStop(terminal_id) }));
-        const pairings = form.pickupIds.flatMap((pickup_id) =>
-          form.dropoffIds.filter((dropoff_id) => dropoff_id !== pickup_id && offsetForStop(dropoff_id) > offsetForStop(pickup_id)).map((dropoff_id) => ({
-            pickup_id, dropoff_id, adult_fare: adultFare, child_fare: childFare,
-            senior_fare: adultFare, oku_fare: adultFare,
+        const pairings = validPairs.map(({ pickup_id, dropoff_id }) => {
+          const fares = pairFares[pairFareKey(pickup_id, dropoff_id)] || {};
+          const segmentAdultFare = Number(fares.adultFare ?? form.fare);
+          const segmentChildFare = Number(fares.childFare ?? form.childFare);
+          return {
+            pickup_id, dropoff_id,
+            adult_fare: segmentAdultFare,
+            child_fare: segmentChildFare,
+            senior_fare: segmentAdultFare,
+            oku_fare: segmentAdultFare,
             currency: stopById[pickup_id]?.country === "SG" ? "sgd" : "myr",
             cts_route_code: "",
-          }))
-        );
+          };
+        });
         if (!pairings.length) throw new Error("Choose at least one valid pickup-to-drop-off combination using different stops.");
         const response = await api.post("/admin/routes", {
           code: form.code.trim().toUpperCase(),
@@ -183,6 +214,9 @@ export default function RouteSetupTab() {
   const reset = () => {
     setCreatedRoute(null);
     setStopTimes({});
+    setPairFares({});
+    setPickupSearch("");
+    setDropoffSearch("");
     setBusInstanceKey("");
     setMessage("");
     setError("");
@@ -200,8 +234,7 @@ export default function RouteSetupTab() {
   return (
     <div className="mt-6 max-w-6xl space-y-5" data-testid="route-setup-tab">
       <div className="te-card p-5 md:p-7">
-        <div className="te-overline">Staff workflow · one page</div>
-        <h2 className="text-2xl font-black mt-1">Create route + schedules</h2>
+        <h2 className="text-2xl font-black">Create route + schedules</h2>
         <p className="text-sm text-zinc-600 mt-2 max-w-3xl">
           Set up the route, select stops, choose fares and service dates, then generate all sellable pickup-to-drop-off segments in one submission. Existing Routes and Add Schedule tabs remain available for edits and special cases.
         </p>
@@ -226,16 +259,34 @@ export default function RouteSetupTab() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
             <div>
               <div className="te-overline mb-2">Pickup stops ({form.pickupIds.length})</div>
+              <input
+                type="search"
+                value={pickupSearch}
+                onChange={(e) => setPickupSearch(e.target.value)}
+                placeholder="Search state, city, stop or code…"
+                className="te-input !py-2 text-xs mb-2"
+                aria-label="Search pickup stops"
+              />
               <div className="max-h-80 overflow-auto border border-black/10 rounded p-2 space-y-1">
-                {pickups.map((s) => <label key={s.id} className="flex items-start gap-2 p-2 hover:bg-zinc-50 text-sm"><input type="checkbox" className="mt-1" checked={form.pickupIds.includes(s.id)} disabled={!!createdRoute} onChange={() => toggleId("pickupIds", s.id)} /><span><b>{s.city}</b><span className="block text-xs text-zinc-500">{s.name}{s.code ? ` · ${s.code}` : ""}</span></span></label>)}
+                {filteredPickups.map((s) => <label key={s.id} className="flex items-start gap-2 p-2 hover:bg-zinc-50 text-sm"><input type="checkbox" className="mt-1" checked={form.pickupIds.includes(s.id)} disabled={!!createdRoute} onChange={() => toggleId("pickupIds", s.id)} /><span><b>{s.city}</b><span className="block text-xs text-zinc-500">{s.state ? `${s.state} · ` : ""}{s.name}{s.code ? ` · ${s.code}` : ""}</span></span></label>)}
                 {!pickups.length && <p className="text-xs text-zinc-500 p-2">No pickup-enabled stops. Add them in Stops first.</p>}
+                {pickups.length > 0 && !filteredPickups.length && <p className="text-xs text-zinc-500 p-2">No pickup stops match that search.</p>}
               </div>
             </div>
             <div>
               <div className="te-overline mb-2">Drop-off stops ({form.dropoffIds.length})</div>
+              <input
+                type="search"
+                value={dropoffSearch}
+                onChange={(e) => setDropoffSearch(e.target.value)}
+                placeholder="Search state, city, stop or code…"
+                className="te-input !py-2 text-xs mb-2"
+                aria-label="Search drop-off stops"
+              />
               <div className="max-h-80 overflow-auto border border-black/10 rounded p-2 space-y-1">
-                {dropoffs.map((s) => <label key={s.id} className="flex items-start gap-2 p-2 hover:bg-zinc-50 text-sm"><input type="checkbox" className="mt-1" checked={form.dropoffIds.includes(s.id)} disabled={!!createdRoute} onChange={() => toggleId("dropoffIds", s.id)} /><span><b>{s.city}</b><span className="block text-xs text-zinc-500">{s.name}{s.code ? ` · ${s.code}` : ""}</span></span></label>)}
+                {filteredDropoffs.map((s) => <label key={s.id} className="flex items-start gap-2 p-2 hover:bg-zinc-50 text-sm"><input type="checkbox" className="mt-1" checked={form.dropoffIds.includes(s.id)} disabled={!!createdRoute} onChange={() => toggleId("dropoffIds", s.id)} /><span><b>{s.city}</b><span className="block text-xs text-zinc-500">{s.state ? `${s.state} · ` : ""}{s.name}{s.code ? ` · ${s.code}` : ""}</span></span></label>)}
                 {!dropoffs.length && <p className="text-xs text-zinc-500 p-2">No drop-off-enabled stops. Add them in Stops first.</p>}
+                {dropoffs.length > 0 && !filteredDropoffs.length && <p className="text-xs text-zinc-500 p-2">No drop-off stops match that search.</p>}
               </div>
             </div>
           </div>
@@ -261,14 +312,50 @@ export default function RouteSetupTab() {
         <section className="te-card p-5 md:p-7">
           <h3 className="font-black text-lg mb-4">3. Fares and schedule</h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <label><span className="te-label">Default adult fare</span><input type="number" min="0" step="0.01" required className="te-input" value={form.fare} onChange={(e) => setForm({ ...form, fare: e.target.value })} /></label>
-            <label><span className="te-label">Default child fare</span><input type="number" min="0" step="0.01" required className="te-input" value={form.childFare} onChange={(e) => setForm({ ...form, childFare: e.target.value })} /></label>
+            <label><span className="te-label">Default adult fare</span><input type="number" min="0" step="0.01" required className="te-input" disabled={!!createdRoute} value={form.fare} onChange={(e) => setForm({ ...form, fare: e.target.value })} /></label>
+            <label><span className="te-label">Default child fare</span><input type="number" min="0" step="0.01" required className="te-input" disabled={!!createdRoute} value={form.childFare} onChange={(e) => setForm({ ...form, childFare: e.target.value })} /></label>
             <label><span className="te-label">First trip date</span><input type="date" required className="te-input" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} /></label>
             <label><span className="te-label">Last trip date (inclusive)</span><input type="date" required min={form.start_date || undefined} className="te-input" value={form.end_date} onChange={(e) => setForm({ ...form, end_date: e.target.value })} /></label>
             <label><span className="te-label">First departure time</span><input type="time" required className="te-input" value={form.departure_time} onChange={(e) => changeDepartureTime(e.target.value)} /><span className="block text-xs text-zinc-500 mt-1">Baseline for stop offsets; keep it equal to the first stop time.</span></label>
             <label><span className="te-label">Final arrival (fallback)</span><input type="time" required className="te-input" value={form.arrival_time} onChange={(e) => setForm({ ...form, arrival_time: e.target.value })} /><span className="block text-xs text-zinc-500 mt-1">Segment arrivals use the selected drop-off stop time.</span></label>
             <label><span className="te-label">Bus type</span><select className="te-input" value={form.bus_type} onChange={(e) => setForm({ ...form, bus_type: e.target.value })}>{busTypes.map((b) => <option key={b.id} value={b.name}>{b.name} · {b.seat_count} seats</option>)}{!busTypes.length && <option value="Standard">Standard</option>}</select></label>
             <label><span className="te-label">Seat capacity</span><input type="number" min="12" max="60" required className="te-input" value={form.total_seats} onChange={(e) => setForm({ ...form, total_seats: e.target.value })} /></label>
+          </div>
+          <div className="mt-6 border-t border-black/10 pt-5">
+            <h4 className="font-bold mb-1">Price each pickup-to-drop-off segment</h4>
+            <p className="text-xs text-zinc-500 mb-3">
+              Set adult and child fares separately for every sellable segment. The default fares above are used until you override a segment. Senior and OKU fares currently follow that segment&apos;s adult fare; you can fine-tune those later in Routes.
+            </p>
+            {!validPairs.length ? (
+              <p className="text-sm text-zinc-500">Select pickup/drop-off stops and enter their planned times to configure segment fares.</p>
+            ) : (
+              <div className="max-h-96 overflow-auto border border-black/10 rounded divide-y divide-black/10">
+                {validPairs.map(({ pickup_id, dropoff_id }) => {
+                  const pickup = stopById[pickup_id];
+                  const dropoff = stopById[dropoff_id];
+                  const key = pairFareKey(pickup_id, dropoff_id);
+                  const fares = pairFares[key] || {};
+                  const currency = pickup?.country === "SG" ? "S$" : "RM";
+                  return (
+                    <div key={key} className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_130px_130px] gap-3 items-center p-3">
+                      <div className="text-sm">
+                        <div className="font-bold">{pickup?.city || pickup_id} → {dropoff?.city || dropoff_id}</div>
+                        <div className="text-xs text-zinc-500">{pickup?.name || ""} → {dropoff?.name || ""}</div>
+                      </div>
+                      <label>
+                        <span className="te-label">Adult ({currency})</span>
+                        <input type="number" min="0" step="0.01" required className="te-input" disabled={!!createdRoute} value={fares.adultFare ?? form.fare} onChange={(e) => setPairFares((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), adultFare: e.target.value } }))} />
+                      </label>
+                      <label>
+                        <span className="te-label">Child ({currency})</span>
+                        <input type="number" min="0" step="0.01" required className="te-input" disabled={!!createdRoute} value={fares.childFare ?? form.childFare} onChange={(e) => setPairFares((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), childFare: e.target.value } }))} />
+                      </label>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {createdRoute && <p className="text-xs text-amber-700 mt-2">This route has already been saved. To change fares, use Routes; retry only regenerates schedules from the saved fares.</p>}
           </div>
           <div className="mt-5">
             <div className="te-label mb-2">Operating days</div>
