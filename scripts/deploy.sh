@@ -16,7 +16,10 @@
 #      Then validate backend/.env for production and ABORT before any
 #      restart if APP_ENV is not exactly "production", if required secrets
 #      are missing/empty/placeholders, if STRIPE_API_KEY is not sk_live_*,
-#      or if SEED_DEMO_DATA=true. Secret values are never printed.
+#      if STRIPE_WEBHOOK_SECRET does not start with whsec_, if CORS_ORIGINS
+#      is missing or contains "*", if MONGO_URL/DB_NAME are missing, or if
+#      SEED_DEMO_DATA=true. Warns if TRUST_PROXY_HEADERS is not true (nginx).
+#      Existing MongoDB data is reused and never modified by this script. Secret values are never printed.
 #   2. Install/check Python dependencies and smoke-import the backend.
 #   3. Build the React frontend.
 #   4. Run a read-only seat-inventory migration preflight; abort before restart
@@ -184,6 +187,35 @@ validate_production_env() {
         echo "ERROR: STRIPE_API_KEY must be a live key (sk_live_...) in production." >&2
         errors=$((errors + 1))
     fi
+    v="$(env_value STRIPE_WEBHOOK_SECRET "$envfile")"
+    if ! is_placeholder "$v" && [[ "$v" != whsec_* ]]; then
+        echo "ERROR: STRIPE_WEBHOOK_SECRET must start with 'whsec_' in backend/.env (copy the signing secret from the Stripe live-mode webhook endpoint)." >&2
+        errors=$((errors + 1))
+    fi
+    v="$(env_value CORS_ORIGINS "$envfile")"
+    if [[ -z "${v// }" ]]; then
+        echo "ERROR: CORS_ORIGINS is missing in backend/.env. Set it to your site origins, e.g. CORS_ORIGINS=\"https://example.com,https://www.example.com\"." >&2
+        errors=$((errors + 1))
+    elif [[ "$v" == *"*"* ]]; then
+        echo "ERROR: CORS_ORIGINS must not contain '*' in production. List explicit https origins in backend/.env." >&2
+        errors=$((errors + 1))
+    fi
+    for key in MONGO_URL DB_NAME; do
+        v="$(env_value "$key" "$envfile")"
+        if [[ -z "${v// }" ]]; then
+            echo "ERROR: $key is missing in backend/.env. Point it at your EXISTING MongoDB (MONGO_URL) and database name (DB_NAME)." >&2
+            errors=$((errors + 1))
+        fi
+    done
+    v="$(env_value TRUST_PROXY_HEADERS "$envfile")"
+    if [[ "${v,,}" != "true" ]]; then
+        warn "TRUST_PROXY_HEADERS is not 'true' in backend/.env. Behind nginx all clients will appear as 127.0.0.1 (shared rate limits, wrong audit IPs). Set TRUST_PROXY_HEADERS=true and make nginx overwrite X-Forwarded-For."
+    fi
+    v="$(env_value MONGO_URL "$envfile")"
+    if [[ "$v" == mongodb://localhost* || "$v" == mongodb://127.0.0.1* ]] && [[ "$v" != *@* ]]; then
+        warn "MONGO_URL uses local MongoDB without credentials. Fine only if mongod is bound to 127.0.0.1 and firewalled; enabling auth is recommended."
+    fi
+    echo "  ℹ reusing existing MongoDB database '$(env_value DB_NAME "$envfile")': this script never drops, seeds or re-initializes data (the preflight below is read-only)."
     v="$(env_value SEED_DEMO_DATA "$envfile")"
     if [[ "${v,,}" == "true" ]]; then
         echo "ERROR: SEED_DEMO_DATA=true is not allowed in production. Remove it or set it to false." >&2
