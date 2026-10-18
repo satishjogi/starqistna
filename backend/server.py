@@ -2967,16 +2967,6 @@ async def _issue_gohub_tickets(booking_id: str) -> None:
     if not to_term or not (to_term.get("cts_code") or "").strip():
         reasons.append("to_terminal.cts_code missing")
 
-    async def _send_email_with_current_state() -> None:
-        """Reload the booking (so the email sees the latest gohub_* fields)
-        and fire the confirmation email — never lets errors escape."""
-        try:
-            fresh = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
-            if fresh:
-                await send_booking_confirmation(fresh, from_term, to_term)
-        except Exception:  # noqa: BLE001
-            logger.exception("gohub: email dispatch failed for booking %s", booking_id)
-
     if reasons:
         await db.bookings.update_one(
             {"id": booking_id},
