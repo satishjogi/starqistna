@@ -86,7 +86,7 @@ async def _run() -> int:
 
     # Primary rows represent both temporary holds and existing booked seat locks.
     async for lock in db.seat_locks.find(
-        {"status": {"$in": ["locked", "booked"]}}, {"_id": 0}
+        {"status": {"$in": ["locked", "booked"]}}
     ):
         status = lock.get("status")
         if status == "locked":
@@ -137,7 +137,12 @@ async def _run() -> int:
         ref = (booking or {}).get("reference") or booking_id
         occupant = {
             "label": f"booking {ref}" if booking_id else f"hold {str(lock.get('lock_token') or lock.get('id') or 'unknown')[-8:]}",
+            # Distinguish duplicate legacy lock rows even when they point at the
+            # same booking; startup migration cannot create two active rows for
+            # one bus/leg/seat key.
+            "occupant_key": f"lock:{lock.get('id') or lock.get('_id') or lock.get('lock_token')}",
             "booking_id": booking_id,
+            "lock_token": lock.get("lock_token"),
             "source": "seat_locks",
             "status": status,
             "from": pickup,
@@ -183,7 +188,9 @@ async def _run() -> int:
             reconstructed_confirmed_seats += 1
             occupant = {
                 "label": f"confirmed booking {booking.get('reference') or booking_id}",
+                "occupant_key": f"booking:{booking_id}:{seat}",
                 "booking_id": booking_id,
+                "lock_token": None,
                 "source": "confirmed_bookings_without_active_lock",
                 "status": "confirmed",
                 "from": pickup,
@@ -192,9 +199,45 @@ async def _run() -> int:
             for leg in legs:
                 record(str(bus_id), int(leg), seat, occupant)
 
+    # If this preflight is run after a previous migration attempt, check the
+    # secondary leg inventory too. Orphan rows can otherwise stop index creation
+    # or conceal a mismatch between the primary and per-leg lock collections.
+    if "seat_leg_locks" in await db.list_collection_names():
+        async for leg_lock in db.seat_leg_locks.find(
+            {"status": {"$in": ["locked", "booked"]}}, {"_id": 0}
+        ):
+            if leg_lock.get("status") == "locked":
+                expiry = _parse_time(leg_lock.get("expires_at"))
+                if expiry is None or expiry <= now:
+                    continue
+            key = (
+                str(leg_lock.get("bus_instance_id") or ""),
+                int(leg_lock.get("leg_index", -1)),
+                str(leg_lock.get("seat_number") or "").strip().upper(),
+            )
+            matching = collisions.get(key, [])
+            if not matching:
+                errors.append(
+                    f"orphan active seat_leg_locks row: bus={key[0]} leg={key[1]} "
+                    f"seat={key[2]} booking={leg_lock.get('booking_id') or 'hold'}"
+                )
+                continue
+            leg_booking_id = leg_lock.get("booking_id")
+            leg_token = leg_lock.get("lock_token")
+            owner_match = any(
+                (leg_booking_id and item.get("booking_id") == leg_booking_id)
+                or (not leg_booking_id and leg_token and item.get("lock_token") == leg_token)
+                for item in matching
+            )
+            if not owner_match:
+                errors.append(
+                    f"per-leg reservation owner mismatch: bus={key[0]} leg={key[1]} "
+                    f"seat={key[2]} booking={leg_booking_id or 'hold'}"
+                )
+
     conflicts = {
         key: occupants for key, occupants in collisions.items()
-        if len({(item.get("booking_id"), item.get("label")) for item in occupants}) > 1
+        if len({item.get("occupant_key") or item.get("label") for item in occupants}) > 1
     }
 
     print("Starqistna multi-stop seat migration preflight (READ-ONLY)")
