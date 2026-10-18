@@ -5455,6 +5455,24 @@ async def _migrate_seat_lock_legs():
                     upsert=True,
                 )
             except DuplicateKeyError as exc:
+                # Multiple Gunicorn workers may attempt the same idempotent upsert.
+                # Accept only an identical lock/leg row; a different seat owner
+                # colliding on this bus leg must still stop startup.
+                existing_leg = await leg_collection.find_one(
+                    {"seat_lock_id": lock_id, "leg_index": int(leg_index)}, {"_id": 0}
+                )
+                same_reservation = bool(
+                    existing_leg
+                    and existing_leg.get("bus_instance_id") == bus_id
+                    and existing_leg.get("seat_number") == full_lock.get("seat_number")
+                    and int(existing_leg.get("leg_index", -1)) == int(leg_index)
+                    and (
+                        not full_lock.get("booking_id")
+                        or existing_leg.get("booking_id") == full_lock.get("booking_id")
+                    )
+                )
+                if same_reservation:
+                    continue
                 raise RuntimeError(
                     "Cannot safely migrate active seat holds: two bookings claim the same "
                     f"physical bus leg and seat ({bus_id}, leg {leg_index}, {full_lock.get('seat_number')})."
@@ -5588,6 +5606,21 @@ async def _migrate_seat_lock_legs():
                         upsert=True,
                     )
                 except DuplicateKeyError as exc:
+                    # Concurrent worker/reconciler may have completed the same
+                    # booking-seat upsert. Accept only an identical reservation;
+                    # collisions owned by another booking must fail closed.
+                    existing_leg = await leg_collection.find_one(
+                        {"seat_lock_id": lock_id, "leg_index": int(leg_index)}, {"_id": 0}
+                    )
+                    same_reservation = bool(
+                        existing_leg
+                        and existing_leg.get("bus_instance_id") == bus_id
+                        and existing_leg.get("seat_number") == seat_number
+                        and int(existing_leg.get("leg_index", -1)) == int(leg_index)
+                        and existing_leg.get("booking_id") == booking.get("id")
+                    )
+                    if same_reservation:
+                        continue
                     raise RuntimeError(
                         "Cannot safely migrate confirmed bookings: two bookings claim the "
                         f"same physical bus leg and seat ({bus_id}, leg {leg_index}, {seat_number})."
