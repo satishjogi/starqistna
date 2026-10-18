@@ -247,6 +247,9 @@ def test_index_failure_fails_closed(monkeypatch):
         async def drop_index(self, *a, **k):
             return None
 
+        async def update_many(self, *a, **k):
+            return type("R", (), {"modified_count": 0})()
+
     db = type("D", (), {"schedules": _Idx(), "seat_locks": _Idx(), "seat_leg_locks": _Idx()})()
     monkeypatch.setattr(server, "db", db)
     with pytest.raises(RuntimeError):
