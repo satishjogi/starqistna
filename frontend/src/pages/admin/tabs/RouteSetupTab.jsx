@@ -18,6 +18,7 @@ export default function RouteSetupTab() {
   const [dropoffSearch, setDropoffSearch] = useState("");
   const [showAllPickupCities, setShowAllPickupCities] = useState(false);
   const [showAllDropoffCities, setShowAllDropoffCities] = useState(false);
+  const [viaCities, setViaCities] = useState([]);
   const [busInstanceKey, setBusInstanceKey] = useState("");
   const [form, setForm] = useState({
     code: "", name: "", origin_city: "", destination_city: "",
@@ -48,10 +49,15 @@ export default function RouteSetupTab() {
   const cities = useMemo(() => [...new Set(stops.map((s) => String(s.city || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b)), [stops]);
   const allPickups = stops.filter((s) => s.is_pickup !== false).sort(sortStops);
   const allDropoffs = stops.filter((s) => s.is_dropoff !== false).sort(sortStops);
-  const pickups = !showAllPickupCities && form.origin_city
-    ? allPickups.filter((s) => s.city === form.origin_city) : allPickups;
-  const dropoffs = !showAllDropoffCities && form.destination_city
-    ? allDropoffs.filter((s) => s.city === form.destination_city) : allDropoffs;
+  const intermediateCityOptions = cities.filter((city) =>
+    city !== form.origin_city && city !== form.destination_city && !viaCities.includes(city)
+  );
+  const pickupCities = new Set([form.origin_city, ...viaCities].filter(Boolean));
+  const dropoffCities = new Set([...viaCities, form.destination_city].filter(Boolean));
+  const pickups = !showAllPickupCities && pickupCities.size
+    ? allPickups.filter((s) => pickupCities.has(s.city)) : allPickups;
+  const dropoffs = !showAllDropoffCities && dropoffCities.size
+    ? allDropoffs.filter((s) => dropoffCities.has(s.city)) : allDropoffs;
   const filterStops = (items, query) => {
     const q = query.trim().toLowerCase();
     if (!q) return items;
@@ -255,14 +261,29 @@ export default function RouteSetupTab() {
             <label><span className="te-label">Route code</span><input className="te-input uppercase" required value={form.code} disabled={!!createdRoute} placeholder="KL-SG" onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })} /></label>
             <label className="lg:col-span-2"><span className="te-label">Route name</span><input className="te-input" required value={form.name} disabled={!!createdRoute} placeholder="Kuala Lumpur to Singapore" onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
             <label><span className="te-label">Trip number (optional)</span><input className="te-input uppercase" maxLength={10} value={form.trip_no} placeholder="SQ001" onChange={(e) => setForm({ ...form, trip_no: e.target.value.toUpperCase() })} /></label>
-            <label><span className="te-label">Origin city</span><select className="te-input" required value={form.origin_city} disabled={!!createdRoute || loading} onChange={(e) => { setForm((prev) => ({ ...prev, origin_city: e.target.value })); setShowAllPickupCities(false); }}><option value="">Choose origin city…</option>{cities.map((city) => <option key={city} value={city}>{city}</option>)}</select></label>
-            <label><span className="te-label">Destination city</span><select className="te-input" required value={form.destination_city} disabled={!!createdRoute || loading} onChange={(e) => { setForm((prev) => ({ ...prev, destination_city: e.target.value })); setShowAllDropoffCities(false); }}><option value="">Choose destination city…</option>{cities.map((city) => <option key={city} value={city}>{city}</option>)}</select></label>
+            <label><span className="te-label">Origin city</span><select className="te-input" required value={form.origin_city} disabled={!!createdRoute || loading} onChange={(e) => { const city = e.target.value; setForm((prev) => ({ ...prev, origin_city: city })); setViaCities((prev) => prev.filter((via) => via !== city && via !== form.destination_city)); setShowAllPickupCities(false); }}><option value="">Choose origin city…</option>{cities.map((city) => <option key={city} value={city}>{city}</option>)}</select></label>
+            <div className="lg:col-span-2">
+              <div className="flex items-center justify-between mb-1"><span className="te-label">Intermediate cities (optional)</span><button type="button" disabled={!!createdRoute || !intermediateCityOptions.length} onClick={() => setViaCities((prev) => [...prev, intermediateCityOptions[0]])} className="inline-flex items-center gap-1 rounded border border-black/15 px-2 py-1 text-xs font-semibold hover:bg-zinc-50 disabled:opacity-40"><span aria-hidden="true">+</span> Add city</button></div>
+              {!viaCities.length && <p className="text-xs text-zinc-500 py-2">Add a city if the route passes through another city or state.</p>}
+              <div className="space-y-2">
+                {viaCities.map((viaCity, index) => (
+                  <div key={index} className="flex items-center gap-2">
+                    <select className="te-input flex-1" aria-label={`Intermediate city ${index + 1}`} value={viaCity} disabled={!!createdRoute || loading} onChange={(e) => { const nextCity = e.target.value; setViaCities((prev) => prev.map((city, i) => i === index ? nextCity : city)); setShowAllPickupCities(false); setShowAllDropoffCities(false); }}>
+                      <option value="">Choose intermediate city…</option>
+                      {[viaCity, ...intermediateCityOptions].filter((city, i, all) => all.indexOf(city) === i).map((city) => <option key={city} value={city}>{city}</option>)}
+                    </select>
+                    <button type="button" aria-label={`Remove intermediate city ${index + 1}`} title="Remove city" disabled={!!createdRoute} onClick={() => setViaCities((prev) => prev.filter((_, i) => i !== index))} className="rounded border border-black/15 px-3 py-2 text-sm hover:bg-zinc-50 disabled:opacity-40">×</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <label><span className="te-label">Destination city</span><select className="te-input" required value={form.destination_city} disabled={!!createdRoute || loading} onChange={(e) => { const city = e.target.value; setForm((prev) => ({ ...prev, destination_city: city })); setViaCities((prev) => prev.filter((via) => via !== city && via !== form.origin_city)); setShowAllDropoffCities(false); }}><option value="">Choose destination city…</option>{cities.map((city) => <option key={city} value={city}>{city}</option>)}</select></label>
           </div>
         </section>
 
         <section className="te-card p-5 md:p-7">
           <h3 className="font-black text-lg mb-1">2. Stops along the journey</h3>
-          <p className="text-xs text-zinc-500 mb-4">Select the pickup and drop-off points served by this route. Planned times below determine stop order and each offset from the first departure.</p>
+          <p className="text-xs text-zinc-500 mb-4">Select the pickup and drop-off points served by this route. By default, pickup choices include the origin and intermediate cities, while drop-off choices include intermediate and destination cities. Planned times below determine stop order and each offset from the first departure.</p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
             <div>
               <div className="te-overline mb-2">Pickup stops ({form.pickupIds.length})</div>
