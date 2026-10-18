@@ -140,7 +140,7 @@ async def _run() -> int:
             # Distinguish duplicate legacy lock rows even when they point at the
             # same booking; startup migration cannot create two active rows for
             # one bus/leg/seat key.
-            "occupant_key": f"lock:{lock.get('id') or lock.get('_id') or lock.get('lock_token')}",
+            "occupant_key": f"lock:{lock.get('_id') or lock.get('id') or lock.get('lock_token')}",
             "booking_id": booking_id,
             "lock_token": lock.get("lock_token"),
             "source": "seat_locks",
