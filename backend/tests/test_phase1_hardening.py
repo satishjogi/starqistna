@@ -81,7 +81,9 @@ class _DB:
         }])
         future = "2999-01-01T00:00:00+00:00"
         self.seat_locks = _Coll([
-            {"id": f"l{i}", "schedule_id": "s1", "seat_number": sn, "status": "locked",
+            {"id": f"l{i}", "schedule_id": "s1", "bus_instance_id": "s1",
+             "seat_number": sn, "status": "locked", "leg_indices": [0],
+             "segment_from_terminal_id": "a", "segment_to_terminal_id": "b",
              "owner": "guest:tok", "lock_token": "tok", "expires_at": future}
             for i, sn in enumerate(seats)
         ])
@@ -245,7 +247,7 @@ def test_index_failure_fails_closed(monkeypatch):
         async def drop_index(self, *a, **k):
             return None
 
-    db = type("D", (), {"schedules": _Idx(), "seat_locks": _Idx()})()
+    db = type("D", (), {"schedules": _Idx(), "seat_locks": _Idx(), "seat_leg_locks": _Idx()})()
     monkeypatch.setattr(server, "db", db)
     with pytest.raises(RuntimeError):
         _run(server._ensure_indexes())
@@ -273,3 +275,39 @@ def test_ready_reports_503_when_db_down(monkeypatch):
 def test_email_escapes_passenger_name():
     import email_service
     assert email_service._esc("<script>") == "&lt;script&gt;"
+
+
+def test_route_segment_leg_indices_allow_disjoint_seat_reuse():
+    route = {
+        "boarding_stops": [
+            {"terminal_id": "A", "offset_min": 0},
+            {"terminal_id": "B", "offset_min": 100},
+            {"terminal_id": "C", "offset_min": 200},
+        ],
+        "alighting_stops": [
+            {"terminal_id": "B", "offset_min": 100},
+            {"terminal_id": "C", "offset_min": 200},
+            {"terminal_id": "D", "offset_min": 300},
+        ],
+    }
+    assert server._route_segment_leg_indices(route, "A", "B") == [0]
+    assert server._route_segment_leg_indices(route, "C", "D") == [2]
+    assert server._route_segment_leg_indices(route, "A", "D") == [0, 1, 2]
+    assert server._route_segment_leg_indices(route, "B", "D") == [1, 2]
+
+
+def test_route_segment_leg_indices_reject_reverse_or_unknown_stops():
+    route = {
+        "boarding_stops": [
+            {"terminal_id": "A", "offset_min": 0},
+            {"terminal_id": "B", "offset_min": 100},
+        ],
+        "alighting_stops": [
+            {"terminal_id": "B", "offset_min": 100},
+            {"terminal_id": "C", "offset_min": 200},
+        ],
+    }
+    with pytest.raises(ValueError, match="before drop-off"):
+        server._route_segment_leg_indices(route, "B", "A")
+    with pytest.raises(ValueError, match="both belong"):
+        server._route_segment_leg_indices(route, "A", "unknown")
