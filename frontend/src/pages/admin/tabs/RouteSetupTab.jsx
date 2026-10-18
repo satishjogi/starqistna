@@ -38,10 +38,9 @@ export default function RouteSetupTab() {
   const stopById = useMemo(() => Object.fromEntries(stops.map((s) => [s.id, s])), [stops]);
   const pickups = stops.filter((s) => s.is_pickup !== false);
   const dropoffs = stops.filter((s) => s.is_dropoff !== false);
-  const validPairCount = form.pickupIds.reduce((n, id) => n + form.dropoffIds.filter((dropId) => dropId !== id).length, 0);
   const selectedStopIds = [...new Set([...form.pickupIds, ...form.dropoffIds])];
   const toMinutes = (value) => {
-    if (!/^\\d{2}:\\d{2}$/.test(value || "")) return NaN;
+    if (!/^\d{2}:\d{2}$/.test(value || "")) return NaN;
     const [hours, minutes] = value.split(":").map(Number);
     return hours * 60 + minutes;
   };
@@ -50,11 +49,13 @@ export default function RouteSetupTab() {
     if (!Number.isFinite(base) || !Number.isFinite(stop)) return NaN;
     return (stop - base + 1440) % 1440;
   };
+  const validPairCount = form.pickupIds.reduce((n, id) => n + form.dropoffIds.filter((dropId) => dropId !== id && offsetForStop(dropId) > offsetForStop(id)).length, 0);
   const orderedSelectedStops = selectedStopIds.map((id) => ({ id, offset: offsetForStop(id) })).sort((a, b) => a.offset - b.offset);
   const timeValidation = (() => {
     if (!form.pickupIds.length || !form.dropoffIds.length) return "";
     if (selectedStopIds.some((id) => !Number.isFinite(offsetForStop(id)))) return "Enter a planned time for every selected stop.";
     if (orderedSelectedStops.some((stop, i) => i > 0 && stop.offset === orderedSelectedStops[i - 1].offset)) return "Each selected stop needs a different time so journey order is unambiguous.";
+    if (!form.pickupIds.some((id) => offsetForStop(id) === 0)) return "At least one pickup stop must match the first departure time.";
     return "";
   })();
   const toggleId = (field, id) => {
@@ -115,7 +116,7 @@ export default function RouteSetupTab() {
         const boarding_stops = form.pickupIds.map((terminal_id) => ({ terminal_id, offset_min: offsetForStop(terminal_id) }));
         const alighting_stops = form.dropoffIds.map((terminal_id) => ({ terminal_id, offset_min: offsetForStop(terminal_id) }));
         const pairings = form.pickupIds.flatMap((pickup_id) =>
-          form.dropoffIds.filter((dropoff_id) => dropoff_id !== pickup_id).map((dropoff_id) => ({
+          form.dropoffIds.filter((dropoff_id) => dropoff_id !== pickup_id && offsetForStop(dropoff_id) > offsetForStop(pickup_id)).map((dropoff_id) => ({
             pickup_id, dropoff_id, adult_fare: adultFare, child_fare: childFare,
             senior_fare: adultFare, oku_fare: adultFare,
             currency: stopById[pickup_id]?.country === "SG" ? "sgd" : "myr",
