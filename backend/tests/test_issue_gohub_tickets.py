@@ -86,6 +86,19 @@ def _run(coro):
 # Tests
 # ---------------------------------------------------------------------------
 
+def test_issue_skips_for_non_tbs_origin_even_if_cts_codes_exist(monkeypatch):
+    monkeypatch.setenv("GOHUB_ENABLED", "true")
+    fdb = _bookings_setup()
+    fdb.terminals.docs[0]["name"] = "KL Sentral"
+    fdb.terminals.docs[0]["code"] = "KLS"
+    fdb.terminals.docs[0]["cts_code"] = "KLS01"
+    monkeypatch.setattr(server, "db", fdb)
+    _run(server._issue_gohub_tickets("BK1"))
+    doc = fdb.bookings.docs[0]
+    assert doc["gohub_status"] == "skipped"
+    assert "origin is not TBS" in doc["gohub_skip_reason"]
+
+
 def test_issue_skips_when_gohub_disabled(monkeypatch):
     monkeypatch.setenv("GOHUB_ENABLED", "false")
     fdb = _bookings_setup()
