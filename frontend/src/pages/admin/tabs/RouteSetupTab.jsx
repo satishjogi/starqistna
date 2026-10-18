@@ -90,6 +90,16 @@ export default function RouteSetupTab() {
     const dropoffState = String(dropoff?.state || "").trim().toLowerCase();
     return Boolean(pickupState && dropoffState && pickupState === dropoffState);
   };
+  const isTbsTerminal = (id) => {
+    const stop = stopById[id];
+    if (!stop) return false;
+    const code = String(stop.code || "").trim().toUpperCase();
+    const ctsCode = String(stop.cts_code || "").trim().toUpperCase();
+    const name = String(stop.name || "").trim().toUpperCase();
+    return code === "TBS" || ctsCode.startsWith("TBS") ||
+      name === "TBS" || name.includes("TERMINAL BERSEPADU SELATAN");
+  };
+  const hasTbsPickup = form.pickupIds.some(isTbsTerminal);
   const validPairs = form.pickupIds.flatMap((pickup_id) =>
     form.dropoffIds
       .filter((dropoff_id) =>
@@ -169,6 +179,10 @@ export default function RouteSetupTab() {
     }
     if (!form.pickupIds.length || !form.dropoffIds.length) {
       setError("Choose at least one pickup stop and one drop-off stop.");
+      return;
+    }
+    if (hasTbsPickup && !form.trip_no.trim()) {
+      setError("Enter the GoHub trip number when TBS is selected as a pickup stop.");
       return;
     }
     if (!form.start_date || !form.end_date || form.end_date < form.start_date) {
@@ -303,7 +317,7 @@ export default function RouteSetupTab() {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             <label><span className="te-label">Route code</span><input className="te-input uppercase" required value={form.code} disabled={!!createdRoute} placeholder="KL-SG" onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })} /></label>
             <label className="lg:col-span-2"><span className="te-label">Route name</span><input className="te-input" required value={form.name} disabled={!!createdRoute} placeholder="Kuala Lumpur to Singapore" onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
-            <label><span className="te-label">Trip number (optional)</span><input className="te-input uppercase" maxLength={10} value={form.trip_no} placeholder="SQ001" onChange={(e) => setForm({ ...form, trip_no: e.target.value.toUpperCase() })} /></label>
+            <label><span className="te-label">Trip number {hasTbsPickup ? "(required for TBS / GoHub)" : "(optional)"}</span><input className="te-input uppercase" maxLength={10} value={form.trip_no} required={hasTbsPickup} placeholder="SQ001" onChange={(e) => setForm({ ...form, trip_no: e.target.value.toUpperCase() })} /><span className="text-xs text-zinc-500">{hasTbsPickup ? "Used for GoHub ticket issuance on TBS-origin bookings." : "Only needed for GoHub when TBS is an origin stop."}</span></label>
             <label><span className="te-label">Origin city</span><select className="te-input" required value={form.origin_city} disabled={!!createdRoute || loading} onChange={(e) => { const city = e.target.value; setForm((prev) => ({ ...prev, origin_city: city })); setViaCities((prev) => prev.filter((via) => via !== city && via !== form.destination_city)); setShowAllPickupCities(false); }}><option value="">Choose origin city…</option>{cities.map((city) => <option key={city} value={city}>{city}</option>)}</select></label>
             <div className="lg:col-span-2">
               <div className="flex items-center justify-between mb-1"><span className="te-label">Intermediate cities (optional)</span><button type="button" disabled={!!createdRoute || !intermediateCityOptions.length} onClick={() => setViaCities((prev) => [...prev, intermediateCityOptions[0]])} className="inline-flex items-center gap-1 rounded border border-black/15 px-2 py-1 text-xs font-semibold hover:bg-zinc-50 disabled:opacity-40"><span aria-hidden="true">+</span> Add city</button></div>
