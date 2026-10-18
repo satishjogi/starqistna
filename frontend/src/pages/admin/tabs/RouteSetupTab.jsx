@@ -80,9 +80,23 @@ export default function RouteSetupTab() {
     return (stop - base + 1440) % 1440;
   };
   const dayOffsetForStop = (id) => Math.floor((toMinutes(form.departure_time) + offsetForStop(id)) / 1440);
+  const isSameStateOrCity = (pickup_id, dropoff_id) => {
+    const pickup = stopById[pickup_id];
+    const dropoff = stopById[dropoff_id];
+    const pickupCity = String(pickup?.city || "").trim().toLowerCase();
+    const dropoffCity = String(dropoff?.city || "").trim().toLowerCase();
+    if (pickupCity && dropoffCity && pickupCity === dropoffCity) return true;
+    const pickupState = String(pickup?.state || "").trim().toLowerCase();
+    const dropoffState = String(dropoff?.state || "").trim().toLowerCase();
+    return Boolean(pickupState && dropoffState && pickupState === dropoffState);
+  };
   const validPairs = form.pickupIds.flatMap((pickup_id) =>
     form.dropoffIds
-      .filter((dropoff_id) => dropoff_id !== pickup_id && offsetForStop(dropoff_id) > offsetForStop(pickup_id))
+      .filter((dropoff_id) =>
+        dropoff_id !== pickup_id &&
+        !isSameStateOrCity(pickup_id, dropoff_id) &&
+        offsetForStop(dropoff_id) > offsetForStop(pickup_id)
+      )
       .map((dropoff_id) => ({ pickup_id, dropoff_id }))
   ).sort((a, b) =>
     offsetForStop(a.pickup_id) - offsetForStop(b.pickup_id) ||
@@ -349,7 +363,7 @@ export default function RouteSetupTab() {
               </div>
             </div>
           </div>
-          <div className="mt-3 text-xs text-zinc-600">{validPairCount} pickup/drop-off combinations will be configured. Each selected combination becomes searchable inventory.</div>
+          <div className="mt-3 text-xs text-zinc-600">{validPairCount} cross-state pickup/drop-off combinations will be configured. Same-city and same-state combinations (for example, KL Sentral → TBS) are excluded automatically.</div>
           <div className="mt-6 border-t border-black/10 pt-5">
             <h4 className="font-bold mb-1">Planned stop times</h4>
             <p className="text-xs text-zinc-500 mb-3">Enter the local time at every selected stop. Drag rows to reorder, or use the arrows. Reordering assigns the existing time slots to the new stop order; review the times and offsets before saving. Times after midnight are supported.</p>
