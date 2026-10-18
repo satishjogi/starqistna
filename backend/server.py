@@ -5383,12 +5383,12 @@ async def _ensure_indexes():
     leg_collection = getattr(db, "seat_leg_locks", None)
     if leg_collection is None:
         raise RuntimeError("Required MongoDB collection seat_leg_locks is unavailable.")
-    await leg_collection.create_index(
-        [("seat_lock_id", ASCENDING), ("leg_index", ASCENDING)],
-        unique=True,
-        name="uniq_seat_lock_leg",
-    )
     try:
+        await leg_collection.create_index(
+            [("seat_lock_id", ASCENDING), ("leg_index", ASCENDING)],
+            unique=True,
+            name="uniq_seat_lock_leg",
+        )
         await leg_collection.create_index(
             [("bus_instance_id", ASCENDING), ("leg_index", ASCENDING), ("seat_number", ASCENDING)],
             unique=True,
@@ -5397,9 +5397,9 @@ async def _ensure_indexes():
         )
     except DuplicateKeyError as e:
         first = e.details.get("keyValue") if getattr(e, "details", None) else str(e)[:150]
-        logger.critical("Existing overlapping seat reservations block leg-level index: %s", first)
+        logger.critical("Leg-level seat inventory index creation failed: %s", first)
         raise RuntimeError(
-            "Required seat uniqueness index uniq_bus_instance_leg_seat_active could not be created"
+            "Required leg-level seat uniqueness indexes could not be created"
         ) from e
 
     await _migrate_seat_lock_legs()
