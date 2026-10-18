@@ -17,6 +17,7 @@ export default function AddScheduleTab() {
   const [fxRate, setFxRate] = useState(3.5);
   const [fxRateInput, setFxRateInput] = useState("3.5");
   const [fxMsg, setFxMsg] = useState("");
+  const [createAllSegments, setCreateAllSegments] = useState(false);
 
   useEffect(() => {
     api.get("/admin/terminals").then(({ data }) => setTerminals(data)).catch(() => {});
@@ -62,22 +63,58 @@ export default function AddScheduleTab() {
       setMsg("Pick at least one day of the week.");
       return;
     }
-    try {
+
+    const pairings = selectedRoute && createAllSegments
+      ? (selectedRoute.pairings || []).filter((p) => p.pickup_id && p.dropoff_id)
+      : [{
+          pickup_id: form.from_terminal_id,
+          dropoff_id: form.to_terminal_id,
+          adult_fare: form.adult_fare,
+          child_fare: form.child_fare,
+        }];
+    if (createAllSegments && (!selectedRoute || pairings.length === 0)) {
+      setMsg("This route has no configured fare pairings. Configure its pairing matrix first.");
+      return;
+    }
+
+    setMsg(createAllSegments ? "Creating route segments…" : "Creating schedules…");
+    let created = 0;
+    let skipped = 0;
+    const errors = [];
+    for (const pair of pairings) {
       const payload = {
         ...form,
-        adult_fare: parseFloat(form.adult_fare),
-        child_fare: parseFloat(form.child_fare),
+        from_terminal_id: pair.pickup_id,
+        to_terminal_id: pair.dropoff_id,
+        adult_fare: Number(pair.adult_fare ?? form.adult_fare),
+        child_fare: Number(pair.child_fare ?? form.child_fare),
         total_seats: parseInt(form.total_seats, 10),
       };
       if (!payload.route_id) delete payload.route_id;
       if (!payload.trip_no) delete payload.trip_no;
-      const { data } = await api.post("/admin/schedules/bulk", payload);
-      setMsg(`Created ${data.created} schedule(s)${data.skipped_duplicates ? ` · ${data.skipped_duplicates} skipped (duplicates)` : ""} · billed in ${data.currency.toUpperCase()}.`);
-    } catch (e) {
-      setMsg(e?.response?.data?.detail || "Failed");
+      try {
+        const response = await api.post("/admin/schedules/bulk", payload);
+        created += Number(response.data.created || 0);
+        skipped += Number(response.data.skipped_duplicates || 0);
+      } catch (e) {
+        errors.push(
+          String(pair.pickup_id) + " → " + String(pair.dropoff_id) + ": " +
+          (e?.response?.data?.detail || "failed")
+        );
+      }
     }
+    const mode = createAllSegments ? " across " + pairings.length + " configured route segment(s)" : "";
+    let summary = "Created " + created + " schedule(s)" + mode +
+      (skipped ? " · " + skipped + " existing duplicate(s) skipped" : "") + ".";
+    if (errors.length) {
+      summary += " Some segments need attention: " + errors.join(" · ");
+    } else if (createAllSegments) {
+      summary += " Same-bus seats are shared only across overlapping journey legs.";
+    } else {
+      summary += " Same-bus seats are shared only across overlapping journey legs.";
+    }
+    setMsg(summary);
   };
-
   // When a route is picked, the from/to fields DEFAULT to the route's
   // origin → destination but stay editable — admin may want to sell a specific
   // segment (e.g. KL→Melaka only). Sibling schedules for the same physical bus
@@ -160,7 +197,10 @@ export default function AddScheduleTab() {
           <select
             className="te-input"
             value={form.route_id}
-            onChange={(e) => setForm({ ...form, route_id: e.target.value, from_terminal_id: "", to_terminal_id: "" })}
+            onChange={(e) => {
+              setForm({ ...form, route_id: e.target.value, from_terminal_id: "", to_terminal_id: "" });
+              setCreateAllSegments(false);
+            }}
             data-testid="sched-route"
           >
             <option value="">— None (create unlinked) —</option>
@@ -177,13 +217,24 @@ export default function AddScheduleTab() {
           )}
         </div>
         {selectedRoute && (
-          <div className="md:col-span-2 border-l-2 border-[#002FA7] pl-3 py-1 text-[11px] font-mono text-zinc-700 leading-relaxed" data-testid="route-schedule-banner">
-            <b>Route linked · shared seat pool.</b> Any schedule you create on this
-            route + date + time is the SAME physical bus — seats are automatically
-            shared across every segment you sell (booking seat 5A on the KL→Melaka
-            row instantly blocks 5A on the KL→SG or Melaka→JB row for the same bus).
-            Pick From/To below to sell a specific segment; defaults are the route&apos;s
-            origin → final destination.
+          <div className="md:col-span-2 space-y-3">
+            <label className="flex items-start gap-2 text-sm cursor-pointer" data-testid="create-all-segments-toggle">
+              <input
+                type="checkbox"
+                className="mt-1"
+                checked={createAllSegments}
+                onChange={(e) => setCreateAllSegments(e.target.checked)}
+              />
+              <span>
+                <span className="font-bold">Create every configured route segment automatically</span>
+                <span className="block text-xs text-zinc-500 mt-1">
+                  Creates a linked schedule for each configured fare pairing on every selected service date, instead of repeating this form for every segment. Available pairings: {selectedRoute.pairings?.length || 0}.
+                </span>
+              </span>
+            </label>
+            <div className="border-l-2 border-[#002FA7] pl-3 py-1 text-[11px] font-mono text-zinc-700 leading-relaxed" data-testid="route-schedule-banner">
+              <b>Same physical bus · leg-aware seats.</b> All segments created for this route, date and departure time are linked to one bus. The same seat is blocked across overlapping journey legs, but can be sold again after a passenger gets off at an earlier stop.
+            </div>
           </div>
         )}
         <div>
