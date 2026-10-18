@@ -4468,6 +4468,19 @@ async def admin_create_schedule(body: CreateScheduleBody, request: Request, user
             raise HTTPException(400, "from_terminal_id must be one of the route's boarding stops")
         if body.to_terminal_id not in alighting_ids:
             raise HTTPException(400, "to_terminal_id must be one of the route's alighting stops")
+        try:
+            _route_segment_leg_indices(route, body.from_terminal_id, body.to_terminal_id)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        configured_pairings = route.get("pairings") or []
+        if configured_pairings and not any(
+            pairing.get("pickup_id") == body.from_terminal_id
+            and pairing.get("dropoff_id") == body.to_terminal_id
+            for pairing in configured_pairings
+        ):
+            raise HTTPException(
+                400, "From/to segment is not configured in this route's fare pairings"
+            )
     # Auto-derive currency from origin terminal country (SG → SGD, else MYR)
     origin = await db.terminals.find_one({"id": body.from_terminal_id}, {"_id": 0})
     if not origin:
