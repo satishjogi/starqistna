@@ -109,6 +109,7 @@ export default function RouteSetupTab() {
 
     setSaving(true);
     let route = createdRoute;
+    const scheduleBusKey = busInstanceKey || `route-setup-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     try {
       if (!route) {
         const boarding_stops = form.pickupIds.map((terminal_id) => ({ terminal_id, offset_min: offsetForStop(terminal_id) }));
@@ -132,7 +133,7 @@ export default function RouteSetupTab() {
         });
         route = response.data;
         setCreatedRoute(route);
-        if (!busInstanceKey) setBusInstanceKey(`route-setup-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+        setBusInstanceKey(scheduleBusKey);
         setMessage("Route saved. Generating schedules for each configured pickup/drop-off segment…");
       }
 
@@ -153,7 +154,7 @@ export default function RouteSetupTab() {
             days_of_week: form.days_of_week,
             departure_time: stopTimes[pair.pickup_id] || form.departure_time,
             arrival_time: stopTimes[pair.dropoff_id] || form.arrival_time,
-            bus_instance_key: busInstanceKey || `route-setup-${route.id}`,
+            bus_instance_key: scheduleBusKey,
             bus_type: form.bus_type,
             adult_fare: Number(pair.adult_fare ?? adultFare),
             child_fare: Number(pair.child_fare ?? childFare),
