@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Find (and optionally resolve) duplicate seat_locks that block the
+"""LEGACY pre-migration checker for whole-bus seat-lock duplicates.
+
+Do not use this tool once the per-leg seat_leg_locks collection exists: seat
+reuse on disjoint route segments is valid in the new schema. Use
+check_segment_seat_migration.py for the new read-only preflight.
+
+Find (and optionally resolve) duplicate seat_locks that block the
 uniq_bus_instance_seat_active index build.
 
 Symptom: after upgrading, backend logs the "Legacy duplicate seat_locks
@@ -49,6 +55,18 @@ async def main(release_expired: bool, fix: bool) -> int:
         return 2
     client = AsyncIOMotorClient(mongo_url)
     db = client[db_name]
+
+    # This script groups only by whole bus + seat and would misclassify valid
+    # non-overlapping segment reuse after the schema change. Refuse all modes,
+    # including --fix/--release-expired, once the new collection exists.
+    if "seat_leg_locks" in await db.list_collection_names():
+        print(
+            "Refusing to run the legacy whole-bus seat-lock tool: seat_leg_locks exists. "
+            "Use scripts/check_segment_seat_migration.py (read-only) instead.",
+            file=sys.stderr,
+        )
+        client.close()
+        return 2
 
     if release_expired:
         now_iso = datetime.now(timezone.utc).isoformat()
