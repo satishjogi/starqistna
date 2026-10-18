@@ -60,35 +60,49 @@ async def _seed(db, n_sched=2):
             "adult_fare": 10, "currency": "myr"})
 
 
-def _lock(sched, seats, user=None):
-    return server.lock_seats(server.SeatLockBody(schedule_id=sched, seat_numbers=seats), None, user)
+def _lock(sched, seats, user=None, pickup=None, dropoff=None):
+    return server.lock_seats(server.SeatLockBody(
+        schedule_id=sched, seat_numbers=seats,
+        pickup_terminal_id=pickup, dropoff_terminal_id=dropoff,
+    ), None, user)
 
 
-def _book(sched, token, seat="1A"):
+def _book(sched, token, seat="1A", pickup=None, dropoff=None):
     return server.create_booking(server.CreateBookingBody(
         schedule_id=sched,
         seat_assignments=[{"seat_number": seat, "passenger_index": 0}],
         passengers=[{"name": "A", "category": "adult"}],
-        contact_email="a@example.com", contact_phone="+60123456789", lock_token=token), None)
+        contact_email="a@example.com", contact_phone="+60123456789",
+        lock_token=token, pickup_terminal_id=pickup, dropoff_terminal_id=dropoff), None)
 
 
 def test_seat_uniqueness_index_is_created(mdb):
     _run(server._ensure_indexes())
-    names = _run(mdb.seat_locks.index_information())
-    assert "uniq_bus_instance_seat_active" in names
+    names = _run(mdb.seat_leg_locks.index_information())
+    assert "uniq_bus_instance_leg_seat_active" in names
+    assert "uniq_seat_lock_leg" in names
     assert "uniq_active_payment_per_booking" in _run(mdb.payment_transactions.index_information())
     assert "uniq_payment_attempt_id" in _run(mdb.payment_transactions.index_information())
 
 
-def test_startup_fails_closed_when_legacy_duplicates_exist(mdb):
+def test_startup_fails_closed_when_legacy_overlapping_locks_exist(mdb):
     async def go():
+        future = (server.utcnow() + server.timedelta(minutes=5)).isoformat()
         for i in range(2):
+            await mdb.schedules.insert_one({
+                "id": f"s{i}", "bus_instance_id": "bus1",
+                "departure_date": "2999-01-01", "departure_time": "08:00",
+                "from_terminal_id": "a", "to_terminal_id": "b",
+                "adult_fare": 10, "currency": "myr", "total_seats": 4,
+            })
             await mdb.seat_locks.insert_one({
-                "id": str(i), "bus_instance_id": "bus1", "seat_number": "1A",
-                "status": "locked", "schedule_id": f"s{i}"})
+                "id": f"lock{i}", "bus_instance_id": "bus1", "seat_number": "1A",
+                "status": "locked", "schedule_id": f"s{i}", "expires_at": future,
+                "owner": "guest:tok" + str(i), "lock_token": "tok" + str(i),
+            })
         await server._ensure_indexes()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="Cannot safely migrate"):
         _run(go())
 
 
@@ -112,6 +126,46 @@ def test_sibling_schedules_share_seat_pool(mdb):
     results = _run(go())
     assert sum(isinstance(r, dict) for r in results) == 1
     assert any(isinstance(r, HTTPException) and r.status_code == 409 for r in results)
+
+
+def test_same_seat_can_be_reused_on_non_overlapping_route_legs(mdb):
+    async def go():
+        await server._ensure_indexes()
+        await mdb.routes.insert_one({
+            "id": "route-legs",
+            "boarding_stops": [
+                {"terminal_id": "A", "offset_min": 0},
+                {"terminal_id": "B", "offset_min": 100},
+                {"terminal_id": "C", "offset_min": 200},
+            ],
+            "alighting_stops": [
+                {"terminal_id": "B", "offset_min": 100},
+                {"terminal_id": "C", "offset_min": 200},
+                {"terminal_id": "D", "offset_min": 300},
+            ],
+        })
+        for sid, start, end in [
+            ("s-ab", "A", "B"), ("s-cd", "C", "D"), ("s-ad", "A", "D")
+        ]:
+            await mdb.schedules.insert_one({
+                "id": sid, "bus_instance_id": "bus-route", "route_id": "route-legs",
+                "departure_date": "2999-01-01", "departure_time": "08:00",
+                "from_terminal_id": start, "to_terminal_id": end, "adult_fare": 10,
+                "child_fare": 5, "currency": "myr", "total_seats": 4,
+                "layout_config": "2+2",
+            })
+        ab = await _lock("s-ab", ["1A"], pickup="A", dropoff="B")
+        cd = await _lock("s-cd", ["1A"], pickup="C", dropoff="D")
+        assert ab["seats"] == ["1A"]
+        assert cd["seats"] == ["1A"]
+        with pytest.raises(HTTPException) as exc:
+            await _lock("s-ad", ["1A"], pickup="A", dropoff="D")
+        assert exc.value.status_code == 409
+        return await mdb.seat_leg_locks.count_documents({
+            "bus_instance_id": "bus-route", "seat_number": "1A", "status": "locked",
+        })
+
+    assert _run(go()) == 2
 
 
 def test_concurrent_bookings_reusing_one_lock_one_wins(mdb):
