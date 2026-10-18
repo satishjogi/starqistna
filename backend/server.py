@@ -2921,6 +2921,41 @@ async def _issue_gohub_tickets(booking_id: str) -> None:
         db.terminals.find_one({"id": booking.get("to_terminal_id")}, {"_id": 0}),
     )
 
+    # GoHub/CTS issues tickets only for journeys boarding at TBS.
+    # Identify TBS by its internal terminal code, CTS counter code, or official name.
+    from_code = str((from_term or {}).get("code") or "").strip().upper()
+    from_cts_code = str((from_term or {}).get("cts_code") or "").strip().upper()
+    from_name = str((from_term or {}).get("name") or "").strip().upper()
+    is_tbs_origin = (
+        from_code == "TBS"
+        or from_cts_code.startswith("TBS")
+        or from_name == "TBS"
+        or "TERMINAL BERSEPADU SELATAN" in from_name
+    )
+
+    async def _send_email_with_current_state() -> None:
+        """Reload the booking (so the email sees the latest gohub_* fields)
+        and fire the confirmation email — never lets errors escape."""
+        try:
+            fresh = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+            if fresh:
+                await send_booking_confirmation(fresh, from_term, to_term)
+        except Exception:  # noqa: BLE001
+            logger.exception("gohub: email dispatch failed for booking %s", booking_id)
+
+    if not is_tbs_origin:
+        await db.bookings.update_one(
+            {"id": booking_id},
+            {"$set": {
+                "gohub_status": "skipped",
+                "gohub_skip_reason": "origin is not TBS; GoHub only supports TBS-origin bookings",
+                "gohub_processed_at": now_iso,
+            }},
+        )
+        logger.info("gohub: skipped booking %s (origin is not TBS)", booking.get("reference"))
+        await _send_email_with_current_state()
+        return
+
     # Pre-flight validation — anything missing means we skip, not fail.
     reasons: list[str] = []
     if os.environ.get("GOHUB_ENABLED", "false").strip().lower() not in ("1", "true", "yes"):
