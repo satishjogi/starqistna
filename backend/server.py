@@ -5264,13 +5264,23 @@ async def _migrate_seat_lock_legs():
         return
 
     now_iso = utcnow().isoformat()
-    # Expired holds were already considered available by the old runtime rules.
+    # Expired or malformed non-booked holds must be released before the
+    # partial unique index can accept legitimate future reservations. A missing
+    # expiry cannot pass checkout validation, so it cannot remain an active hold.
+    stale_unclaimed = {
+        "status": "locked",
+        "$or": [
+            {"expires_at": {"$lt": now_iso}},
+            {"expires_at": {"$exists": False}},
+            {"expires_at": None},
+        ],
+    }
     await db.seat_locks.update_many(
-        {"status": "locked", "expires_at": {"$lt": now_iso}},
+        stale_unclaimed,
         {"$set": {"status": "released", "released_at": now_iso}},
     )
     await leg_collection.update_many(
-        {"status": "locked", "expires_at": {"$lt": now_iso}},
+        stale_unclaimed,
         {"$set": {"status": "released", "released_at": now_iso}},
     )
 
@@ -5370,7 +5380,9 @@ async def _ensure_indexes():
         except Exception:
             pass
 
-    leg_collection = db.seat_leg_locks
+    leg_collection = getattr(db, "seat_leg_locks", None)
+    if leg_collection is None:
+        raise RuntimeError("Required MongoDB collection seat_leg_locks is unavailable.")
     await leg_collection.create_index(
         [("seat_lock_id", ASCENDING), ("leg_index", ASCENDING)],
         unique=True,
