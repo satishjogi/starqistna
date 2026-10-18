@@ -5579,6 +5579,29 @@ async def _ensure_indexes():
     leg_collection = getattr(db, "seat_leg_locks", None)
     if leg_collection is None:
         raise RuntimeError("Required MongoDB collection seat_leg_locks is unavailable.")
+
+    # Clear expired/malformed holds from both stores BEFORE creating the new
+    # partial unique index. Otherwise a prior interrupted rollout can leave an
+    # expired row with status="locked" that prevents a clean index build even
+    # though it should no longer reserve inventory.
+    index_now = utcnow().isoformat()
+    stale_locked = {
+        "status": "locked",
+        "$or": [
+            {"expires_at": {"$lt": index_now}},
+            {"expires_at": {"$exists": False}},
+            {"expires_at": None},
+        ],
+    }
+    await db.seat_locks.update_many(
+        stale_locked,
+        {"$set": {"status": "released", "released_at": index_now}},
+    )
+    await leg_collection.update_many(
+        stale_locked,
+        {"$set": {"status": "released", "released_at": index_now}},
+    )
+
     try:
         await leg_collection.create_index(
             [("seat_lock_id", ASCENDING), ("leg_index", ASCENDING)],
