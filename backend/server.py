@@ -446,8 +446,10 @@ class PassengerInput(BaseModel):
 
 class SeatLockBody(BaseModel):
     schedule_id: str
+    pickup_terminal_id: Optional[str] = None
+    dropoff_terminal_id: Optional[str] = None
     # Cap seats per lock request — a booking party larger than this should
-    # contact ops, and the cap blocks whole-bus lock abuse.
+    # contact ops, and the cap blocks inventory abuse.
     seat_numbers: List[str] = Field(min_length=1, max_length=10)
 
 
@@ -486,6 +488,8 @@ class CheckoutBody(BaseModel):
 class PromoValidateBody(BaseModel):
     code: str
     schedule_id: str
+    pickup_terminal_id: Optional[str] = None
+    dropoff_terminal_id: Optional[str] = None
     passenger_count: int = Field(ge=1)
     adults: int = Field(ge=0)
     children: int = Field(ge=0)
@@ -518,6 +522,137 @@ def _active_seat_filter(**extra) -> dict:
         {"status": "booked"},
         {"status": "locked", "expires_at": {"$gte": now_iso}},
     ]}
+
+
+# ---------- Multi-stop seat occupancy ---------------------------------------
+def _ordered_route_stop_ids(route: dict) -> list[str]:
+    """Return the route's ordered physical stops, deduplicated by terminal ID."""
+    stops: dict[str, tuple[float, int]] = {}
+    order = 0
+    for field in ("boarding_stops", "alighting_stops"):
+        for item in route.get(field, []) or []:
+            terminal_id = item.get("terminal_id")
+            raw_offset = item.get("offset_min", item.get("eta_offset_min", 0))
+            try:
+                offset = float(raw_offset or 0)
+            except (TypeError, ValueError):
+                offset = 0.0
+            if terminal_id:
+                if terminal_id in stops:
+                    prior = stops[terminal_id]
+                    stops[terminal_id] = (min(prior[0], offset), prior[1])
+                else:
+                    stops[terminal_id] = (offset, order)
+            order += 1
+    return [
+        terminal_id for terminal_id, _ in
+        sorted(stops.items(), key=lambda item: (item[1][0], item[1][1]))
+    ]
+
+
+def _route_segment_leg_indices(route: dict, pickup_terminal_id: str, dropoff_terminal_id: str) -> list[int]:
+    """Map a sold route segment to the consecutive route legs it occupies."""
+    stop_ids = _ordered_route_stop_ids(route)
+    if len(stop_ids) < 2:
+        raise ValueError("Route must contain at least two ordered stops.")
+    try:
+        start = stop_ids.index(pickup_terminal_id)
+        end = stop_ids.index(dropoff_terminal_id)
+    except ValueError as exc:
+        raise ValueError("Pickup and drop-off must both belong to the linked route.") from exc
+    if start >= end:
+        raise ValueError("Pickup must occur before drop-off on the linked route.")
+    return list(range(start, end))
+
+
+def _segment_leg_indices_for_schedule(
+    sched: dict,
+    pickup_terminal_id: Optional[str] = None,
+    dropoff_terminal_id: Optional[str] = None,
+    route: Optional[dict] = None,
+) -> list[int]:
+    pickup_id = pickup_terminal_id or sched.get("from_terminal_id")
+    dropoff_id = dropoff_terminal_id or sched.get("to_terminal_id")
+    if not pickup_id or not dropoff_id:
+        raise ValueError("Pickup and drop-off terminal IDs are required.")
+    if not sched.get("route_id"):
+        if pickup_id != sched.get("from_terminal_id") or dropoff_id != sched.get("to_terminal_id"):
+            raise ValueError("An unlinked schedule can only sell its configured from/to segment.")
+        return [0]
+    if not route:
+        raise ValueError("Linked route data is unavailable.")
+    return _route_segment_leg_indices(route, pickup_id, dropoff_id)
+
+
+async def _get_segment_leg_indices(
+    sched: dict,
+    pickup_terminal_id: Optional[str] = None,
+    dropoff_terminal_id: Optional[str] = None,
+) -> list[int]:
+    route = None
+    if sched.get("route_id"):
+        route = await db.routes.find_one({"id": sched["route_id"]}, {"_id": 0})
+    try:
+        return _segment_leg_indices_for_schedule(
+            sched, pickup_terminal_id, dropoff_terminal_id, route
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+async def _load_active_seat_states(bus_instance_ids: list[str]) -> dict:
+    """Load active seats as bus → leg → seat → status from the leg inventory."""
+    bus_ids = list({value for value in bus_instance_ids if value})
+    if not bus_ids:
+        return {}
+    leg_collection = getattr(db, "seat_leg_locks", None)
+    if leg_collection is not None:
+        docs = await leg_collection.find(
+            _active_seat_filter(bus_instance_id={"$in": bus_ids}),
+            {"_id": 0, "bus_instance_id": 1, "leg_index": 1, "seat_number": 1, "status": 1},
+        ).to_list(50000)
+    else:
+        # Lightweight test doubles without the secondary collection use their
+        # old lock rows. Production databases always have seat_leg_locks.
+        docs = await db.seat_locks.find(
+            _active_seat_filter(bus_instance_id={"$in": bus_ids}),
+            {"_id": 0, "bus_instance_id": 1, "leg_index": 1, "leg_indices": 1,
+             "seat_number": 1, "status": 1},
+        ).to_list(50000)
+
+    states: dict = {}
+    for item in docs:
+        bus_id, seat_number = item.get("bus_instance_id"), item.get("seat_number")
+        if not bus_id or not seat_number:
+            continue
+        indices = item.get("leg_indices") if "leg_indices" in item else [item.get("leg_index", 0)]
+        if not isinstance(indices, list):
+            indices = [indices]
+        for index in indices:
+            if index is None:
+                index = 0
+            seat_map = states.setdefault(bus_id, {}).setdefault(int(index), {})
+            if seat_map.get(seat_number) != "booked":
+                seat_map[seat_number] = item.get("status", "locked")
+    return states
+
+
+def _occupied_seats_for_legs(states: dict, bus_instance_id: str, leg_indices: list[int]) -> set[str]:
+    occupied: set[str] = set()
+    bus_states = states.get(bus_instance_id, {})
+    for leg_index in leg_indices:
+        occupied.update(bus_states.get(int(leg_index), {}).keys())
+    return occupied
+
+
+async def _active_seat_states_for_segment(bus_instance_id: str, leg_indices: list[int]) -> dict[str, str]:
+    states = await _load_active_seat_states([bus_instance_id])
+    combined: dict[str, str] = {}
+    for leg_index in leg_indices:
+        for seat_number, status_value in states.get(bus_instance_id, {}).get(int(leg_index), {}).items():
+            if combined.get(seat_number) != "booked":
+                combined[seat_number] = status_value
+    return combined
 
 
 # ---------- Search & Terminals ----------
@@ -714,19 +849,32 @@ async def search_schedules(
         to_meta = {"city": to_city, "name": f"Any stop · {to_city}", "code": None,
                    "is_city": True, "stop_count": len(to_ids)}
 
-    # Single aggregation for booked-seat counts across ALL schedules in this result.
-    # Now grouped by bus_instance_id — sibling schedules on the same physical bus
-    # share the same seat pool, so seats_available reflects that shared count.
+    # Calculate occupancy over the route legs each returned segment occupies.
+    # Count distinct seats, not lock rows, because one seat may reserve multiple legs.
     if schedules:
         bus_keys = list({(s.get("bus_instance_id") or s["id"]) for s in schedules})
-        pipeline = [
-            {"$match": _active_seat_filter(bus_instance_id={"$in": bus_keys})},
-            {"$group": {"_id": "$bus_instance_id", "count": {"$sum": 1}}},
-        ]
-        counts = {row["_id"]: row["count"] async for row in db.seat_locks.aggregate(pipeline)}
+        route_ids = list({s.get("route_id") for s in schedules if s.get("route_id")})
+        route_docs = await db.routes.find(
+            {"id": {"$in": route_ids}}, {"_id": 0}
+        ).to_list(len(route_ids)) if route_ids else []
+        route_by_id = {route["id"]: route for route in route_docs}
         for s in schedules:
-            key = s.get("bus_instance_id") or s["id"]
-            s["seats_available"] = s["total_seats"] - counts.get(key, 0)
+            try:
+                s["_seat_leg_indices"] = _segment_leg_indices_for_schedule(
+                    s, s.get("from_terminal_id"), s.get("to_terminal_id"),
+                    route_by_id.get(s.get("route_id")),
+                )
+            except ValueError:
+                logger.error("Invalid route segment during search: schedule=%s", s.get("id"))
+                s["_seat_leg_indices"] = []
+        states = await _load_active_seat_states(bus_keys)
+        for s in schedules:
+            bus_key = s.get("bus_instance_id") or s["id"]
+            leg_indices = s.pop("_seat_leg_indices", [])
+            occupied = _occupied_seats_for_legs(states, bus_key, leg_indices)
+            s["seats_available"] = max(
+                0, int(s.get("total_seats") or 0) - len(occupied)
+            )
 
     return {
         "from": from_meta,
@@ -810,12 +958,11 @@ async def popular_now(limit: int = 6):
         if not sched:
             continue
 
-        # Seats remaining — count against bus_instance to reflect shared pool.
+        # Count unique seats occupied on the scheduled segment's route legs.
         bus_key = sched.get("bus_instance_id") or sched["id"]
-        booked_count = await db.seat_locks.count_documents(
-            _active_seat_filter(bus_instance_id=bus_key)
-        )
-        seats_available = sched["total_seats"] - booked_count
+        leg_indices = await _get_segment_leg_indices(sched)
+        occupied = await _active_seat_states_for_segment(bus_key, leg_indices)
+        seats_available = max(0, int(sched.get("total_seats") or 0) - len(occupied))
 
         # How many minutes until departure (positive only). Departure stored as local MY HH:MM.
         try:
@@ -859,22 +1006,26 @@ async def popular_now(limit: int = 6):
 
 
 @api.get("/schedules/{schedule_id}")
-async def get_schedule(schedule_id: str):
+async def get_schedule(
+    schedule_id: str,
+    pickup_terminal_id: Optional[str] = None,
+    dropoff_terminal_id: Optional[str] = None,
+):
     sched = await db.schedules.find_one({"id": schedule_id}, {"_id": 0})
     if not sched:
         raise HTTPException(404, "Schedule not found")
-    from_term = await db.terminals.find_one({"id": sched["from_terminal_id"]}, {"_id": 0})
-    to_term = await db.terminals.find_one({"id": sched["to_terminal_id"]}, {"_id": 0})
 
-    # Seat states — count locks against the SHARED bus_instance so seats
-    # already sold on sibling schedules (e.g. KL→Melaka for a KL→JB search)
-    # show as booked here too. Legacy schedules fall back to their own id.
+    # Reflect the specific pickup/drop-off chosen in search, and use the same
+    # segment for both fare display and the seat map.
+    segment = await _resolve_segment_pricing(sched, pickup_terminal_id, dropoff_terminal_id)
+    pickup_id = segment.get("from_terminal_id")
+    dropoff_id = segment.get("to_terminal_id")
+    leg_indices = await _get_segment_leg_indices(sched, pickup_id, dropoff_id)
+    from_term = await db.terminals.find_one({"id": pickup_id}, {"_id": 0})
+    to_term = await db.terminals.find_one({"id": dropoff_id}, {"_id": 0})
     bus_key = sched.get("bus_instance_id") or sched["id"]
-    locks = await db.seat_locks.find(
-        _active_seat_filter(bus_instance_id=bus_key),
-        {"_id": 0},
-    ).to_list(500)
-    booked_seats = {lk["seat_number"]: lk["status"] for lk in locks}
+    booked_seats = await _active_seat_states_for_segment(bus_key, leg_indices)
+    display_schedule = dict(segment)
 
     # Derive seat layout. Supports 2+2 (A,B | C,D = 4/row) and 2+1 (A,B | C = 3/row).
     # `layout_config` persisted on schedule overrides `bus_type` mapping.
@@ -927,7 +1078,7 @@ async def get_schedule(schedule_id: str):
         layout.append(row_seats)
 
     return {
-        "schedule": sched,
+        "schedule": display_schedule,
         "from": from_term,
         "to": to_term,
         "layout": layout,
@@ -1441,20 +1592,16 @@ def _valid_seat_numbers(sched: dict) -> set:
 
 @api.post("/seats/lock")
 async def lock_seats(body: SeatLockBody, request: Request, user: Optional[dict] = Depends(current_user)):
-    """Attempts to lock given seats for 10 minutes using unique index. Returns failed seats if any."""
-    # Throttle: seat locks gate the purchasable inventory — without a limit a
-    # script can lock every seat on every schedule in a loop (inventory DoS).
+    """Lock seats on every route leg occupied by the passenger's segment."""
     ip = _client_ip(request)
     await _check_auth_throttle(ip, "seat_lock", max_attempts=30, window_seconds=600,
                                 label="seat lock")
     await _record_auth_failure(ip, "seat_lock", window_seconds=600)
 
-    sched = await db.schedules.find_one({"id": body.schedule_id})
+    sched = await db.schedules.find_one({"id": body.schedule_id}, {"_id": 0})
     if not sched:
         raise HTTPException(404, "Schedule not found")
 
-    # Validate seat labels against the actual layout — reject junk like "99Z"
-    # that would otherwise pollute the seat_locks collection.
     requested = [str(sn).strip().upper() for sn in body.seat_numbers]
     if len(set(requested)) != len(requested):
         raise HTTPException(400, "Duplicate seat numbers in request")
@@ -1462,60 +1609,122 @@ async def lock_seats(body: SeatLockBody, request: Request, user: Optional[dict] 
     if invalid:
         raise HTTPException(400, f"Invalid seat number(s) for this bus: {', '.join(invalid)}")
 
-    # bus_instance_id groups sibling schedules (same physical bus). Legacy /
-    # unlinked schedules fall back to their own id so behaviour is unchanged.
+    segment = await _resolve_segment_pricing(
+        sched, body.pickup_terminal_id, body.dropoff_terminal_id,
+    )
+    pickup_id, dropoff_id = segment["from_terminal_id"], segment["to_terminal_id"]
+    leg_indices = await _get_segment_leg_indices(sched, pickup_id, dropoff_id)
     bus_instance_id = sched.get("bus_instance_id") or sched["id"]
+    leg_collection = getattr(db, "seat_leg_locks", None)
 
     lock_token = new_id()
     expires_at = utcnow() + timedelta(minutes=10)
     owner = user["id"] if user else f"guest:{lock_token}"
+    now_iso = utcnow().isoformat()
+    acquired: list[str] = []
+    failed: list[str] = []
 
-    acquired = []
-    failed = []
-    for sn in requested:
-        # Try to insert; unique index on (bus_instance_id, seat_number) for
-        # non-released seats prevents duplicates across sibling schedules too.
-        # Strategy: delete any expired locks for this seat first, then insert.
-        await db.seat_locks.delete_many(
+    for seat_number in requested:
+        # Remove stale holds from both collections before retrying an expired seat.
+        stale = await db.seat_locks.find(
             {
                 "bus_instance_id": bus_instance_id,
-                "seat_number": sn,
+                "seat_number": seat_number,
                 "status": "locked",
-                "expires_at": {"$lt": utcnow().isoformat()},
-            }
-        )
-        try:
-            await db.seat_locks.insert_one(
-                {
-                    "id": new_id(),
-                    "schedule_id": body.schedule_id,
-                    "bus_instance_id": bus_instance_id,
-                    "seat_number": sn,
-                    "status": "locked",
-                    "owner": owner,
-                    "lock_token": lock_token,
-                    "expires_at": expires_at.isoformat(),
-                    "created_at": utcnow().isoformat(),
-                }
+                "expires_at": {"$lt": now_iso},
+            },
+            {"_id": 0, "lock_token": 1},
+        ).to_list(100)
+        stale_tokens = [item.get("lock_token") for item in stale if item.get("lock_token")]
+        if stale_tokens:
+            await db.seat_locks.update_many(
+                {"lock_token": {"$in": stale_tokens}, "status": "locked"},
+                {"$set": {"status": "released", "released_at": now_iso}},
             )
-            acquired.append(sn)
+            if leg_collection is not None:
+                await leg_collection.update_many(
+                    {"lock_token": {"$in": stale_tokens}, "status": "locked"},
+                    {"$set": {"status": "released", "released_at": now_iso}},
+                )
+        if leg_collection is not None:
+            await leg_collection.update_many(
+                {
+                    "bus_instance_id": bus_instance_id,
+                    "seat_number": seat_number,
+                    "leg_index": {"$in": leg_indices},
+                    "status": "locked",
+                    "expires_at": {"$lt": now_iso},
+                },
+                {"$set": {"status": "released", "released_at": now_iso}},
+            )
+
+        primary_id = new_id()
+        created_at = utcnow().isoformat()
+        primary_doc = {
+            "id": primary_id,
+            "schedule_id": body.schedule_id,
+            "bus_instance_id": bus_instance_id,
+            "seat_number": seat_number,
+            "segment_from_terminal_id": pickup_id,
+            "segment_to_terminal_id": dropoff_id,
+            "leg_indices": leg_indices,
+            "status": "locked",
+            "owner": owner,
+            "lock_token": lock_token,
+            "expires_at": expires_at.isoformat(),
+            "created_at": created_at,
+        }
+        try:
+            await db.seat_locks.insert_one(primary_doc)
+            if leg_collection is not None:
+                for leg_index in leg_indices:
+                    await leg_collection.insert_one({
+                        "id": f"{primary_id}:{leg_index}",
+                        "seat_lock_id": primary_id,
+                        "schedule_id": body.schedule_id,
+                        "bus_instance_id": bus_instance_id,
+                        "seat_number": seat_number,
+                        "leg_index": int(leg_index),
+                        "segment_from_terminal_id": pickup_id,
+                        "segment_to_terminal_id": dropoff_id,
+                        "status": "locked",
+                        "owner": owner,
+                        "lock_token": lock_token,
+                        "expires_at": expires_at.isoformat(),
+                        "created_at": created_at,
+                    })
+            acquired.append(seat_number)
         except DuplicateKeyError:
-            failed.append(sn)
+            failed.append(seat_number)
+        except Exception:
+            await db.seat_locks.delete_many({"lock_token": lock_token, "status": "locked"})
+            if leg_collection is not None:
+                await leg_collection.delete_many({"lock_token": lock_token, "status": "locked"})
+            raise
 
     if failed:
-        # release what we locked
+        # If any selected seat failed, release every hold created in this request.
         await db.seat_locks.delete_many({"lock_token": lock_token, "status": "locked"})
+        if leg_collection is not None:
+            await leg_collection.delete_many({"lock_token": lock_token, "status": "locked"})
         raise HTTPException(409, detail={"message": "Some seats unavailable", "failed_seats": failed})
 
-    return {"lock_token": lock_token, "expires_at": expires_at.isoformat(), "seats": acquired}
+    return {
+        "lock_token": lock_token,
+        "expires_at": expires_at.isoformat(),
+        "seats": acquired,
+        "segment": {"pickup_terminal_id": pickup_id, "dropoff_terminal_id": dropoff_id},
+    }
 
 
 @api.post("/seats/release")
 async def release_seats(lock_token: str):
-    # Never delete locks already attached to a booking (awaiting payment).
-    await db.seat_locks.delete_many(
-        {"lock_token": lock_token, "status": "locked", "booking_id": {"$exists": False}}
-    )
+    # Never release locks already attached to a booking awaiting payment.
+    query = {"lock_token": lock_token, "status": "locked", "booking_id": {"$exists": False}}
+    await db.seat_locks.delete_many(query)
+    leg_collection = getattr(db, "seat_leg_locks", None)
+    if leg_collection is not None:
+        await leg_collection.delete_many(query)
     return {"released": True}
 
 
@@ -1630,9 +1839,12 @@ async def validate_promo(body: PromoValidateBody, request: Request):
         raise HTTPException(404, "Schedule not found")
     if (body.adults + body.children) != body.passenger_count:
         raise HTTPException(400, "Passenger breakdown mismatch")
-    promo = await _find_valid_promo(body.code, sched.get("currency", "myr"))
+    segment = await _resolve_segment_pricing(
+        sched, body.pickup_terminal_id, body.dropoff_terminal_id,
+    )
+    promo = await _find_valid_promo(body.code, segment.get("currency", "myr"))
     fake_pax = [{"category": "adult"}] * body.adults + [{"category": "child"}] * body.children
-    pricing = _calc_pricing(sched, fake_pax, promo)
+    pricing = _calc_pricing(segment, fake_pax, promo)
     return {"valid": True, "promo": pricing["promo"], "pricing": pricing}
 
 
@@ -1782,6 +1994,14 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
 
     if not body.lock_token:
         raise HTTPException(400, "lock_token is required — obtain it from /seats/lock first")
+
+    # Resolve the segment before checking locks; checkout must not be allowed to
+    # change the endpoints after the seat hold has been acquired.
+    segment = await _resolve_segment_pricing(
+        sched, body.pickup_terminal_id, body.dropoff_terminal_id,
+    )
+    pickup_id, dropoff_id = segment["from_terminal_id"], segment["to_terminal_id"]
+    leg_indices = await _get_segment_leg_indices(sched, pickup_id, dropoff_id)
     lock_owners = [f"guest:{body.lock_token}"]
     if user:
         lock_owners.append(user["id"])
@@ -1789,22 +2009,40 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
         "lock_token": body.lock_token,
         "schedule_id": body.schedule_id,
         "seat_number": {"$in": seats},
+        "segment_from_terminal_id": pickup_id,
+        "segment_to_terminal_id": dropoff_id,
         "status": "locked",
         "owner": {"$in": lock_owners},
         "booking_id": {"$exists": False},
     }
+    now_iso = utcnow().isoformat()
     live = await db.seat_locks.count_documents(
-        {**lock_filter, "expires_at": {"$gt": utcnow().isoformat()}}
+        {**lock_filter, "expires_at": {"$gt": now_iso}}
     )
     if live != len(seats):
         raise HTTPException(409, detail={"message": "Seat locks missing, expired or already used", "seats": seats})
 
-    # Resolve the specific segment (pickup/drop-off + fare) — for route-linked
-    # schedules this returns a sched-shaped dict with pairing fares; otherwise
-    # returns `sched` unchanged.
-    segment = await _resolve_segment_pricing(
-        sched, body.pickup_terminal_id, body.dropoff_terminal_id,
-    )
+    leg_collection = getattr(db, "seat_leg_locks", None)
+    leg_lock_filter = {
+        "lock_token": body.lock_token,
+        "schedule_id": body.schedule_id,
+        "seat_number": {"$in": seats},
+        "leg_index": {"$in": leg_indices},
+        "segment_from_terminal_id": pickup_id,
+        "segment_to_terminal_id": dropoff_id,
+        "status": "locked",
+        "owner": {"$in": lock_owners},
+        "booking_id": {"$exists": False},
+    }
+    if leg_collection is not None:
+        live_legs = await leg_collection.count_documents(
+            {**leg_lock_filter, "expires_at": {"$gt": now_iso}}
+        )
+        if live_legs != len(seats) * len(leg_indices):
+            raise HTTPException(
+                409,
+                detail={"message": "Seat leg locks missing, expired or already used", "seats": seats},
+            )
 
     pricing_promo = None
     if body.promo_code:
@@ -1824,6 +2062,8 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
         "id": booking_id,
         "reference": booking_ref,
         "schedule_id": body.schedule_id,
+        "bus_instance_id": sched.get("bus_instance_id") or sched["id"],
+        "leg_indices": leg_indices,
         # The from/to on the booking always reflect the SOLD segment (pickup/drop-off
         # the passenger actually chose), NOT the physical bus endpoints.
         "from_terminal_id": segment["from_terminal_id"],
@@ -1841,24 +2081,36 @@ async def create_booking(body: CreateBookingBody, user: Optional[dict] = Depends
         "created_at": utcnow().isoformat(),
     }
 
-    # Atomically claim the exact locks issued to this caller. The filter only
-    # matches unexpired, unclaimed locks, so a lock can back at most one booking.
-    # The hold is extended to give the customer time to pay.
+    # Atomically claim the primary lock rows and every leg row for this segment.
+    hold_expiry = (utcnow() + timedelta(minutes=BOOKING_PAYMENT_HOLD_MINUTES)).isoformat()
     claimed = await db.seat_locks.update_many(
         {**lock_filter, "expires_at": {"$gt": utcnow().isoformat()}},
-        {"$set": {
-            "booking_id": booking_id,
-            "expires_at": (utcnow() + timedelta(minutes=BOOKING_PAYMENT_HOLD_MINUTES)).isoformat(),
-        }},
+        {"$set": {"booking_id": booking_id, "expires_at": hold_expiry}},
     )
     if claimed.modified_count != len(seats):
         await db.seat_locks.update_many({"booking_id": booking_id}, {"$unset": {"booking_id": ""}})
         raise HTTPException(409, detail={"message": "Seat locks missing, expired or already used", "seats": seats})
+
+    if leg_collection is not None:
+        leg_claimed = await leg_collection.update_many(
+            {**leg_lock_filter, "expires_at": {"$gt": utcnow().isoformat()}},
+            {"$set": {"booking_id": booking_id, "expires_at": hold_expiry}},
+        )
+        expected_leg_locks = len(seats) * len(leg_indices)
+        if leg_claimed.modified_count != expected_leg_locks:
+            await db.seat_locks.update_many({"booking_id": booking_id}, {"$unset": {"booking_id": ""}})
+            await leg_collection.update_many({"booking_id": booking_id}, {"$unset": {"booking_id": ""}})
+            raise HTTPException(
+                409, detail={"message": "Seat leg locks expired or already used", "seats": seats}
+            )
     try:
         await db.bookings.insert_one(doc)
     except Exception:
         await db.seat_locks.update_many({"booking_id": booking_id}, {"$unset": {"booking_id": ""}})
+        if leg_collection is not None:
+            await leg_collection.update_many({"booking_id": booking_id}, {"$unset": {"booking_id": ""}})
         raise
+
 
     return {k: v for k, v in doc.items() if k != "_id"}
 
@@ -2046,8 +2298,11 @@ async def cancel_booking(booking_id: str, user: dict = Depends(require_user)):
         # "eligible" — treat as a clean cancellation, not a burn.
         refund_info = {"refunded": True, "amount": 0.0, "currency": currency.upper(), "stripe_refund_id": None}
 
-    # Free up the seats so they can be re-sold
+    # Free up primary locks and per-leg inventory reservations.
     await db.seat_locks.delete_many({"booking_id": booking_id})
+    leg_collection = getattr(db, "seat_leg_locks", None)
+    if leg_collection is not None:
+        await leg_collection.delete_many({"booking_id": booking_id})
 
     new_status = "cancelled_refunded" if refund_info["refunded"] else "cancelled_burned"
     await db.bookings.update_one(
@@ -2340,8 +2595,36 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
     now_iso = utcnow().isoformat()
     held = await db.seat_locks.count_documents(
         {"booking_id": booking["id"], "status": "locked", "expires_at": {"$gt": now_iso}})
-    if held < len(booking.get("seats") or [None]):
+    seat_count = len(booking.get("seats") or [None])
+    if held < seat_count:
         raise HTTPException(409, "Seat hold has expired, please select seats again")
+
+    # Validate the concurrency-guard rows as well as the primary lock metadata.
+    # A booking must not reach a payment gateway unless every occupied route leg
+    # remains reserved.
+    leg_collection = getattr(db, "seat_leg_locks", None)
+    if leg_collection is not None:
+        leg_indices = booking.get("leg_indices")
+        if not isinstance(leg_indices, list) or not leg_indices:
+            schedule = await db.schedules.find_one({"id": booking.get("schedule_id")}, {"_id": 0})
+            if not schedule:
+                raise HTTPException(409, "The scheduled trip is missing; contact support before paying")
+            try:
+                leg_indices = await _get_segment_leg_indices(
+                    schedule,
+                    booking.get("from_terminal_id"),
+                    booking.get("to_terminal_id"),
+                )
+            except HTTPException as exc:
+                raise HTTPException(409, "The seat reservation needs operations review before payment") from exc
+        held_legs = await leg_collection.count_documents({
+            "booking_id": booking["id"],
+            "status": "locked",
+            "leg_index": {"$in": leg_indices},
+            "expires_at": {"$gt": now_iso},
+        })
+        if held_legs < seat_count * len(leg_indices):
+            raise HTTPException(409, "Seat reservation is incomplete or expired; please select seats again")
     origin = _safe_return_origin(body.origin_url)
 
     # Single Stripe account — Malaysia. Always bill in MYR regardless of where
@@ -2888,26 +3171,41 @@ async def _finalize_booking(booking_id: str, session_id: str) -> bool:
             schedule = await db.schedules.find_one({"id": booking.get("schedule_id")}, {"_id": 0})
         bus_instance_id = (schedule or {}).get("bus_instance_id") or booking.get("schedule_id")
         lost_seats = []
+        primary_lock_ids: dict[str, str] = {}
         for seat_number in booking_seats:
             result = await db.seat_locks.update_one(
                 {"booking_id": booking_id, "seat_number": seat_number, "status": "locked"},
                 {"$set": {"status": "booked", "expires_at": None}},
             )
             if result.matched_count:
+                primary = await db.seat_locks.find_one(
+                    {"booking_id": booking_id, "seat_number": seat_number, "status": "booked"}
+                )
+                if primary:
+                    primary_lock_ids[seat_number] = primary.get("id") or str(primary.get("_id"))
                 continue
 
             existing = await db.seat_locks.find_one(
                 {"booking_id": booking_id, "seat_number": seat_number, "status": "booked"}
             )
             if existing:
+                primary_lock_ids[seat_number] = existing.get("id") or str(existing.get("_id"))
+                if not existing.get("id"):
+                    await db.seat_locks.update_one(
+                        {"_id": existing["_id"]}, {"$set": {"id": primary_lock_ids[seat_number]}}
+                    )
                 continue
 
             try:
+                primary_lock_id = new_id()
                 await db.seat_locks.insert_one({
-                    "id": new_id(),
+                    "id": primary_lock_id,
                     "schedule_id": booking["schedule_id"],
                     "bus_instance_id": bus_instance_id,
                     "seat_number": seat_number,
+                    "segment_from_terminal_id": booking.get("from_terminal_id"),
+                    "segment_to_terminal_id": booking.get("to_terminal_id"),
+                    "leg_indices": booking.get("leg_indices"),
                     "status": "booked",
                     "owner": booking.get("user_id") or f"guest:{booking.get('contact_email')}",
                     "booking_id": booking_id,
@@ -2915,11 +3213,99 @@ async def _finalize_booking(booking_id: str, session_id: str) -> bool:
                     "created_at": utcnow().isoformat(),
                     "reclaimed_at_finalize": True,
                 })
+                primary_lock_ids[seat_number] = primary_lock_id
                 logger.warning("finalize: re-claimed expired seat %s for booking %s", seat_number, booking_id)
             except DuplicateKeyError:
                 lost_seats.append(seat_number)
 
+        leg_collection = getattr(db, "seat_leg_locks", None)
+        if leg_collection is not None and booking_seats:
+            # Existing bookings predate leg indices; recover them from the sold
+            # pickup/drop-off pair, falling back to the configured schedule segment.
+            leg_indices = booking.get("leg_indices")
+            if not isinstance(leg_indices, list) or not leg_indices:
+                try:
+                    leg_indices = await _get_segment_leg_indices(
+                        schedule or {"id": booking.get("schedule_id"),
+                                     "from_terminal_id": booking.get("from_terminal_id"),
+                                     "to_terminal_id": booking.get("to_terminal_id")},
+                        booking.get("from_terminal_id"),
+                        booking.get("to_terminal_id"),
+                    )
+                except HTTPException:
+                    lost_seats.extend(seat for seat in booking_seats if seat not in lost_seats)
+                    leg_indices = []
+            bus_id = booking.get("bus_instance_id") or bus_instance_id
+            if leg_indices:
+                for seat_number in booking_seats:
+                    for leg_index in leg_indices:
+                        existing_leg = await leg_collection.find_one({
+                            "booking_id": booking_id,
+                            "seat_number": seat_number,
+                            "leg_index": int(leg_index),
+                            "status": {"$in": ["locked", "booked"]},
+                        }, {"_id": 0})
+                        if existing_leg:
+                            primary_lock_id = primary_lock_ids.get(seat_number)
+                            leg_updates = {"status": "booked", "expires_at": None}
+                            if primary_lock_id:
+                                leg_updates.update({
+                                    "id": f"{primary_lock_id}:{int(leg_index)}",
+                                    "seat_lock_id": primary_lock_id,
+                                })
+                            await leg_collection.update_one(
+                                {"_id": existing_leg["_id"]} if existing_leg.get("_id")
+                                else {"id": existing_leg.get("id")},
+                                {"$set": leg_updates},
+                            )
+                            continue
+                        try:
+                            primary_lock_id = primary_lock_ids.get(seat_number)
+                            if not primary_lock_id:
+                                primary = await db.seat_locks.find_one(
+                                    {"booking_id": booking_id, "seat_number": seat_number},
+                                    {"_id": 1, "id": 1},
+                                )
+                                if primary:
+                                    primary_lock_id = primary.get("id") or str(primary.get("_id"))
+                            if not primary_lock_id:
+                                raise RuntimeError(
+                                    f"Could not identify primary seat lock for booking={booking_id} seat={seat_number}"
+                                )
+                            await leg_collection.insert_one({
+                                "id": f"{primary_lock_id}:{int(leg_index)}",
+                                "seat_lock_id": primary_lock_id,
+                                "schedule_id": booking.get("schedule_id"),
+                                "bus_instance_id": bus_id,
+                                "seat_number": seat_number,
+                                "leg_index": int(leg_index),
+                                "segment_from_terminal_id": booking.get("from_terminal_id"),
+                                "segment_to_terminal_id": booking.get("to_terminal_id"),
+                                "status": "booked",
+                                "owner": booking.get("user_id") or f"guest:{booking.get('contact_email')}",
+                                "booking_id": booking_id,
+                                "expires_at": None,
+                                "created_at": utcnow().isoformat(),
+                                "reclaimed_at_finalize": True,
+                            })
+                        except DuplicateKeyError:
+                            if seat_number not in lost_seats:
+                                lost_seats.append(seat_number)
+                            logger.critical(
+                                "finalize: per-leg seat conflict booking=%s seat=%s leg=%s",
+                                booking_id, seat_number, leg_index,
+                            )
+
         if lost_seats:
+            # A seat whose route has any conflict must not leave partial
+            # reservations on its other legs. Release only those passengers'
+            # leg rows; valid seats in a multi-passenger booking remain held
+            # for operations to resolve the paid booking safely.
+            if leg_collection is not None:
+                await leg_collection.delete_many({
+                    "booking_id": booking_id,
+                    "seat_number": {"$in": lost_seats},
+                })
             await db.bookings.update_one(
                 {"id": booking_id},
                 {"$set": {
@@ -2950,6 +3336,12 @@ async def _finalize_booking(booking_id: str, session_id: str) -> bool:
             {"booking_id": booking_id, "status": "locked"},
             {"$set": {"status": "booked", "expires_at": None}},
         )
+        leg_collection = getattr(db, "seat_leg_locks", None)
+        if leg_collection is not None:
+            await leg_collection.update_many(
+                {"booking_id": booking_id, "status": "locked"},
+                {"$set": {"status": "booked", "expires_at": None}},
+            )
         await db.bookings.update_one(
             {"id": booking_id},
             {"$set": {"status": "confirmed", "payment_status": "paid", "paid_at": utcnow().isoformat()}},
@@ -3006,11 +3398,16 @@ async def _seat_lock_sweeper() -> None:
     """
     while True:
         try:
-            res = await db.seat_locks.delete_many(
-                {"status": "locked", "expires_at": {"$lt": utcnow().isoformat()}}
-            )
-            if res.deleted_count:
-                logger.info("seat-lock sweeper: purged %d expired lock(s)", res.deleted_count)
+            expiry_filter = {"status": "locked", "expires_at": {"$lt": utcnow().isoformat()}}
+            res = await db.seat_locks.delete_many(expiry_filter)
+            leg_collection = getattr(db, "seat_leg_locks", None)
+            leg_res = await leg_collection.delete_many(expiry_filter) if leg_collection is not None else None
+            leg_count = leg_res.deleted_count if leg_res is not None else 0
+            if res.deleted_count or leg_count:
+                logger.info(
+                    "seat-lock sweeper: purged %d primary lock(s) and %d leg reservation(s)",
+                    res.deleted_count, leg_count,
+                )
         except Exception as e:  # noqa: BLE001
             logger.exception("seat-lock sweeper error: %s", e)
         await asyncio.sleep(60)
@@ -3173,6 +3570,33 @@ async def admin_stats(user: dict = Depends(require_admin)):
 async def admin_bookings(user: dict = Depends(require_admin)):
     items = await db.bookings.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
     return items
+
+
+@api.get("/admin/bookings/{booking_id}")
+async def admin_booking_detail(booking_id: str, user: dict = Depends(require_admin)):
+    """Return admin-only booking detail and a safe projection of payment attempts."""
+    booking = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    if not booking:
+        raise HTTPException(404, "Booking not found")
+    booking["from"] = await db.terminals.find_one(
+        {"id": booking.get("from_terminal_id")}, {"_id": 0}
+    )
+    booking["to"] = await db.terminals.find_one(
+        {"id": booking.get("to_terminal_id")}, {"_id": 0}
+    )
+    booking["schedule"] = await db.schedules.find_one(
+        {"id": booking.get("schedule_id")}, {"_id": 0}
+    )
+    projection = {
+        "_id": 0, "session_id": 1, "status": 1, "payment_status": 1,
+        "payment_method": 1, "amount": 1, "currency": 1, "created_at": 1,
+        "updated_at": 1, "finalization_status": 1, "needs_refund_review": 1,
+        "refund_id": 1, "duplicate_payment": 1, "needs_ops_action": 1,
+    }
+    booking["payment_transactions"] = await db.payment_transactions.find(
+        {"booking_id": booking_id}, projection
+    ).sort("created_at", -1).to_list(50)
+    return booking
 
 
 @api.get("/admin/payments")
@@ -4084,6 +4508,19 @@ async def admin_create_schedule(body: CreateScheduleBody, request: Request, user
             raise HTTPException(400, "from_terminal_id must be one of the route's boarding stops")
         if body.to_terminal_id not in alighting_ids:
             raise HTTPException(400, "to_terminal_id must be one of the route's alighting stops")
+        try:
+            _route_segment_leg_indices(route, body.from_terminal_id, body.to_terminal_id)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        configured_pairings = route.get("pairings") or []
+        if configured_pairings and not any(
+            pairing.get("pickup_id") == body.from_terminal_id
+            and pairing.get("dropoff_id") == body.to_terminal_id
+            for pairing in configured_pairings
+        ):
+            raise HTTPException(
+                400, "From/to segment is not configured in this route's fare pairings"
+            )
     # Auto-derive currency from origin terminal country (SG → SGD, else MYR)
     origin = await db.terminals.find_one({"id": body.from_terminal_id}, {"_id": 0})
     if not origin:
@@ -4176,6 +4613,19 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
             raise HTTPException(400, "from_terminal_id must be one of the route's boarding stops")
         if body.to_terminal_id not in alighting_ids:
             raise HTTPException(400, "to_terminal_id must be one of the route's alighting stops")
+        try:
+            _route_segment_leg_indices(route, body.from_terminal_id, body.to_terminal_id)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        configured_pairings = route.get("pairings") or []
+        if configured_pairings and not any(
+            pairing.get("pickup_id") == body.from_terminal_id
+            and pairing.get("dropoff_id") == body.to_terminal_id
+            for pairing in configured_pairings
+        ):
+            raise HTTPException(
+                400, "From/to segment is not configured in this route's fare pairings"
+            )
 
     dow_set = set(body.days_of_week)
     created = 0
@@ -4495,8 +4945,11 @@ async def admin_bulk_delete_execute(body: BulkDeleteScheduleFilter, request: Req
     if not target_ids:
         return {"deleted": 0, "skipped": skipped, "note": "All matched schedules have bookings. Use force=true to override."}
     result = await db.schedules.delete_many({"id": {"$in": target_ids}})
-    # Free any seat_locks tied to the deleted schedules.
+    # Free all primary and per-leg lock rows tied to the deleted schedules.
     await db.seat_locks.delete_many({"schedule_id": {"$in": target_ids}})
+    leg_collection = getattr(db, "seat_leg_locks", None)
+    if leg_collection is not None:
+        await leg_collection.delete_many({"schedule_id": {"$in": target_ids}})
     await log_audit(user, "bulk_delete", "schedule", None, {
         "filter": body.model_dump(exclude_unset=True),
         "deleted": result.deleted_count,
@@ -4907,6 +5360,278 @@ async def _seed_bus_types():
         logger.info("Seeded %d default bus types", inserted)
 
 
+async def _migrate_seat_lock_legs():
+    """Idempotently project active legacy primary locks into route-leg inventory."""
+    leg_collection = getattr(db, "seat_leg_locks", None)
+    if leg_collection is None:
+        return
+
+    now_iso = utcnow().isoformat()
+    # Expired or malformed non-booked holds must be released before the
+    # partial unique index can accept legitimate future reservations. A missing
+    # expiry cannot pass checkout validation, so it cannot remain an active hold.
+    stale_unclaimed = {
+        "status": "locked",
+        "$or": [
+            {"expires_at": {"$lt": now_iso}},
+            {"expires_at": {"$exists": False}},
+            {"expires_at": None},
+        ],
+    }
+    await db.seat_locks.update_many(
+        stale_unclaimed,
+        {"$set": {"status": "released", "released_at": now_iso}},
+    )
+    await leg_collection.update_many(
+        stale_unclaimed,
+        {"$set": {"status": "released", "released_at": now_iso}},
+    )
+
+    async for lock in db.seat_locks.find(
+        {"status": {"$in": ["locked", "booked"]}}, {"_id": 1, "id": 1}
+    ):
+        # Fetch the full row; some legacy rows may not have an application-level id.
+        lock_id = lock.get("id") or str(lock.get("_id"))
+        full_lock = await db.seat_locks.find_one({"_id": lock["_id"]}, {"_id": 0})
+        if not full_lock:
+            continue
+        schedule = await db.schedules.find_one({"id": full_lock.get("schedule_id")}, {"_id": 0})
+        if not schedule:
+            raise RuntimeError(
+                f"Active seat lock {lock_id} references a missing schedule; resolve before deployment."
+            )
+        booking = None
+        if full_lock.get("booking_id"):
+            booking = await db.bookings.find_one({"id": full_lock["booking_id"]}, {"_id": 0})
+        pickup_id = (
+            full_lock.get("segment_from_terminal_id")
+            or (booking or {}).get("from_terminal_id")
+            or schedule.get("from_terminal_id")
+        )
+        dropoff_id = (
+            full_lock.get("segment_to_terminal_id")
+            or (booking or {}).get("to_terminal_id")
+            or schedule.get("to_terminal_id")
+        )
+        leg_indices = full_lock.get("leg_indices")
+        if not isinstance(leg_indices, list) or not leg_indices:
+            route = None
+            if schedule.get("route_id"):
+                route = await db.routes.find_one({"id": schedule["route_id"]}, {"_id": 0})
+            try:
+                leg_indices = _segment_leg_indices_for_schedule(schedule, pickup_id, dropoff_id, route)
+            except ValueError as exc:
+                raise RuntimeError(f"Cannot safely migrate active seat lock {lock_id}: {exc}") from exc
+
+        bus_id = full_lock.get("bus_instance_id") or schedule.get("bus_instance_id") or schedule["id"]
+        if not full_lock.get("id"):
+            await db.seat_locks.update_one({"_id": lock["_id"]}, {"$set": {"id": lock_id}})
+        await db.seat_locks.update_one(
+            {"_id": lock["_id"]},
+            {"$set": {
+                "bus_instance_id": bus_id,
+                "segment_from_terminal_id": pickup_id,
+                "segment_to_terminal_id": dropoff_id,
+                "leg_indices": leg_indices,
+            }},
+        )
+
+        for leg_index in leg_indices:
+            leg_doc = {
+                "id": f"{lock_id}:{int(leg_index)}",
+                "seat_lock_id": lock_id,
+                "schedule_id": full_lock.get("schedule_id"),
+                "bus_instance_id": bus_id,
+                "seat_number": full_lock.get("seat_number"),
+                "leg_index": int(leg_index),
+                "segment_from_terminal_id": pickup_id,
+                "segment_to_terminal_id": dropoff_id,
+                "status": full_lock.get("status"),
+                "owner": full_lock.get("owner"),
+                "lock_token": full_lock.get("lock_token"),
+                "booking_id": full_lock.get("booking_id"),
+                "expires_at": None if full_lock.get("status") == "booked" else full_lock.get("expires_at"),
+                "created_at": full_lock.get("created_at") or now_iso,
+            }
+            try:
+                await leg_collection.update_one(
+                    {"seat_lock_id": lock_id, "leg_index": int(leg_index)},
+                    {"$set": leg_doc},
+                    upsert=True,
+                )
+            except DuplicateKeyError as exc:
+                # Multiple Gunicorn workers may attempt the same idempotent upsert.
+                # Accept only an identical lock/leg row; a different seat owner
+                # colliding on this bus leg must still stop startup.
+                existing_leg = await leg_collection.find_one(
+                    {"seat_lock_id": lock_id, "leg_index": int(leg_index)}, {"_id": 0}
+                )
+                same_reservation = bool(
+                    existing_leg
+                    and existing_leg.get("bus_instance_id") == bus_id
+                    and existing_leg.get("seat_number") == full_lock.get("seat_number")
+                    and int(existing_leg.get("leg_index", -1)) == int(leg_index)
+                    and (
+                        not full_lock.get("booking_id")
+                        or existing_leg.get("booking_id") == full_lock.get("booking_id")
+                    )
+                )
+                if same_reservation:
+                    continue
+                raise RuntimeError(
+                    "Cannot safely migrate active seat holds: two bookings claim the same "
+                    f"physical bus leg and seat ({bus_id}, leg {leg_index}, {full_lock.get('seat_number')})."
+                ) from exc
+
+
+    # A previous release could leave a confirmed booking without a primary seat
+    # lock (for example, after recovering a payment whose hold had expired).
+    # Bookings are the durable record of sold seats, so re-project every confirmed
+    # booking into the per-leg inventory before serving traffic.
+    async for booking in db.bookings.find(
+        {"status": "confirmed", "seats": {"$exists": True}}, {"_id": 0}
+    ):
+        seat_numbers = list(dict.fromkeys(
+            str(value).strip().upper() for value in (booking.get("seats") or []) if value
+        ))
+        if not seat_numbers:
+            continue
+        schedule = await db.schedules.find_one(
+            {"id": booking.get("schedule_id")}, {"_id": 0}
+        )
+        if not schedule:
+            raise RuntimeError(
+                f"Confirmed booking {booking.get('id')} references a missing schedule; "
+                "cannot safely rebuild its seat inventory."
+            )
+        pickup_id = booking.get("from_terminal_id") or schedule.get("from_terminal_id")
+        dropoff_id = booking.get("to_terminal_id") or schedule.get("to_terminal_id")
+        if not pickup_id or not dropoff_id:
+            raise RuntimeError(
+                f"Confirmed booking {booking.get('id')} is missing its journey endpoints."
+            )
+        leg_indices = booking.get("leg_indices")
+        if not isinstance(leg_indices, list) or not leg_indices:
+            route = None
+            if schedule.get("route_id"):
+                route = await db.routes.find_one({"id": schedule["route_id"]}, {"_id": 0})
+            try:
+                leg_indices = _segment_leg_indices_for_schedule(
+                    schedule, pickup_id, dropoff_id, route
+                )
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"Cannot rebuild inventory for confirmed booking {booking.get('id')}: {exc}"
+                ) from exc
+
+        bus_id = (
+            booking.get("bus_instance_id")
+            or schedule.get("bus_instance_id")
+            or schedule["id"]
+        )
+        await db.bookings.update_one(
+            {"id": booking["id"]},
+            {"$set": {
+                "bus_instance_id": bus_id,
+                "leg_indices": leg_indices,
+            }},
+        )
+
+        for seat_number in seat_numbers:
+            primary = await db.seat_locks.find_one({
+                "booking_id": booking["id"],
+                "seat_number": seat_number,
+                "status": "booked",
+            })
+            if primary is None:
+                primary = await db.seat_locks.find_one({
+                    "booking_id": booking["id"],
+                    "seat_number": seat_number,
+                })
+            now_iso = utcnow().isoformat()
+            if primary:
+                lock_id = primary.get("id") or str(primary["_id"])
+                await db.seat_locks.update_one(
+                    {"_id": primary["_id"]},
+                    {"$set": {
+                        "id": lock_id,
+                        "schedule_id": booking.get("schedule_id"),
+                        "bus_instance_id": bus_id,
+                        "seat_number": seat_number,
+                        "segment_from_terminal_id": pickup_id,
+                        "segment_to_terminal_id": dropoff_id,
+                        "leg_indices": leg_indices,
+                        "status": "booked",
+                        "owner": primary.get("owner") or booking.get("user_id")
+                                 or "guest:" + str(booking.get("contact_email") or ""),
+                        "booking_id": booking["id"],
+                        "expires_at": None,
+                    }},
+                )
+            else:
+                lock_id = "booking:" + str(booking["id"]) + ":" + seat_number
+                await db.seat_locks.insert_one({
+                    "id": lock_id,
+                    "schedule_id": booking.get("schedule_id"),
+                    "bus_instance_id": bus_id,
+                    "seat_number": seat_number,
+                    "segment_from_terminal_id": pickup_id,
+                    "segment_to_terminal_id": dropoff_id,
+                    "leg_indices": leg_indices,
+                    "status": "booked",
+                    "owner": booking.get("user_id") or "guest:" + str(booking.get("contact_email") or ""),
+                    "booking_id": booking["id"],
+                    "expires_at": None,
+                    "created_at": booking.get("created_at") or now_iso,
+                    "recovered_from_confirmed_booking": True,
+                })
+
+            for leg_index in leg_indices:
+                leg_doc = {
+                    "id": lock_id + ":" + str(int(leg_index)),
+                    "seat_lock_id": lock_id,
+                    "schedule_id": booking.get("schedule_id"),
+                    "bus_instance_id": bus_id,
+                    "seat_number": seat_number,
+                    "leg_index": int(leg_index),
+                    "segment_from_terminal_id": pickup_id,
+                    "segment_to_terminal_id": dropoff_id,
+                    "status": "booked",
+                    "owner": booking.get("user_id") or "guest:" + str(booking.get("contact_email") or ""),
+                    "lock_token": primary.get("lock_token") if primary else None,
+                    "booking_id": booking["id"],
+                    "expires_at": None,
+                    "created_at": booking.get("created_at") or now_iso,
+                    "recovered_from_confirmed_booking": True,
+                }
+                try:
+                    await leg_collection.update_one(
+                        {"seat_lock_id": lock_id, "leg_index": int(leg_index)},
+                        {"$set": leg_doc},
+                        upsert=True,
+                    )
+                except DuplicateKeyError as exc:
+                    # Concurrent worker/reconciler may have completed the same
+                    # booking-seat upsert. Accept only an identical reservation;
+                    # collisions owned by another booking must fail closed.
+                    existing_leg = await leg_collection.find_one(
+                        {"seat_lock_id": lock_id, "leg_index": int(leg_index)}, {"_id": 0}
+                    )
+                    same_reservation = bool(
+                        existing_leg
+                        and existing_leg.get("bus_instance_id") == bus_id
+                        and existing_leg.get("seat_number") == seat_number
+                        and int(existing_leg.get("leg_index", -1)) == int(leg_index)
+                        and existing_leg.get("booking_id") == booking.get("id")
+                    )
+                    if same_reservation:
+                        continue
+                    raise RuntimeError(
+                        "Cannot safely migrate confirmed bookings: two bookings claim the "
+                        f"same physical bus leg and seat ({bus_id}, leg {leg_index}, {seat_number})."
+                    ) from exc
+
+
 async def _ensure_indexes():
     # Also drop the earlier attempt at uniq_route_departure on schedules —
     # we now WANT multiple sibling schedules per (route, date, time) and rely
@@ -4916,38 +5641,63 @@ async def _ensure_indexes():
             await db.schedules.drop_index(stale)
         except Exception:
             pass
-    # Prevent double booking at DB level: unique (bus_instance_id, seat_number)
-    # for non-released rows. All rows have bus_instance_id after startup
-    # migration (falls back to schedule_id for legacy schedules).
-    #
-    # If legacy data has duplicate seat locks that now collide under
-    # bus_instance_id (e.g. seat 5A locked on two sibling schedules that used
-    # to be independent), the index build fails. In that case: log a warning,
-    # keep the legacy `uniq_schedule_seat_active` index in place, and let the
-    # operator resolve manually with `scripts/find_duplicate_seat_locks.py`.
+    # Migrate from whole-bus seat locking to per-leg inventory. Keep one primary
+    # lock row per checkout seat; the secondary collection is the concurrency guard.
+    for stale in ("uniq_bus_instance_seat_active", "uniq_schedule_seat_active"):
+        try:
+            await db.seat_locks.drop_index(stale)
+        except Exception:
+            pass
+
+    leg_collection = getattr(db, "seat_leg_locks", None)
+    if leg_collection is None:
+        raise RuntimeError("Required MongoDB collection seat_leg_locks is unavailable.")
+
+    # Clear expired/malformed holds from both stores BEFORE creating the new
+    # partial unique index. Otherwise a prior interrupted rollout can leave an
+    # expired row with status="locked" that prevents a clean index build even
+    # though it should no longer reserve inventory.
+    index_now = utcnow().isoformat()
+    stale_locked = {
+        "status": "locked",
+        "$or": [
+            {"expires_at": {"$lt": index_now}},
+            {"expires_at": {"$exists": False}},
+            {"expires_at": None},
+        ],
+    }
+    await db.seat_locks.update_many(
+        stale_locked,
+        {"$set": {"status": "released", "released_at": index_now}},
+    )
+    await leg_collection.update_many(
+        stale_locked,
+        {"$set": {"status": "released", "released_at": index_now}},
+    )
+
     try:
-        await db.seat_locks.create_index(
-            [("bus_instance_id", ASCENDING), ("seat_number", ASCENDING)],
+        await leg_collection.create_index(
+            [("seat_lock_id", ASCENDING), ("leg_index", ASCENDING)],
+            unique=True,
+            name="uniq_seat_lock_leg",
+        )
+        await leg_collection.create_index(
+            [("bus_instance_id", ASCENDING), ("leg_index", ASCENDING), ("seat_number", ASCENDING)],
             unique=True,
             partialFilterExpression={"status": {"$in": ["locked", "booked"]}},
-            name="uniq_bus_instance_seat_active",
+            name="uniq_bus_instance_leg_seat_active",
         )
     except DuplicateKeyError as e:
-        # Fail closed: never accept live bookings without the shared-seat guarantee.
         first = e.details.get("keyValue") if getattr(e, "details", None) else str(e)[:150]
-        logger.critical(
-            "Legacy duplicate seat_locks detected — uniq_bus_instance_seat_active NOT built. "
-            "Refusing to start. Run `cd ~/app/backend && python scripts/find_duplicate_seat_locks.py` "
-            "(--release-expired to unlock stale non-booked locks). First conflict: %s", first,
-        )
+        logger.critical("Leg-level seat inventory index creation failed: %s", first)
         raise RuntimeError(
-            "Required seat uniqueness index uniq_bus_instance_seat_active could not be created"
+            "Required leg-level seat uniqueness indexes could not be created"
         ) from e
-    # The new index is in place, so the legacy schedule-level index is redundant.
-    try:
-        await db.seat_locks.drop_index("uniq_schedule_seat_active")
-    except Exception:
-        pass
+
+    await _migrate_seat_lock_legs()
+    await db.seat_locks.create_index([("booking_id", ASCENDING), ("seat_number", ASCENDING)])
+    await db.seat_locks.create_index([("lock_token", ASCENDING)])
+    await leg_collection.create_index([("booking_id", ASCENDING), ("status", ASCENDING)])
     await db.users.create_index([("email", ASCENDING)], unique=True)
     await db.bookings.create_index([("user_id", ASCENDING)])
     await db.bookings.create_index([("reference", ASCENDING)], unique=True)

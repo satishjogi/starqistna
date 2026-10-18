@@ -19,7 +19,9 @@
 #      or if SEED_DEMO_DATA=true. Secret values are never printed.
 #   2. Install/check Python dependencies and smoke-import the backend.
 #   3. Build the React frontend.
-#   4. Restart the configured systemd backend, verify health, and reload nginx.
+#   4. Run a read-only seat-inventory migration preflight; abort before restart
+#      if legacy confirmed bookings/holds overlap the new per-route-leg inventory.
+#   5. Restart the configured systemd backend, verify health, and reload nginx.
 #
 # Configuration (override by exporting variables before running this script):
 #   BACKEND_SERVICE       systemd unit name (default: starqistna-backend)
@@ -195,12 +197,12 @@ validate_production_env() {
     echo "  ✓ production configuration validated (values not shown)"
 }
 
-log "1/4  Syncing env files"
+log "1/5  Syncing env files"
 sync_env "$REPO_ROOT/backend/.env.example"  "$REPO_ROOT/backend/.env" protect
 sync_env "$REPO_ROOT/frontend/.env.example" "$REPO_ROOT/frontend/.env"
 validate_production_env
 
-log "2/4  Installing backend dependencies"
+log "2/5  Installing backend dependencies"
 if [[ -d "$REPO_ROOT/backend/.venv" ]]; then
     # shellcheck disable=SC1091
     source "$REPO_ROOT/backend/.venv/bin/activate"
@@ -217,7 +219,7 @@ python -m pip check
 (cd "$REPO_ROOT/backend" && python -c "import server")
 echo "  ✓ backend deps up to date"
 
-log "3/4  Building frontend"
+log "3/5  Building frontend"
 pushd "$REPO_ROOT/frontend" >/dev/null
 # npm ci installs EXACTLY what package-lock.json pins (reproducible builds).
 # --legacy-peer-deps is required because react-scripts@5 declares eslint@8-era
@@ -233,7 +235,14 @@ fi
 npm run build
 popd >/dev/null
 
-log "4/4  Restarting backend and checking health"
+log "4/5  Checking multi-stop seat migration safety (read-only)"
+(
+    cd "$REPO_ROOT/backend"
+    python scripts/check_segment_seat_migration.py
+)
+echo "  ✓ seat migration preflight passed; no conflicts were found"
+
+log "5/5  Restarting backend and checking health"
 
 if ! command -v systemctl >/dev/null 2>&1; then
     echo "ERROR: systemctl is required to restart backend unit '$BACKEND_SERVICE'." >&2

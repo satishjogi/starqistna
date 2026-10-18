@@ -12,6 +12,12 @@ export default function SeatSelection() {
   const { scheduleId } = useParams();
   const navigate = useNavigate();
   const flow = getFlow();
+  const pickupTerminalId = flow?.from?.id || "";
+  const dropoffTerminalId = flow?.to?.id || "";
+  const segmentParams = {
+    ...(pickupTerminalId ? { pickup_terminal_id: pickupTerminalId } : {}),
+    ...(dropoffTerminalId ? { dropoff_terminal_id: dropoffTerminalId } : {}),
+  };
 
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -20,16 +26,17 @@ export default function SeatSelection() {
   const [locking, setLocking] = useState(false);
 
   useEffect(() => {
-    api
-      .get(`/schedules/${scheduleId}`)
-      .then(({ data }) => setData(data))
-      .catch((e) => setError(e?.response?.data?.detail || "Failed to load"))
-      .finally(() => setLoading(false));
+    let alive = true;
+    const loadSchedule = () => api.get("/schedules/" + scheduleId, { params: segmentParams });
+    loadSchedule()
+      .then(({ data }) => { if (alive) setData(data); })
+      .catch((e) => { if (alive) setError(e?.response?.data?.detail || "Failed to load"); })
+      .finally(() => { if (alive) setLoading(false); });
     const t = setInterval(() => {
-      api.get(`/schedules/${scheduleId}`).then(({ data }) => setData(data)).catch(() => {});
+      loadSchedule().then(({ data }) => { if (alive) setData(data); }).catch(() => {});
     }, 15000);
-    return () => clearInterval(t);
-  }, [scheduleId]);
+    return () => { alive = false; clearInterval(t); };
+  }, [scheduleId, pickupTerminalId, dropoffTerminalId]);
 
   const wanted = (flow?.adults || 1) + (flow?.children || 0);
 
@@ -83,6 +90,8 @@ export default function SeatSelection() {
     try {
       const { data: lock } = await api.post("/seats/lock", {
         schedule_id: scheduleId,
+        pickup_terminal_id: pickupTerminalId || undefined,
+        dropoff_terminal_id: dropoffTerminalId || undefined,
         seat_numbers: selected.map((s) => s.seat_number),
       });
       setFlow({
@@ -97,7 +106,7 @@ export default function SeatSelection() {
       if (detail?.failed_seats) {
         setError(`Seats taken: ${detail.failed_seats.join(", ")}. Please re-select.`);
         // refresh layout
-        const { data: fresh } = await api.get(`/schedules/${scheduleId}`);
+        const { data: fresh } = await api.get("/schedules/" + scheduleId, { params: segmentParams });
         setData(fresh);
         setSelected(selected.filter((s) => !detail.failed_seats.includes(s.seat_number)));
       } else {

@@ -85,6 +85,8 @@ export default function Passengers() {
       const { data } = await api.post("/promo/validate", {
         code: promoInput.trim(),
         schedule_id: flow.schedule_id,
+        pickup_terminal_id: flow.from?.id,
+        dropoff_terminal_id: flow.to?.id,
         passenger_count: passengers.length,
         adults,
         children,
