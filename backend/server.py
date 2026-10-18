@@ -2590,8 +2590,36 @@ async def create_checkout(body: CheckoutBody, request: Request, user: Optional[d
     now_iso = utcnow().isoformat()
     held = await db.seat_locks.count_documents(
         {"booking_id": booking["id"], "status": "locked", "expires_at": {"$gt": now_iso}})
-    if held < len(booking.get("seats") or [None]):
+    seat_count = len(booking.get("seats") or [None])
+    if held < seat_count:
         raise HTTPException(409, "Seat hold has expired, please select seats again")
+
+    # Validate the concurrency-guard rows as well as the primary lock metadata.
+    # A booking must not reach a payment gateway unless every occupied route leg
+    # remains reserved.
+    leg_collection = getattr(db, "seat_leg_locks", None)
+    if leg_collection is not None:
+        leg_indices = booking.get("leg_indices")
+        if not isinstance(leg_indices, list) or not leg_indices:
+            schedule = await db.schedules.find_one({"id": booking.get("schedule_id")}, {"_id": 0})
+            if not schedule:
+                raise HTTPException(409, "The scheduled trip is missing; contact support before paying")
+            try:
+                leg_indices = await _get_segment_leg_indices(
+                    schedule,
+                    booking.get("from_terminal_id"),
+                    booking.get("to_terminal_id"),
+                )
+            except HTTPException as exc:
+                raise HTTPException(409, "The seat reservation needs operations review before payment") from exc
+        held_legs = await leg_collection.count_documents({
+            "booking_id": booking["id"],
+            "status": "locked",
+            "leg_index": {"$in": leg_indices},
+            "expires_at": {"$gt": now_iso},
+        })
+        if held_legs < seat_count * len(leg_indices):
+            raise HTTPException(409, "Seat reservation is incomplete or expired; please select seats again")
     origin = _safe_return_origin(body.origin_url)
 
     # Single Stripe account — Malaysia. Always bill in MYR regardless of where
@@ -3229,6 +3257,15 @@ async def _finalize_booking(booking_id: str, session_id: str) -> bool:
                             )
 
         if lost_seats:
+            # A seat whose route has any conflict must not leave partial
+            # reservations on its other legs. Release only those passengers'
+            # leg rows; valid seats in a multi-passenger booking remain held
+            # for operations to resolve the paid booking safely.
+            if leg_collection is not None:
+                await leg_collection.delete_many({
+                    "booking_id": booking_id,
+                    "seat_number": {"$in": lost_seats},
+                })
             await db.bookings.update_one(
                 {"id": booking_id},
                 {"$set": {
@@ -4523,6 +4560,19 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
             raise HTTPException(400, "from_terminal_id must be one of the route's boarding stops")
         if body.to_terminal_id not in alighting_ids:
             raise HTTPException(400, "to_terminal_id must be one of the route's alighting stops")
+        try:
+            _route_segment_leg_indices(route, body.from_terminal_id, body.to_terminal_id)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        configured_pairings = route.get("pairings") or []
+        if configured_pairings and not any(
+            pairing.get("pickup_id") == body.from_terminal_id
+            and pairing.get("dropoff_id") == body.to_terminal_id
+            for pairing in configured_pairings
+        ):
+            raise HTTPException(
+                400, "From/to segment is not configured in this route's fare pairings"
+            )
 
     dow_set = set(body.days_of_week)
     created = 0
