@@ -183,6 +183,74 @@ def test_sibling_schedules_share_seat_pool():
             print(f"[cleanup] error: {ce}")
 
 
+
+def test_bulk_overnight_segments_share_one_bus_instance():
+    """Different segment departure times, including after midnight, still share one physical bus."""
+    tok = admin_token()
+    h = {"Authorization": f"Bearer {tok}"}
+    terms = requests.get(f"{BASE}/api/admin/terminals", headers=h, timeout=10).json()
+    kl = _find_terminal_by_city(terms, "Kuala Lumpur")
+    melaka = _find_terminal_by_city(terms, "Melaka")
+    jb = _find_terminal_by_city(terms, "Johor Bahru")
+    gmc = _find_terminal_by_city(terms, "Singapore")
+    route = _make_route_with_stops(h, kl, melaka, jb, gmc)
+    route_id = route["id"]
+    service_date = "2099-01-01"  # Thursday
+    bus_key = f"overnight-{uuid.uuid4().hex}"
+    common = {
+        "route_id": route_id,
+        "start_date": service_date,
+        "end_date": service_date,
+        "days_of_week": [3],
+        "bus_type": "Standard",
+        "total_seats": 30,
+        "bus_instance_key": bus_key,
+    }
+    try:
+        r = requests.post(f"{BASE}/api/admin/schedules/bulk", json={
+            **common,
+            "from_terminal_id": kl["id"],
+            "to_terminal_id": melaka["id"],
+            "departure_time": "23:00",
+            "arrival_time": "01:00",
+            "departure_day_offset": 0,
+            "arrival_day_offset": 1,
+            "adult_fare": 30,
+            "child_fare": 15,
+        }, headers=h, timeout=10)
+        assert r.status_code == 200, r.text
+        assert r.json()["created"] == 1
+
+        r = requests.post(f"{BASE}/api/admin/schedules/bulk", json={
+            **common,
+            "from_terminal_id": melaka["id"],
+            "to_terminal_id": jb["id"],
+            "departure_time": "01:00",
+            "arrival_time": "04:00",
+            "departure_day_offset": 1,
+            "arrival_day_offset": 1,
+            "adult_fare": 28,
+            "child_fare": 14,
+        }, headers=h, timeout=10)
+        assert r.status_code == 200, r.text
+        assert r.json()["created"] == 1
+
+        schedules = requests.get(f"{BASE}/api/admin/schedules", headers=h, timeout=10).json()
+        first = next(s for s in schedules if s.get("route_id") == route_id and s.get("from_terminal_id") == kl["id"] and s.get("departure_time") == "23:00")
+        second = next(s for s in schedules if s.get("route_id") == route_id and s.get("from_terminal_id") == melaka["id"] and s.get("departure_time") == "01:00")
+        assert first["departure_date"] == service_date
+        assert second["departure_date"] == "2099-01-02"
+        assert first["bus_instance_id"] == second["bus_instance_id"]
+        assert first["bus_instance_service_date"] == second["bus_instance_service_date"] == service_date
+    finally:
+        try:
+            requests.post(f"{BASE}/api/admin/schedules/bulk-delete",
+                          json={"route_id": route_id, "force": True},
+                          headers=h, timeout=15)
+            requests.delete(f"{BASE}/api/admin/routes/{route_id}", headers=h, timeout=10)
+        except Exception as ce:
+            print(f"[cleanup] overnight segment test error: {ce}")
+
 def test_legacy_unlinked_schedule_has_its_own_seat_pool():
     """A schedule with no route_id gets bus_instance_id = its own id — legacy
     behaviour is preserved. Two separately-created legacy schedules keep
