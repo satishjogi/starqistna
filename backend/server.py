@@ -766,60 +766,36 @@ async def search_schedules(
 
     schedules = await db.schedules.find(query, {"_id": 0}).sort("departure_time", 1).to_list(200)
 
-    # -------------------------------------------------------------------------
-    # Route-segment matching:
-    #
-    # A route-linked schedule stores from = route.origin, to = route.destination
-    # (the whole physical bus). But customers might want any (pickup, dropoff)
-    # pair the route's pairings advertise — e.g. "Melaka → JB" on a KL→SG bus.
-    #
-    # For each requested (pickup_id, dropoff_id) combination we also find route-
-    # linked schedules whose route offers that pairing, then splice the pairing's
-    # fare + specific segment into the returned row.
-    # -------------------------------------------------------------------------
+    # Apply the configured fare only to the exact segment represented by each
+    # schedule row. Do not expand one schedule into every pairing on its route:
+    # each segment has its own pickup/departure and drop-off/arrival time. Expanding
+    # by route_id alone makes a Melaka → JB schedule appear as KL → JB (often at
+    # KL's departure time) during a city-level search.
     matching_routes = await db.routes.find(
         {"is_active": {"$ne": False},
          "pairings.pickup_id": {"$in": from_ids},
          "pairings.dropoff_id": {"$in": to_ids}},
         {"_id": 0},
     ).to_list(200)
-    # Build (pickup_id, dropoff_id) → pairing map per route so we know which segment
-    # to attach for the specific customer query.
-    segment_by_route: Dict[str, dict] = {}
+    pairings_by_route_and_segment: Dict[tuple, dict] = {}
     for r in matching_routes:
         for p in r.get("pairings", []):
-            if p.get("pickup_id") in from_ids and p.get("dropoff_id") in to_ids:
-                # Pick the first matching pairing per route (should be unique per pair).
-                segment_by_route.setdefault(r["id"], {"route": r, "pairing": p})
-    if segment_by_route:
-        # Fetch schedules linked to any of these routes on this date.
-        route_ids = list(segment_by_route.keys())
-        seg_query: dict = {
-            "route_id": {"$in": route_ids},
-            "departure_date": date,
-        }
-        if "departure_time" in query:  # today-hides-past filter carries over
-            seg_query["departure_time"] = query["departure_time"]
-        seg_query["$or"] = query["$or"]  # end_date guard
-        existing_ids = {s["id"] for s in schedules}
-        seg_schedules = await db.schedules.find(seg_query, {"_id": 0}).to_list(200)
-        for s in seg_schedules:
-            if s["id"] in existing_ids:
-                continue  # already returned via direct-match branch
-            info = segment_by_route.get(s.get("route_id"))
-            if not info:
-                continue
-            pairing = info["pairing"]
-            # Overlay the sold segment on the row so the frontend renders correctly.
-            s["from_terminal_id"] = pairing["pickup_id"]
-            s["to_terminal_id"] = pairing["dropoff_id"]
-            s["adult_fare"] = float(pairing.get("adult_fare", s.get("adult_fare", 0)))
-            s["child_fare"] = float(pairing.get("child_fare", s.get("child_fare", 0)))
-            s["currency"] = (pairing.get("currency") or s.get("currency") or "myr").lower()
-            s["is_route_segment"] = True
-            schedules.append(s)
-        # Keep the result sorted by departure_time for a natural timeline view.
-        schedules.sort(key=lambda x: x.get("departure_time", ""))
+            pickup_id = p.get("pickup_id")
+            dropoff_id = p.get("dropoff_id")
+            if pickup_id in from_ids and dropoff_id in to_ids:
+                pairings_by_route_and_segment[(r["id"], pickup_id, dropoff_id)] = p
+
+    for s in schedules:
+        route_id = s.get("route_id")
+        pairing = pairings_by_route_and_segment.get(
+            (route_id, s.get("from_terminal_id"), s.get("to_terminal_id"))
+        )
+        if not pairing:
+            continue
+        s["adult_fare"] = float(pairing.get("adult_fare", s.get("adult_fare", 0)))
+        s["child_fare"] = float(pairing.get("child_fare", s.get("child_fare", 0)))
+        s["currency"] = (pairing.get("currency") or s.get("currency") or "myr").lower()
+        s["is_route_segment"] = True
 
     # Enrich each schedule with the SPECIFIC pickup + drop-off terminal it uses.
     # Critical for city-level searches ("Any stop in KL → Any stop in SG") where

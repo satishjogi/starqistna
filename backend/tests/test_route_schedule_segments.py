@@ -282,3 +282,82 @@ def test_legacy_unlinked_schedule_has_its_own_seat_pool():
                       json={"from_terminal_id": kl["id"], "to_terminal_id": melaka["id"],
                             "start_date": dep_date, "end_date": dep_date, "force": True},
                       headers=h, timeout=15)
+
+def test_city_search_does_not_relabel_other_route_segments():
+    """A city search must return only schedule rows for that exact city pair.
+
+    Regresses route-level expansion that previously relabelled every sibling
+    schedule on a route as the first matching city pair, duplicating results
+    and showing unrelated destinations at the origin's departure time.
+    """
+    tok = admin_token()
+    h = {"Authorization": f"Bearer {tok}"}
+    terms = requests.get(f"{BASE}/api/admin/terminals", headers=h, timeout=10).json()
+    kl = _find_terminal_by_city(terms, "Kuala Lumpur")
+    melaka = _find_terminal_by_city(terms, "Melaka")
+    jb = _find_terminal_by_city(terms, "Johor Bahru")
+    gmc = _find_terminal_by_city(terms, "Singapore")
+    route = _make_route_with_stops(h, kl, melaka, jb, gmc)
+    route_id = route["id"]
+    service_date = "2099-01-01"  # Thursday
+    bus_key = f"city-search-{uuid.uuid4().hex}"
+    common = {
+        "route_id": route_id,
+        "start_date": service_date,
+        "end_date": service_date,
+        "days_of_week": [3],
+        "bus_type": "Standard",
+        "total_seats": 30,
+        "bus_instance_key": bus_key,
+        "departure_time": "08:00",
+        "arrival_time": "12:00",
+        "departure_day_offset": 0,
+        "arrival_day_offset": 0,
+    }
+    try:
+        for pickup, dropoff, fare in ((kl, jb, 55), (melaka, jb, 28)):
+            response = requests.post(
+                f"{BASE}/api/admin/schedules/bulk",
+                json={
+                    **common,
+                    "from_terminal_id": pickup["id"],
+                    "to_terminal_id": dropoff["id"],
+                    "adult_fare": fare,
+                    "child_fare": fare / 2,
+                },
+                headers=h,
+                timeout=10,
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["created"] == 1
+
+        result = requests.get(
+            f"{BASE}/api/search",
+            params={
+                "date": service_date,
+                "from_city": "Kuala Lumpur",
+                "to_city": "Johor Bahru",
+            },
+            timeout=10,
+        )
+        assert result.status_code == 200, result.text
+        found = result.json()["schedules"]
+        assert len(found) == 1, found
+        assert found[0]["from_terminal_id"] == kl["id"], found
+        assert found[0]["to_terminal_id"] == jb["id"], found
+    finally:
+        try:
+            requests.post(
+                f"{BASE}/api/admin/schedules/bulk-delete",
+                json={"route_id": route_id, "force": True},
+                headers=h,
+                timeout=15,
+            )
+            requests.delete(
+                f"{BASE}/api/admin/routes/{route_id}",
+                headers=h,
+                timeout=10,
+            )
+        except Exception as ce:
+            print(f"[cleanup] city search segment test error: {ce}")
+
