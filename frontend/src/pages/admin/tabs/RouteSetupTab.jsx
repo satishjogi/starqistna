@@ -16,6 +16,7 @@ export default function RouteSetupTab() {
   const [pairFares, setPairFares] = useState({});
   const [pickupSearch, setPickupSearch] = useState("");
   const [dropoffSearch, setDropoffSearch] = useState("");
+  const [draggedStopId, setDraggedStopId] = useState(null);
   const [showAllPickupCities, setShowAllPickupCities] = useState(false);
   const [showAllDropoffCities, setShowAllDropoffCities] = useState(false);
   const [busInstanceKey, setBusInstanceKey] = useState("");
@@ -103,6 +104,34 @@ export default function RouteSetupTab() {
       if (firstPickup && (next[firstPickup] === form.departure_time || !next[firstPickup])) next[firstPickup] = value;
       return next;
     });
+  };
+  const reorderSelectedStop = (stopId, targetIndex) => {
+    if (createdRoute) return;
+    const current = orderedSelectedStops.map(({ id }) => id);
+    const fromIndex = current.indexOf(stopId);
+    if (fromIndex < 0 || targetIndex < 0 || targetIndex >= current.length || fromIndex === targetIndex) return;
+    const next = [...current];
+    next.splice(fromIndex, 1);
+    next.splice(targetIndex, 0, stopId);
+    if (!form.pickupIds.includes(next[0])) {
+      setError("The first stop must be a pickup at the route departure time.");
+      return;
+    }
+    const timeSlots = orderedSelectedStops.map(({ id }) => stopTimes[id] || form.departure_time);
+    setStopTimes((prev) => {
+      const updated = { ...prev };
+      next.forEach((id, index) => { updated[id] = timeSlots[index]; });
+      return updated;
+    });
+    setError("");
+    setMessage("Stop order updated. Please review the planned times before saving.");
+  };
+  const handleStopDrop = (event, stopId) => {
+    event.preventDefault();
+    if (!draggedStopId || draggedStopId === stopId) return;
+    const targetIndex = orderedSelectedStops.findIndex(({ id }) => id === stopId);
+    reorderSelectedStop(draggedStopId, targetIndex);
+    setDraggedStopId(null);
   };
   const toggleDay = (day) => setForm((prev) => ({
     ...prev, days_of_week: prev.days_of_week.includes(day)
@@ -302,16 +331,31 @@ export default function RouteSetupTab() {
           <div className="mt-3 text-xs text-zinc-600">{validPairCount} pickup/drop-off combinations will be configured. Each selected combination becomes searchable inventory.</div>
           <div className="mt-6 border-t border-black/10 pt-5">
             <h4 className="font-bold mb-1">Planned stop times</h4>
-            <p className="text-xs text-zinc-500 mb-3">Enter the local time at every selected stop. Offsets are calculated from the first departure; times after midnight are supported.</p>
+            <p className="text-xs text-zinc-500 mb-3">Enter the local time at every selected stop. Drag rows to reorder, or use the arrows. Reordering assigns the existing time slots to the new stop order; review the times and offsets before saving. Times after midnight are supported.</p>
             {!selectedStopIds.length && <p className="text-sm text-zinc-500">Select stops above to enter their times.</p>}
             <div className="space-y-2">
-              {orderedSelectedStops.map(({ id, offset }) => {
+              {orderedSelectedStops.map(({ id, offset }, index) => {
                 const stop = stopById[id];
                 const roles = [form.pickupIds.includes(id) ? "Pickup" : "", form.dropoffIds.includes(id) ? "Drop-off" : ""].filter(Boolean).join(" / ");
-                return <div key={id} className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_140px_110px] gap-3 items-center border border-black/10 rounded p-3">
-                  <div><b className="text-sm">{stop?.city || id}</b><span className="block text-xs text-zinc-500">{stop?.name || ""} · {roles}</span></div>
+                return <div
+                  key={id}
+                  draggable={!createdRoute}
+                  onDragStart={(event) => { setDraggedStopId(id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(id)); }}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => handleStopDrop(event, id)}
+                  onDragEnd={() => setDraggedStopId(null)}
+                  className={`grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_140px_110px_72px] gap-3 items-center border rounded p-3 transition-colors ${draggedStopId === id ? "border-red-400 bg-red-50 opacity-70" : "border-black/10"} ${createdRoute ? "" : "cursor-grab"}`}
+                >
+                  <div className="flex items-start gap-2">
+                    <span className="mt-0.5 text-zinc-400 select-none" aria-hidden="true">⠿</span>
+                    <div><b className="text-sm">{stop?.city || id}</b><span className="block text-xs text-zinc-500">{stop?.name || ""} · {roles}</span></div>
+                  </div>
                   <label><span className="te-label">Planned time</span><input type="time" required className="te-input" disabled={!!createdRoute} value={stopTimes[id] || ""} onChange={(e) => setStopTimes((prev) => ({ ...prev, [id]: e.target.value }))} /></label>
                   <div className="text-xs text-zinc-600 sm:text-right"><span className="block text-zinc-400">Offset from start</span>{Number.isFinite(offset) ? `${Math.floor(offset / 60)}h ${offset % 60}m` : "Enter time"}</div>
+                  <div className="flex items-center gap-1 sm:justify-end">
+                    <button type="button" aria-label={`Move ${stop?.name || stop?.city || "stop"} up`} title="Move up" disabled={!!createdRoute || index === 0} onClick={() => reorderSelectedStop(id, index - 1)} className="rounded border border-black/15 px-2 py-1 text-sm disabled:opacity-30 hover:bg-zinc-100">↑</button>
+                    <button type="button" aria-label={`Move ${stop?.name || stop?.city || "stop"} down`} title="Move down" disabled={!!createdRoute || index === orderedSelectedStops.length - 1} onClick={() => reorderSelectedStop(id, index + 1)} className="rounded border border-black/15 px-2 py-1 text-sm disabled:opacity-30 hover:bg-zinc-100">↓</button>
+                  </div>
                 </div>;
               })}
             </div>
