@@ -12,6 +12,8 @@ export default function RouteSetupTab() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [createdRoute, setCreatedRoute] = useState(null);
+  const [stopTimes, setStopTimes] = useState({});
+  const [busInstanceKey, setBusInstanceKey] = useState("");
   const [form, setForm] = useState({
     code: "", name: "", origin_city: "", destination_city: "",
     pickupIds: [], dropoffIds: [], fare: String(DEFAULT_FARE), childFare: "25",
@@ -36,18 +38,38 @@ export default function RouteSetupTab() {
   const stopById = useMemo(() => Object.fromEntries(stops.map((s) => [s.id, s])), [stops]);
   const pickups = stops.filter((s) => s.is_pickup !== false);
   const dropoffs = stops.filter((s) => s.is_dropoff !== false);
-  const validPairCount = form.pickupIds.reduce((n, id) => n + form.dropoffIds.filter((dropId) => {
-    if (id === dropId) return false;
-    const p = stops.find((s) => s.id === id);
-    const d = stops.find((s) => s.id === dropId);
-    // Route stop order is supplied by the staff's pickup/drop-off selections.
-    return !!p && !!d;
-  }).length, 0);
-
-  const toggleId = (field, id) => setForm((prev) => ({
-    ...prev,
-    [field]: prev[field].includes(id) ? prev[field].filter((v) => v !== id) : [...prev[field], id],
-  }));
+  const validPairCount = form.pickupIds.reduce((n, id) => n + form.dropoffIds.filter((dropId) => dropId !== id).length, 0);
+  const selectedStopIds = [...new Set([...form.pickupIds, ...form.dropoffIds])];
+  const toMinutes = (value) => {
+    if (!/^\\d{2}:\\d{2}$/.test(value || "")) return NaN;
+    const [hours, minutes] = value.split(":").map(Number);
+    return hours * 60 + minutes;
+  };
+  const offsetForStop = (id) => {
+    const base = toMinutes(form.departure_time), stop = toMinutes(stopTimes[id]);
+    if (!Number.isFinite(base) || !Number.isFinite(stop)) return NaN;
+    return (stop - base + 1440) % 1440;
+  };
+  const orderedSelectedStops = selectedStopIds.map((id) => ({ id, offset: offsetForStop(id) })).sort((a, b) => a.offset - b.offset);
+  const timeValidation = (() => {
+    if (!form.pickupIds.length || !form.dropoffIds.length) return "";
+    if (selectedStopIds.some((id) => !Number.isFinite(offsetForStop(id)))) return "Enter a planned time for every selected stop.";
+    if (orderedSelectedStops.some((stop, i) => i > 0 && stop.offset === orderedSelectedStops[i - 1].offset)) return "Each selected stop needs a different time so journey order is unambiguous.";
+    return "";
+  })();
+  const toggleId = (field, id) => {
+    setForm((prev) => ({ ...prev, [field]: prev[field].includes(id) ? prev[field].filter((v) => v !== id) : [...prev[field], id] }));
+    setStopTimes((prev) => ({ ...prev, [id]: prev[id] || form.departure_time }));
+  };
+  const changeDepartureTime = (value) => {
+    setForm((prev) => ({ ...prev, departure_time: value }));
+    setStopTimes((prev) => {
+      const next = { ...prev };
+      const firstPickup = form.pickupIds[0];
+      if (firstPickup && (next[firstPickup] === form.departure_time || !next[firstPickup])) next[firstPickup] = value;
+      return next;
+    });
+  };
   const toggleDay = (day) => setForm((prev) => ({
     ...prev, days_of_week: prev.days_of_week.includes(day)
       ? prev.days_of_week.filter((d) => d !== day)
@@ -74,6 +96,10 @@ export default function RouteSetupTab() {
       setError("Select at least one operating day.");
       return;
     }
+    if (timeValidation) {
+      setError(timeValidation);
+      return;
+    }
     const adultFare = Number(form.fare);
     const childFare = Number(form.childFare);
     if (!Number.isFinite(adultFare) || adultFare < 0 || !Number.isFinite(childFare) || childFare < 0) {
@@ -85,8 +111,8 @@ export default function RouteSetupTab() {
     let route = createdRoute;
     try {
       if (!route) {
-        const boarding_stops = form.pickupIds.map((terminal_id, index) => ({ terminal_id, offset_min: index * 60 }));
-        const alighting_stops = form.dropoffIds.map((terminal_id, index) => ({ terminal_id, offset_min: (form.pickupIds.length + index) * 60 + 60 }));
+        const boarding_stops = form.pickupIds.map((terminal_id) => ({ terminal_id, offset_min: offsetForStop(terminal_id) }));
+        const alighting_stops = form.dropoffIds.map((terminal_id) => ({ terminal_id, offset_min: offsetForStop(terminal_id) }));
         const pairings = form.pickupIds.flatMap((pickup_id) =>
           form.dropoffIds.filter((dropoff_id) => dropoff_id !== pickup_id).map((dropoff_id) => ({
             pickup_id, dropoff_id, adult_fare: adultFare, child_fare: childFare,
@@ -106,6 +132,7 @@ export default function RouteSetupTab() {
         });
         route = response.data;
         setCreatedRoute(route);
+        if (!busInstanceKey) setBusInstanceKey(`route-setup-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
         setMessage("Route saved. Generating schedules for each configured pickup/drop-off segment…");
       }
 
@@ -124,8 +151,9 @@ export default function RouteSetupTab() {
             start_date: form.start_date,
             end_date: form.end_date,
             days_of_week: form.days_of_week,
-            departure_time: form.departure_time,
-            arrival_time: form.arrival_time,
+            departure_time: stopTimes[pair.pickup_id] || form.departure_time,
+            arrival_time: stopTimes[pair.dropoff_id] || form.arrival_time,
+            bus_instance_key: busInstanceKey || `route-setup-${route.id}`,
             bus_type: form.bus_type,
             adult_fare: Number(pair.adult_fare ?? adultFare),
             child_fare: Number(pair.child_fare ?? childFare),
@@ -149,6 +177,8 @@ export default function RouteSetupTab() {
 
   const reset = () => {
     setCreatedRoute(null);
+    setStopTimes({});
+    setBusInstanceKey("");
     setMessage("");
     setError("");
     setForm({
@@ -187,7 +217,7 @@ export default function RouteSetupTab() {
 
         <section className="te-card p-5 md:p-7">
           <h3 className="font-black text-lg mb-1">2. Stops along the journey</h3>
-          <p className="text-xs text-zinc-500 mb-4">Select the stops served by this route. Choose the pickup stops and drop-off stops in journey order; the first pickup is assigned the earliest offset.</p>
+          <p className="text-xs text-zinc-500 mb-4">Select the pickup and drop-off points served by this route. Planned times below determine stop order and each offset from the first departure.</p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
             <div>
               <div className="te-overline mb-2">Pickup stops ({form.pickupIds.length})</div>
@@ -205,6 +235,22 @@ export default function RouteSetupTab() {
             </div>
           </div>
           <div className="mt-3 text-xs text-zinc-600">{validPairCount} pickup/drop-off combinations will be configured. Each selected combination becomes searchable inventory.</div>
+          <div className="mt-6 border-t border-black/10 pt-5">
+            <h4 className="font-bold mb-1">Planned stop times</h4>
+            <p className="text-xs text-zinc-500 mb-3">Enter the local time at every selected stop. Offsets are calculated from the first departure; times after midnight are supported.</p>
+            {!selectedStopIds.length && <p className="text-sm text-zinc-500">Select stops above to enter their times.</p>}
+            <div className="space-y-2">
+              {orderedSelectedStops.map(({ id, offset }) => {
+                const stop = stopById[id];
+                const roles = [form.pickupIds.includes(id) ? "Pickup" : "", form.dropoffIds.includes(id) ? "Drop-off" : ""].filter(Boolean).join(" / ");
+                return <div key={id} className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_140px_110px] gap-3 items-center border border-black/10 rounded p-3">
+                  <div><b className="text-sm">{stop?.city || id}</b><span className="block text-xs text-zinc-500">{stop?.name || ""} · {roles}</span></div>
+                  <label><span className="te-label">Planned time</span><input type="time" required className="te-input" disabled={!!createdRoute} value={stopTimes[id] || ""} onChange={(e) => setStopTimes((prev) => ({ ...prev, [id]: e.target.value }))} /></label>
+                  <div className="text-xs text-zinc-600 sm:text-right"><span className="block text-zinc-400">Offset from start</span>{Number.isFinite(offset) ? `${Math.floor(offset / 60)}h ${offset % 60}m` : "Enter time"}</div>
+                </div>;
+              })}
+            </div>
+          </div>
         </section>
 
         <section className="te-card p-5 md:p-7">
@@ -214,8 +260,8 @@ export default function RouteSetupTab() {
             <label><span className="te-label">Default child fare</span><input type="number" min="0" step="0.01" required className="te-input" value={form.childFare} onChange={(e) => setForm({ ...form, childFare: e.target.value })} /></label>
             <label><span className="te-label">First trip date</span><input type="date" required className="te-input" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} /></label>
             <label><span className="te-label">Last trip date (inclusive)</span><input type="date" required min={form.start_date || undefined} className="te-input" value={form.end_date} onChange={(e) => setForm({ ...form, end_date: e.target.value })} /></label>
-            <label><span className="te-label">Departure time</span><input type="time" required className="te-input" value={form.departure_time} onChange={(e) => setForm({ ...form, departure_time: e.target.value })} /></label>
-            <label><span className="te-label">Arrival time</span><input type="time" required className="te-input" value={form.arrival_time} onChange={(e) => setForm({ ...form, arrival_time: e.target.value })} /></label>
+            <label><span className="te-label">First departure time</span><input type="time" required className="te-input" value={form.departure_time} onChange={(e) => changeDepartureTime(e.target.value)} /><span className="block text-xs text-zinc-500 mt-1">Baseline for stop offsets; keep it equal to the first stop time.</span></label>
+            <label><span className="te-label">Final arrival (fallback)</span><input type="time" required className="te-input" value={form.arrival_time} onChange={(e) => setForm({ ...form, arrival_time: e.target.value })} /><span className="block text-xs text-zinc-500 mt-1">Segment arrivals use the selected drop-off stop time.</span></label>
             <label><span className="te-label">Bus type</span><select className="te-input" value={form.bus_type} onChange={(e) => setForm({ ...form, bus_type: e.target.value })}>{busTypes.map((b) => <option key={b.id} value={b.name}>{b.name} · {b.seat_count} seats</option>)}{!busTypes.length && <option value="Standard">Standard</option>}</select></label>
             <label><span className="te-label">Seat capacity</span><input type="number" min="12" max="60" required className="te-input" value={form.total_seats} onChange={(e) => setForm({ ...form, total_seats: e.target.value })} /></label>
           </div>
