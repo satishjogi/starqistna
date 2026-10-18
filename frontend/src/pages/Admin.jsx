@@ -75,7 +75,7 @@ export default function Admin() {
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`px-4 py-2 text-xs font-bold uppercase tracking-wider ${tab === t ? "bg-black text-white" : "text-zinc-500"}`}
+            className={`px-4 py-2 text-xs font-bold uppercase tracking-wider ${t === "route-setup" ? (tab === t ? "bg-red-600 text-white" : "text-red-600 hover:bg-red-50") : (tab === t ? "bg-black text-white" : "text-zinc-500")}`}
             data-testid={`admin-tab-${t}`}
           >
             {t.replace(/-/g, " ")}
