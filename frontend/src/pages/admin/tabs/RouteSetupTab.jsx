@@ -49,7 +49,6 @@ export default function RouteSetupTab() {
   const cities = useMemo(() => [...new Set(stops.map((s) => String(s.city || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b)), [stops]);
   const allPickups = stops.filter((s) => s.is_pickup !== false).sort(sortStops);
   const allDropoffs = stops.filter((s) => s.is_dropoff !== false).sort(sortStops);
-  const routeCities = [...new Set([form.origin_city, ...viaCities, form.destination_city].filter(Boolean))];
   const intermediateCityOptions = cities.filter((city) =>
     city !== form.origin_city && city !== form.destination_city && !viaCities.includes(city)
   );
