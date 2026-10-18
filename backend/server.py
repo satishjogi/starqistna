@@ -5632,6 +5632,10 @@ async def _migrate_seat_lock_legs():
                     ) from exc
 
 
+SEAT_LEG_LOCK_UNIQUE_INDEX = "uniq_seat_lock_leg"
+SEAT_LEG_ACTIVE_UNIQUE_INDEX = "uniq_bus_instance_leg_seat_active"
+REQUIRED_SEAT_LEG_INDEXES = (SEAT_LEG_ACTIVE_UNIQUE_INDEX, SEAT_LEG_LOCK_UNIQUE_INDEX)
+
 async def _ensure_indexes():
     # Also drop the earlier attempt at uniq_route_departure on schedules —
     # we now WANT multiple sibling schedules per (route, date, time) and rely
@@ -5679,13 +5683,13 @@ async def _ensure_indexes():
         await leg_collection.create_index(
             [("seat_lock_id", ASCENDING), ("leg_index", ASCENDING)],
             unique=True,
-            name="uniq_seat_lock_leg",
+            name=SEAT_LEG_LOCK_UNIQUE_INDEX,
         )
         await leg_collection.create_index(
             [("bus_instance_id", ASCENDING), ("leg_index", ASCENDING), ("seat_number", ASCENDING)],
             unique=True,
             partialFilterExpression={"status": {"$in": ["locked", "booked"]}},
-            name="uniq_bus_instance_leg_seat_active",
+            name=SEAT_LEG_ACTIVE_UNIQUE_INDEX,
         )
     except DuplicateKeyError as e:
         first = e.details.get("keyValue") if getattr(e, "details", None) else str(e)[:150]
@@ -5901,14 +5905,17 @@ async def health():
 
 @api.get("/ready")
 async def ready():
-    """Readiness: MongoDB reachable and the seat-uniqueness index present."""
+    """Readiness: MongoDB reachable and the leg-level seat-uniqueness indexes present."""
     try:
         await db.command("ping")
-        idx = await db.seat_locks.index_information()
+        leg_locks = getattr(db, "seat_leg_locks", None)
+        if leg_locks is None:
+            return JSONResponse(status_code=503, content={"status": "unavailable", "reason": "seat_index_missing"})
+        idx = await leg_locks.index_information()
     except Exception as e:  # noqa: BLE001
         logger.error("readiness check failed: %s", e)
         return JSONResponse(status_code=503, content={"status": "unavailable"})
-    if "uniq_bus_instance_seat_active" not in idx:
+    if any(name not in idx for name in REQUIRED_SEAT_LEG_INDEXES):
         return JSONResponse(status_code=503, content={"status": "unavailable", "reason": "seat_index_missing"})
     return {"status": "ready", "time": utcnow().isoformat()}
 

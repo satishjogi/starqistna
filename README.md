@@ -21,7 +21,7 @@ cd ../frontend && yarn install && yarn start
 - Gate-scanner accounts need role `gate_scanner` (admins also work).
 
 ## Health
-- `GET /api/health` – liveness. `GET /api/ready` – MongoDB + seat-index readiness (503 if not).
+- `GET /api/health` – liveness. `GET /api/ready` – MongoDB + leg-level seat-index (`seat_leg_locks`) readiness (503 if not).
 
 ## Tests
 ```
@@ -47,7 +47,7 @@ The booking API integration tests create and drop uniquely named `starqistna_boo
 - **Return URLs** – `origin_url` must exactly match an origin in `CHECKOUT_ALLOWED_ORIGINS` (http/https only; userinfo, paths, queries, protocol-relative and look-alike hosts are refused). Untrusted values fall back to the first trusted origin (`400` if none is configured), so the receipt token is only ever sent to a trusted domain.
 
 ## Recovery runbook
-- **App refuses to start: seat index** – run `python backend/scripts/find_duplicate_seat_locks.py` (`--release-expired`), fix conflicts, restart.
+- **App refuses to start: seat index** – run the read-only `python backend/scripts/check_segment_seat_migration.py`, fix reported conflicts, restart. (`find_duplicate_seat_locks.py` is legacy and refuses to run once `seat_leg_locks` exists.)
 - **Paid booking without ticket** – `POST /api/admin/bookings/{id}/gohub/retry`.
 - **Transaction with `needs_refund_review`** – a second Stripe session was paid for an already-confirmed booking; refund it in the Stripe dashboard.
 - **Stuck payment** – the reconciler re-checks Stripe every minute; check logs for `reconcile:`.
