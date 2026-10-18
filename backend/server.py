@@ -3166,26 +3166,41 @@ async def _finalize_booking(booking_id: str, session_id: str) -> bool:
             schedule = await db.schedules.find_one({"id": booking.get("schedule_id")}, {"_id": 0})
         bus_instance_id = (schedule or {}).get("bus_instance_id") or booking.get("schedule_id")
         lost_seats = []
+        primary_lock_ids: dict[str, str] = {}
         for seat_number in booking_seats:
             result = await db.seat_locks.update_one(
                 {"booking_id": booking_id, "seat_number": seat_number, "status": "locked"},
                 {"$set": {"status": "booked", "expires_at": None}},
             )
             if result.matched_count:
+                primary = await db.seat_locks.find_one(
+                    {"booking_id": booking_id, "seat_number": seat_number, "status": "booked"}
+                )
+                if primary:
+                    primary_lock_ids[seat_number] = primary.get("id") or str(primary.get("_id"))
                 continue
 
             existing = await db.seat_locks.find_one(
                 {"booking_id": booking_id, "seat_number": seat_number, "status": "booked"}
             )
             if existing:
+                primary_lock_ids[seat_number] = existing.get("id") or str(existing.get("_id"))
+                if not existing.get("id"):
+                    await db.seat_locks.update_one(
+                        {"_id": existing["_id"]}, {"$set": {"id": primary_lock_ids[seat_number]}}
+                    )
                 continue
 
             try:
+                primary_lock_id = new_id()
                 await db.seat_locks.insert_one({
-                    "id": new_id(),
+                    "id": primary_lock_id,
                     "schedule_id": booking["schedule_id"],
                     "bus_instance_id": bus_instance_id,
                     "seat_number": seat_number,
+                    "segment_from_terminal_id": booking.get("from_terminal_id"),
+                    "segment_to_terminal_id": booking.get("to_terminal_id"),
+                    "leg_indices": booking.get("leg_indices"),
                     "status": "booked",
                     "owner": booking.get("user_id") or f"guest:{booking.get('contact_email')}",
                     "booking_id": booking_id,
@@ -3193,6 +3208,7 @@ async def _finalize_booking(booking_id: str, session_id: str) -> bool:
                     "created_at": utcnow().isoformat(),
                     "reclaimed_at_finalize": True,
                 })
+                primary_lock_ids[seat_number] = primary_lock_id
                 logger.warning("finalize: re-claimed expired seat %s for booking %s", seat_number, booking_id)
             except DuplicateKeyError:
                 lost_seats.append(seat_number)
@@ -3225,16 +3241,35 @@ async def _finalize_booking(booking_id: str, session_id: str) -> bool:
                             "status": {"$in": ["locked", "booked"]},
                         }, {"_id": 0})
                         if existing_leg:
-                            if existing_leg.get("status") != "booked":
-                                await leg_collection.update_one(
-                                    {"id": existing_leg.get("id")},
-                                    {"$set": {"status": "booked", "expires_at": None}},
-                                )
+                            primary_lock_id = primary_lock_ids.get(seat_number)
+                            leg_updates = {"status": "booked", "expires_at": None}
+                            if primary_lock_id:
+                                leg_updates.update({
+                                    "id": f"{primary_lock_id}:{int(leg_index)}",
+                                    "seat_lock_id": primary_lock_id,
+                                })
+                            await leg_collection.update_one(
+                                {"_id": existing_leg["_id"]} if existing_leg.get("_id")
+                                else {"id": existing_leg.get("id")},
+                                {"$set": leg_updates},
+                            )
                             continue
                         try:
+                            primary_lock_id = primary_lock_ids.get(seat_number)
+                            if not primary_lock_id:
+                                primary = await db.seat_locks.find_one(
+                                    {"booking_id": booking_id, "seat_number": seat_number},
+                                    {"_id": 1, "id": 1},
+                                )
+                                if primary:
+                                    primary_lock_id = primary.get("id") or str(primary.get("_id"))
+                            if not primary_lock_id:
+                                raise RuntimeError(
+                                    f"Could not identify primary seat lock for booking={booking_id} seat={seat_number}"
+                                )
                             await leg_collection.insert_one({
-                                "id": f"recovered:{booking_id}:{seat_number}:{int(leg_index)}",
-                                "seat_lock_id": f"recovered:{booking_id}:{seat_number}",
+                                "id": f"{primary_lock_id}:{int(leg_index)}",
+                                "seat_lock_id": primary_lock_id,
                                 "schedule_id": booking.get("schedule_id"),
                                 "bus_instance_id": bus_id,
                                 "seat_number": seat_number,
