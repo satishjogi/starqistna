@@ -74,10 +74,6 @@ export default function RouteSetupTab() {
       setError("Select at least one operating day.");
       return;
     }
-    if (form.pickupIds.some((id) => form.dropoffIds.includes(id))) {
-      setError("A stop cannot be both a pickup and drop-off for this setup. Remove it from one list.");
-      return;
-    }
     const adultFare = Number(form.fare);
     const childFare = Number(form.childFare);
     if (!Number.isFinite(adultFare) || adultFare < 0 || !Number.isFinite(childFare) || childFare < 0) {
@@ -91,14 +87,15 @@ export default function RouteSetupTab() {
       if (!route) {
         const boarding_stops = form.pickupIds.map((terminal_id, index) => ({ terminal_id, offset_min: index * 60 }));
         const alighting_stops = form.dropoffIds.map((terminal_id, index) => ({ terminal_id, offset_min: (form.pickupIds.length + index) * 60 + 60 }));
-        const pairings = form.pickupIds.flatMap((pickup_id, pi) =>
-          form.dropoffIds.map((dropoff_id, di) => ({
+        const pairings = form.pickupIds.flatMap((pickup_id) =>
+          form.dropoffIds.filter((dropoff_id) => dropoff_id !== pickup_id).map((dropoff_id) => ({
             pickup_id, dropoff_id, adult_fare: adultFare, child_fare: childFare,
             senior_fare: adultFare, oku_fare: adultFare,
             currency: stopById[pickup_id]?.country === "SG" ? "sgd" : "myr",
             cts_route_code: "",
           }))
         );
+        if (!pairings.length) throw new Error("Choose at least one valid pickup-to-drop-off combination using different stops.");
         const response = await api.post("/admin/routes", {
           code: form.code.trim().toUpperCase(),
           name: form.name.trim(),
