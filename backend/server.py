@@ -4118,6 +4118,8 @@ class BulkScheduleBody(BaseModel):
     # Optional link to a Route (same rationale as CreateScheduleBody).
     route_id: Optional[str] = None
     trip_no: Optional[str] = None
+    # Explicit grouping key lets route segments with different stop times share one physical bus.
+    bus_instance_key: Optional[str] = None
 
 
 class BulkDeleteScheduleFilter(BaseModel):
@@ -4653,11 +4655,17 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
                 sched_id = new_id()
                 bus_instance_id = sched_id
                 if body.route_id:
-                    sibling = await db.schedules.find_one({
+                    sibling_filter = {
                         "route_id": body.route_id,
                         "departure_date": cur.isoformat(),
-                        "departure_time": body.departure_time,
-                    }, {"_id": 0, "bus_instance_id": 1})
+                    }
+                    if body.bus_instance_key:
+                        sibling_filter["bus_instance_key"] = body.bus_instance_key
+                    else:
+                        sibling_filter["departure_time"] = body.departure_time
+                    sibling = await db.schedules.find_one(
+                        sibling_filter, {"_id": 0, "bus_instance_id": 1}
+                    )
                     if sibling and sibling.get("bus_instance_id"):
                         bus_instance_id = sibling["bus_instance_id"]
                     else:
@@ -4683,6 +4691,8 @@ async def admin_bulk_create_schedules(body: BulkScheduleBody, request: Request, 
                     doc["route_id"] = body.route_id
                 if body.trip_no:
                     doc["trip_no"] = body.trip_no
+                if body.bus_instance_key:
+                    doc["bus_instance_key"] = body.bus_instance_key
                 await db.schedules.insert_one(doc)
                 created += 1
         cur += timedelta(days=1)
