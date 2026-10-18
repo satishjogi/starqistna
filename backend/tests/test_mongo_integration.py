@@ -168,6 +168,43 @@ def test_same_seat_can_be_reused_on_non_overlapping_route_legs(mdb):
     assert _run(go()) == 2
 
 
+def test_confirmed_booking_without_legacy_lock_is_restored_to_inventory(mdb):
+    async def go():
+        await mdb.routes.insert_one({
+            "id": "route-recovery",
+            "boarding_stops": [{"terminal_id": "A", "offset_min": 0}],
+            "alighting_stops": [{"terminal_id": "B", "offset_min": 100}],
+            "pairings": [{"pickup_id": "A", "dropoff_id": "B", "adult_fare": 10, "child_fare": 5, "currency": "myr"}],
+        })
+        await mdb.schedules.insert_one({
+            "id": "s-recovery", "bus_instance_id": "bus-recovery", "route_id": "route-recovery",
+            "departure_date": "2999-01-01", "departure_time": "08:00",
+            "from_terminal_id": "A", "to_terminal_id": "B", "adult_fare": 10,
+            "child_fare": 5, "currency": "myr", "total_seats": 4, "layout_config": "2+2",
+        })
+        await mdb.bookings.insert_one({
+            "id": "confirmed-without-lock", "reference": "SQRECOVER1",
+            "schedule_id": "s-recovery", "status": "confirmed", "payment_status": "paid",
+            "from_terminal_id": "A", "to_terminal_id": "B", "seats": ["1A"],
+            "passengers": [{"name": "A", "category": "adult", "seat_number": "1A"}],
+            "contact_email": "recovery@example.com", "created_at": "2026-01-01T00:00:00+00:00",
+        })
+        await server._ensure_indexes()
+        migrated = await mdb.seat_leg_locks.find_one({
+            "booking_id": "confirmed-without-lock", "seat_number": "1A",
+            "bus_instance_id": "bus-recovery", "leg_index": 0, "status": "booked",
+        })
+        assert migrated is not None
+        with pytest.raises(HTTPException) as exc:
+            await _lock("s-recovery", ["1A"], pickup="A", dropoff="B")
+        assert exc.value.status_code == 409
+        return await mdb.bookings.find_one({"id": "confirmed-without-lock"})
+
+    booking = _run(go())
+    assert booking["bus_instance_id"] == "bus-recovery"
+    assert booking["leg_indices"] == [0]
+
+
 def test_concurrent_bookings_reusing_one_lock_one_wins(mdb):
     async def go():
         await server._ensure_indexes()
