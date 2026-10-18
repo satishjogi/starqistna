@@ -488,6 +488,8 @@ class CheckoutBody(BaseModel):
 class PromoValidateBody(BaseModel):
     code: str
     schedule_id: str
+    pickup_terminal_id: Optional[str] = None
+    dropoff_terminal_id: Optional[str] = None
     passenger_count: int = Field(ge=1)
     adults: int = Field(ge=0)
     children: int = Field(ge=0)
@@ -1837,9 +1839,12 @@ async def validate_promo(body: PromoValidateBody, request: Request):
         raise HTTPException(404, "Schedule not found")
     if (body.adults + body.children) != body.passenger_count:
         raise HTTPException(400, "Passenger breakdown mismatch")
-    promo = await _find_valid_promo(body.code, sched.get("currency", "myr"))
+    segment = await _resolve_segment_pricing(
+        sched, body.pickup_terminal_id, body.dropoff_terminal_id,
+    )
+    promo = await _find_valid_promo(body.code, segment.get("currency", "myr"))
     fake_pax = [{"category": "adult"}] * body.adults + [{"category": "child"}] * body.children
-    pricing = _calc_pricing(sched, fake_pax, promo)
+    pricing = _calc_pricing(segment, fake_pax, promo)
     return {"valid": True, "promo": pricing["promo"], "pricing": pricing}
 
 
