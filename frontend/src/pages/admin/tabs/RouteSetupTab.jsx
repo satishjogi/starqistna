@@ -16,6 +16,8 @@ export default function RouteSetupTab() {
   const [pairFares, setPairFares] = useState({});
   const [pickupSearch, setPickupSearch] = useState("");
   const [dropoffSearch, setDropoffSearch] = useState("");
+  const [showAllPickupCities, setShowAllPickupCities] = useState(false);
+  const [showAllDropoffCities, setShowAllDropoffCities] = useState(false);
   const [busInstanceKey, setBusInstanceKey] = useState("");
   const [form, setForm] = useState({
     code: "", name: "", origin_city: "", destination_city: "",
@@ -43,8 +45,13 @@ export default function RouteSetupTab() {
     (a.state || "").localeCompare(b.state || "") ||
     (a.city || "").localeCompare(b.city || "") ||
     (a.name || "").localeCompare(b.name || "");
-  const pickups = stops.filter((s) => s.is_pickup !== false).sort(sortStops);
-  const dropoffs = stops.filter((s) => s.is_dropoff !== false).sort(sortStops);
+  const cities = useMemo(() => [...new Set(stops.map((s) => String(s.city || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b)), [stops]);
+  const allPickups = stops.filter((s) => s.is_pickup !== false).sort(sortStops);
+  const allDropoffs = stops.filter((s) => s.is_dropoff !== false).sort(sortStops);
+  const pickups = !showAllPickupCities && form.origin_city
+    ? allPickups.filter((s) => s.city === form.origin_city) : allPickups;
+  const dropoffs = !showAllDropoffCities && form.destination_city
+    ? allDropoffs.filter((s) => s.city === form.destination_city) : allDropoffs;
   const filterStops = (items, query) => {
     const q = query.trim().toLowerCase();
     if (!q) return items;
@@ -248,8 +255,8 @@ export default function RouteSetupTab() {
             <label><span className="te-label">Route code</span><input className="te-input uppercase" required value={form.code} disabled={!!createdRoute} placeholder="KL-SG" onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })} /></label>
             <label className="lg:col-span-2"><span className="te-label">Route name</span><input className="te-input" required value={form.name} disabled={!!createdRoute} placeholder="Kuala Lumpur to Singapore" onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
             <label><span className="te-label">Trip number (optional)</span><input className="te-input uppercase" maxLength={10} value={form.trip_no} placeholder="SQ001" onChange={(e) => setForm({ ...form, trip_no: e.target.value.toUpperCase() })} /></label>
-            <label><span className="te-label">Origin city</span><input className="te-input" required value={form.origin_city} disabled={!!createdRoute} placeholder="Kuala Lumpur" onChange={(e) => setForm({ ...form, origin_city: e.target.value })} /></label>
-            <label><span className="te-label">Destination city</span><input className="te-input" required value={form.destination_city} disabled={!!createdRoute} placeholder="Singapore" onChange={(e) => setForm({ ...form, destination_city: e.target.value })} /></label>
+            <label><span className="te-label">Origin city</span><select className="te-input" required value={form.origin_city} disabled={!!createdRoute || loading} onChange={(e) => { setForm((prev) => ({ ...prev, origin_city: e.target.value })); setShowAllPickupCities(false); }}><option value="">Choose origin city…</option>{cities.map((city) => <option key={city} value={city}>{city}</option>)}</select></label>
+            <label><span className="te-label">Destination city</span><select className="te-input" required value={form.destination_city} disabled={!!createdRoute || loading} onChange={(e) => { setForm((prev) => ({ ...prev, destination_city: e.target.value })); setShowAllDropoffCities(false); }}><option value="">Choose destination city…</option>{cities.map((city) => <option key={city} value={city}>{city}</option>)}</select></label>
           </div>
         </section>
 
@@ -259,6 +266,7 @@ export default function RouteSetupTab() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
             <div>
               <div className="te-overline mb-2">Pickup stops ({form.pickupIds.length})</div>
+              <label className="flex items-center gap-2 text-xs text-zinc-600 mb-2"><input type="checkbox" checked={showAllPickupCities} onChange={(e) => setShowAllPickupCities(e.target.checked)} /> Show all cities (to add intermediate pickups)</label>
               <input
                 type="search"
                 value={pickupSearch}
@@ -275,6 +283,7 @@ export default function RouteSetupTab() {
             </div>
             <div>
               <div className="te-overline mb-2">Drop-off stops ({form.dropoffIds.length})</div>
+              <label className="flex items-center gap-2 text-xs text-zinc-600 mb-2"><input type="checkbox" checked={showAllDropoffCities} onChange={(e) => setShowAllDropoffCities(e.target.checked)} /> Show all cities (to add intermediate drop-offs)</label>
               <input
                 type="search"
                 value={dropoffSearch}
