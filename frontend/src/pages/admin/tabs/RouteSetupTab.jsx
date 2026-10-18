@@ -49,6 +49,7 @@ export default function RouteSetupTab() {
     if (!Number.isFinite(base) || !Number.isFinite(stop)) return NaN;
     return (stop - base + 1440) % 1440;
   };
+  const dayOffsetForStop = (id) => Math.floor((toMinutes(form.departure_time) + offsetForStop(id)) / 1440);
   const validPairCount = form.pickupIds.reduce((n, id) => n + form.dropoffIds.filter((dropId) => dropId !== id && offsetForStop(dropId) > offsetForStop(id)).length, 0);
   const orderedSelectedStops = selectedStopIds.map((id) => ({ id, offset: offsetForStop(id) })).sort((a, b) => a.offset - b.offset);
   const timeValidation = (() => {
@@ -155,6 +156,8 @@ export default function RouteSetupTab() {
             days_of_week: form.days_of_week,
             departure_time: stopTimes[pair.pickup_id] || form.departure_time,
             arrival_time: stopTimes[pair.dropoff_id] || form.arrival_time,
+            departure_day_offset: dayOffsetForStop(pair.pickup_id),
+            arrival_day_offset: dayOffsetForStop(pair.dropoff_id),
             bus_instance_key: scheduleBusKey,
             bus_type: form.bus_type,
             adult_fare: Number(pair.adult_fare ?? adultFare),
